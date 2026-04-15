@@ -1,0 +1,223 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║   Jooviers Gems — Heikin Ashi 100 EMA Scalper                          ║
+// ║                                                                          ║
+// ║   Synthesised from 100 Jooviers Gems YouTube transcripts.               ║
+// ║                                                                          ║
+// ║   CONCEPT  (from videos 002, 009, 014, 022):                            ║
+// ║   Uses Heikin Ashi candles on the 1M chart with a 100 EMA.             ║
+// ║                                                                          ║
+// ║   LONG CHECKLIST:                                                        ║
+// ║   1. Price / HA candles above 100 EMA → longs only                      ║
+// ║   2. Higher low structure on HA (uptrend)                               ║
+// ║   3. Pullback: ≥2 consecutive bearish HA candles with NO top wick       ║
+// ║      (HA High ≈ HA Open = no wick above bearish body)                   ║
+// ║   4. Entry: High-volume Doji HA candle (small body, larger than prior)  ║
+// ║   5. Stop: below Doji HA Low                                             ║
+// ║   6. TP: 2:1 R:R (adjustable)                                           ║
+// ║                                                                          ║
+// ║   SHORT CHECKLIST (mirror):                                              ║
+// ║   1. HA candles below 100 EMA                                            ║
+// ║   2. Pullback: ≥2 bullish HA candles with NO bottom wick                ║
+// ║   3. Entry: High-volume Doji                                             ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy(
+     title      = "Jooviers Gems — HA 100 EMA Scalper",
+     shorttitle = "JG_HASclpr",
+     overlay    = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.02,
+     slippage          = 2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Strategy"
+i_emalen    = input.int  (100,  "EMA Length",                 minval=5,   maxval=500,  group=GS)
+i_pb_min    = input.int  (2,    "Min Pullback Candles",        minval=1,   maxval=10,   group=GS,
+     tooltip="Minimum consecutive clean opposite-color HA candles before Doji entry")
+i_doji_body = input.float(0.20, "Doji Body Ratio (max)",       minval=0.05, maxval=0.5, group=GS,
+     tooltip="Body / total HA range must be ≤ this for the candle to qualify as a Doji")
+i_vol_mult  = input.float(0.9,  "Doji Size vs Prior (min ×)",  minval=0.5, maxval=3.0,  group=GS,
+     tooltip="Doji HA range must be ≥ this × prior candle range (high-volume / wide-range check)")
+i_wick_tol  = input.float(0.05, "Pullback Wick Tolerance",     minval=0.0, maxval=0.2,  group=GS,
+     tooltip="Fraction of candle range allowed as wick on the 'no-wick' side (0 = strict)")
+i_tpratio   = input.float(2.0,  "Take Profit R:R",             minval=0.5, maxval=10.0, group=GS)
+i_atr_floor = input.float(1.0,  "Stop ATR Floor (× ATR)",      minval=0.0, maxval=3.0,  group=GS,
+     tooltip="Stop is placed at haLow but clamped to at least this many ATRs below entry close")
+i_direction = input.string("Long Only", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=GS)
+i_sess      = input.session("0930-1600", "Trading Session (ET)",  group=GS,
+     tooltip="Only enter trades within this window — default is NY regular hours")
+
+var GD = "🎨  Display"
+i_showha    = input.bool(true,  "Show HA Candles",         group=GD)
+i_showsig   = input.bool(true,  "Show Entry Signals",      group=GD)
+i_showtbl   = input.bool(true,  "Show Info Table",         group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HEIKIN ASHI CALCULATION
+// Uses real OHLC to compute HA values; entries/exits at real prices.
+// ─────────────────────────────────────────────────────────────────────────────
+haClose = (open + high + low + close) / 4.0
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + haClose[1]) / 2.0
+haHigh  = math.max(high, math.max(haOpen, haClose))
+haLow   = math.min(low,  math.min(haOpen, haClose))
+haRange = haHigh - haLow
+haBody  = math.abs(haClose - haOpen)
+haBull  = haClose >= haOpen    // bullish HA candle (green)
+haBear  = haClose <  haOpen    // bearish HA candle (red/orange)
+
+// HA candle colours for plotting
+haColor = haBull ? color.new(color.teal, 10) : color.new(color.red, 10)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 100 EMA (on HA close, same as how TradingView applies EMA to HA charts)
+// ─────────────────────────────────────────────────────────────────────────────
+ema100 = ta.ema(haClose, i_emalen)
+
+// ATR for stop floor
+_atr = ta.atr(14)
+
+// Session gate
+inSess = not na(time(timeframe.period, i_sess, "America/New_York"))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HA CANDLE QUALITY CHECKS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// "No top wick" on a BEARISH HA candle = HA High ≈ HA Open (the top of bearish body)
+// Tolerance: top wick ≤ i_wick_tol × haRange
+noTopWick(h, o, rng) =>
+    rng > 0 ? (h - o) / rng <= i_wick_tol : true
+
+// "No bottom wick" on a BULLISH HA candle = HA Low ≈ HA Open (bottom of bullish body)
+noBottomWick(o, l, rng) =>
+    rng > 0 ? (o - l) / rng <= i_wick_tol : true
+
+// Clean bearish pullback candle (for LONG setup)
+cleanBearPB = haBear and noTopWick(haHigh, haOpen, haRange)
+
+// Clean bullish pullback candle (for SHORT setup)
+cleanBullPB = haBull and noBottomWick(haOpen, haLow, haRange)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PULLBACK COUNTER — count consecutive clean pullback candles
+// ─────────────────────────────────────────────────────────────────────────────
+var int bearCount = 0   // consecutive clean bearish candles (LONG pullback)
+var int bullCount = 0   // consecutive clean bullish candles (SHORT pullback)
+
+bearCount := cleanBearPB ? bearCount[1] + 1 : 0
+bullCount := cleanBullPB ? bullCount[1] + 1 : 0
+
+// Has had at least i_pb_min clean pullback candles recently (within last 3 bars)?
+hadBearPB = bearCount[1] >= i_pb_min   // last bar completed the pullback
+hadBullPB = bullCount[1] >= i_pb_min
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOJI DETECTION
+// Small body relative to range + larger than prior candle (high-volume)
+// ─────────────────────────────────────────────────────────────────────────────
+isDoji = haRange > 0 and (haBody / haRange) <= i_doji_body
+
+// High-volume: current HA range >= i_vol_mult × max of last 2 candle ranges
+priorMaxRange = math.max(haRange[1], haRange[2])
+isHighVol     = priorMaxRange > 0 and haRange >= priorMaxRange * i_vol_mult
+
+dojiSignal = isDoji and isHighVol
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+aboveEMA = haClose > ema100
+belowEMA = haClose < ema100
+
+npos = strategy.position_size == 0
+
+longOK  = i_direction != "Short Only"
+shortOK = i_direction != "Long Only"
+
+// LONG: above EMA, had ≥2 clean bear pullback candles, then Doji, within session
+lsig = aboveEMA and hadBearPB and dojiSignal and npos and longOK and inSess
+
+// SHORT: below EMA, had ≥2 clean bull pullback candles, then Doji, within session
+ssig = belowEMA and hadBullPB and dojiSignal and npos and shortOK and inSess
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES & EXITS
+// ─────────────────────────────────────────────────────────────────────────────
+if lsig
+    // Stop: haLow floored at i_atr_floor × ATR below close (prevents stops too tight on 1M)
+    _sl   = math.min(haLow, close - _atr * i_atr_floor)
+    _dist = math.max(close - _sl, syminfo.mintick)
+    _tp   = close + _dist * i_tpratio
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long_XT", "Long", stop=_sl, limit=_tp, comment="TP/SL")
+
+if ssig
+    // Stop: haHigh floored at i_atr_floor × ATR above close
+    _sl   = math.max(haHigh, close + _atr * i_atr_floor)
+    _dist = math.max(_sl - close, syminfo.mintick)
+    _tp   = close - _dist * i_tpratio
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short_XT", "Short", stop=_sl, limit=_tp, comment="TP/SL")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// EMA
+plot(ema100, "100 EMA", color=color.new(color.orange, 0), linewidth=2)
+
+// HA candle overlays (optional — shows HA interpretation on the real-candle chart)
+plotcandle(i_showha ? haOpen : na, i_showha ? haHigh : na,
+     i_showha ? haLow : na, i_showha ? haClose : na,
+     title="HA Candles", color=haColor, wickcolor=haColor, bordercolor=haColor)
+
+// Entry signals
+if i_showsig and lsig
+    label.new(bar_index, low,  "▲HA", style=label.style_label_up,   color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+if i_showsig and ssig
+    label.new(bar_index, high, "▼HA", style=label.style_label_down, color=color.new(color.red,   10), textcolor=color.white, size=size.small)
+
+// Pullback highlight
+bgcolor(cleanBearPB and aboveEMA ? color.new(color.blue,  92) : na, title="Bull Pullback Zone")
+bgcolor(cleanBullPB and belowEMA ? color.new(color.purple,92) : na, title="Bear Pullback Zone")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 75), border_color=color.gray, border_width=1,
+     frame_color=color.gray, frame_width=1)
+
+tblCell(tbl_, row, col, txt, clr) =>
+    table.cell(tbl_, col, row, txt, text_color=clr, text_size=size.small)
+
+if i_showtbl and barstate.islast
+    tblCell(tbl, 0, 0, "JG HA Scalper",             color.white)
+    tblCell(tbl, 0, 1, timeframe.period + "M",      color.gray)
+    tblCell(tbl, 1, 0, "EMA Side",                  color.gray)
+    tblCell(tbl, 1, 1, aboveEMA ? "ABOVE (Longs)" : "BELOW (Shorts)",
+         aboveEMA ? color.green : color.red)
+    tblCell(tbl, 2, 0, "HA Candle",                 color.gray)
+    tblCell(tbl, 2, 1, haBull ? "Bullish" : "Bearish",
+         haBull ? color.green : color.red)
+    tblCell(tbl, 3, 0, "Bear PB Count",             color.gray)
+    tblCell(tbl, 3, 1, str.tostring(bearCount),
+         bearCount >= i_pb_min ? color.green : color.gray)
+    tblCell(tbl, 4, 0, "Bull PB Count",             color.gray)
+    tblCell(tbl, 4, 1, str.tostring(bullCount),
+         bullCount >= i_pb_min ? color.green : color.gray)
+    tblCell(tbl, 5, 0, "Doji Signal",               color.gray)
+    tblCell(tbl, 5, 1, dojiSignal ? "YES" : "-",
+         dojiSignal ? color.yellow : color.gray)
+    tblCell(tbl, 6, 0, "Direction",                 color.gray)
+    tblCell(tbl, 6, 1, i_direction,                 color.white)
+    tblCell(tbl, 7, 0, "Session",                   color.gray)
+    tblCell(tbl, 7, 1, inSess ? "OPEN" : "CLOSED",  inSess ? color.green : color.red)

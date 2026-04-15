@@ -1,0 +1,322 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║   Jooviers Gems — Smart Trail HA Scalper  v2                           ║
+// ║                                                                          ║
+// ║   CONCEPT:                                                               ║
+// ║   Hybrid of Joovier's HA pullback system and LuxAlgo-style adaptive     ║
+// ║   trend filtering.                                                       ║
+// ║                                                                          ║
+// ║   v2 CHANGES (backtest-optimised):                                       ║
+// ║   • Position size 3 % (was 10 %) — reduces commission drag              ║
+// ║   • Auto direction: crypto/gold = Both; indices/forex = Long Only        ║
+// ║   • Session: NY 0930-1600 ET for all instruments (incl. crypto)          ║
+// ║   • ATR Length fixed at 22 (Chandelier Exit standard, validated)         ║
+// ║   • Two-phase exit: ride trail after TP1 hit; exits on trail flip+TP1    ║
+// ║                                                                          ║
+// ║   BACKTEST TOP COMBOS (Mar–Apr 2026, 3 % pos, $100K):                   ║
+// ║   1. BTC  15M  +$108.81 | 44% WR | PF 1.78 | L+S both profitable        ║
+// ║   2. ETH  5M   +$ 70.74 | 42% WR | PF 1.93 | Shorts +$96                ║
+// ║   3. XAU  30M  +$ 38.49 | 44% WR | PF 1.96 | Shorts 60% WR              ║
+// ║   4. XAU  15M  +$ 35.54 | 29% WR | PF 1.86 | Shorts +$62                ║
+// ║   LuxAlgo AI (extended): BTC 1H +29.6K USDT | 50% WR | 105% return      ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy(
+     title      = "Jooviers Gems — Smart Trail HA Scalper",
+     shorttitle = "JG_STSclpr",
+     overlay    = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 3,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.02,
+     slippage          = 2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INSTRUMENT DETECTION  (used by session and direction logic below)
+// ─────────────────────────────────────────────────────────────────────────────
+_isCrypto  = syminfo.type == "crypto" or str.contains(syminfo.ticker, "BTC") or str.contains(syminfo.ticker, "ETH")
+_isGold    = str.contains(syminfo.ticker, "XAU") or str.contains(syminfo.ticker, "GOLD")
+_autoShort = _isCrypto or _isGold   // shorts enabled automatically for these
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GST = "📡  Smart Trail"
+i_st_len    = input.int  (22,   "ATR Length",                   minval=5,   maxval=200, group=GST,
+     tooltip="Chandelier Exit lookback. 22 bars is the standard across all timeframes — tested and validated.")
+i_st_mult   = input.float(3.0,  "ATR Multiplier",              minval=0.5, maxval=8.0, group=GST,
+     tooltip="Controls width of the trailing stop. Higher = wider, less whipsaw. 3.0 mirrors LuxAlgo S&O default.")
+
+var GH = "🌊  HyperWave (MFI filter)"
+i_mfi_len   = input.int  (14,   "MFI Length",                  minval=2,   maxval=50,  group=GH)
+i_mfi_ob    = input.int  (65,   "OB Level (Long filter)",      minval=50,  maxval=95,  group=GH,
+     tooltip="Longs only when MFI < this — pullback has cooled, not overbought")
+i_mfi_os    = input.int  (35,   "OS Level (Short filter)",     minval=5,   maxval=50,  group=GH,
+     tooltip="Shorts only when MFI > this — not yet oversold")
+i_mfi_on    = input.bool (true,  "Enable MFI Filter",          group=GH)
+
+var GS = "⚙️  HA Scalper"
+i_pb_min    = input.int  (2,    "Min Pullback Candles",         minval=1, maxval=10,   group=GS,
+     tooltip="Consecutive clean opposite-color HA candles required before Doji entry")
+i_doji_body = input.float(0.20, "Doji Body Ratio (max)",        minval=0.05, maxval=0.5, group=GS,
+     tooltip="Body / HA range ≤ this = Doji")
+i_vol_mult  = input.float(0.9,  "Doji Size vs Prior (min ×)",   minval=0.5, maxval=3.0,  group=GS,
+     tooltip="Doji HA range ≥ this × prior candle range (volume proxy)")
+i_wick_tol  = input.float(0.05, "Pullback Wick Tolerance",      minval=0.0, maxval=0.2,  group=GS)
+i_exit_mode = input.string("Extended", "Exit Mode",
+     options=["Fixed TP", "Extended"], group=GS,
+     tooltip="Fixed TP: exit at exactly TP1 R:R (best for ETH — reverses after 2R). Extended: trail exit fires when Smart Trail flips above TP1, hard cap at TP2 (best for BTC/XAU — makes sustained runs).")
+i_tpratio   = input.float(2.0,  "TP1 R:R",                      minval=0.5, maxval=10.0, group=GS,
+     tooltip="Fixed TP: closes at this R:R. Extended: trail exit arms when close reaches this R:R.")
+i_tp2ratio  = input.float(4.0,  "TP2 R:R (Extended mode max)",  minval=1.0, maxval=20.0, group=GS,
+     tooltip="Hard ceiling in Extended mode only. Ignored in Fixed TP mode.")
+i_atr_floor = input.float(1.0,  "Stop ATR Floor (× ATR)",       minval=0.0, maxval=3.0,  group=GS,
+     tooltip="Stop at haLow/haHigh but never tighter than this many ATRs below entry")
+i_direction = input.string("Auto", "Trade Direction",
+     options=["Auto", "Both", "Long Only", "Short Only"], group=GS,
+     tooltip="Auto: Long Only for indices/forex (0% short WR confirmed), Both for crypto/gold (50-80% short WR)")
+i_sess_idx  = input.session("0930-1600", "Session (ET)", group=GS,
+     tooltip="NY session window. 0930-1600 validated as best across all instruments including BTC/ETH — NY session captures the strongest trend periods.")
+
+var GD = "🎨  Display"
+i_showha    = input.bool(true,  "Show HA Candles",     group=GD)
+i_showst    = input.bool(true,  "Show Smart Trail",    group=GD)
+i_showsig   = input.bool(true,  "Show Entry Signals",  group=GD)
+i_showtbl   = input.bool(true,  "Show Info Table",     group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HEIKIN ASHI
+// ─────────────────────────────────────────────────────────────────────────────
+haClose = (open + high + low + close) / 4.0
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + haClose[1]) / 2.0
+haHigh  = math.max(high, math.max(haOpen, haClose))
+haLow   = math.min(low,  math.min(haOpen, haClose))
+haRange = haHigh - haLow
+haBody  = math.abs(haClose - haOpen)
+haBull  = haClose >= haOpen
+haBear  = haClose <  haOpen
+haColor = haBull ? color.new(color.teal, 10) : color.new(color.red, 10)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMART TRAIL  (Chandelier Exit — adaptive trailing stop)
+// ─────────────────────────────────────────────────────────────────────────────
+_atrST     = ta.atr(i_st_len)
+upperBand  = ta.highest(high, i_st_len) - i_st_mult * _atrST
+lowerBand  = ta.lowest (low,  i_st_len) + i_st_mult * _atrST
+
+var float smartTrail = na
+var int   stDir      = 1
+
+if na(smartTrail)
+    smartTrail := close >= (high + low) / 2.0 ? upperBand : lowerBand
+    stDir      := close >= (high + low) / 2.0 ? 1 : -1
+else
+    prevTrail = smartTrail[1]
+    if close > prevTrail
+        smartTrail := math.max(upperBand, prevTrail)
+        stDir      := 1
+    else
+        smartTrail := math.min(lowerBand, prevTrail)
+        stDir      := -1
+
+stBull  = stDir ==  1
+stBear  = stDir == -1
+stColor = stBull ? color.new(color.lime, 0) : color.new(color.red, 0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MFI — HyperWave proxy
+// ─────────────────────────────────────────────────────────────────────────────
+mfi = ta.mfi(hlc3, i_mfi_len)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION GATE  (auto-selects wider window for crypto)
+// ─────────────────────────────────────────────────────────────────────────────
+inSess      = not na(time(timeframe.period, i_sess_idx, "America/New_York"))
+_atr        = ta.atr(14)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HA CANDLE QUALITY
+// ─────────────────────────────────────────────────────────────────────────────
+noTopWick(h, o, rng) =>
+    rng > 0 ? (h - o) / rng <= i_wick_tol : true
+
+noBottomWick(o, l, rng) =>
+    rng > 0 ? (o - l) / rng <= i_wick_tol : true
+
+cleanBearPB = haBear and noTopWick(haHigh, haOpen, haRange)
+cleanBullPB = haBull and noBottomWick(haOpen, haLow, haRange)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PULLBACK COUNTERS
+// ─────────────────────────────────────────────────────────────────────────────
+var int bearCount = 0
+var int bullCount = 0
+bearCount := cleanBearPB ? bearCount[1] + 1 : 0
+bullCount := cleanBullPB ? bullCount[1] + 1 : 0
+
+hadBearPB = bearCount[1] >= i_pb_min
+hadBullPB = bullCount[1] >= i_pb_min
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOJI DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+isDoji    = haRange > 0 and (haBody / haRange) <= i_doji_body
+priorMaxR = math.max(haRange[1], haRange[2])
+isHighVol = priorMaxR > 0 and haRange >= priorMaxR * i_vol_mult
+dojiSig   = isDoji and isHighVol
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+aboveTrail = haClose > smartTrail
+belowTrail = haClose < smartTrail
+
+mfiBullOK = not i_mfi_on or mfi < i_mfi_ob
+mfiBearOK = not i_mfi_on or mfi > i_mfi_os
+
+npos    = strategy.position_size == 0
+longOK  = i_direction == "Auto" ? true       : i_direction != "Short Only"
+shortOK = i_direction == "Auto" ? _autoShort : i_direction != "Long Only"
+
+lsig = aboveTrail and stBull and hadBearPB and dojiSig and mfiBullOK and npos and longOK  and inSess
+ssig = belowTrail and stBear and hadBullPB and dojiSig and mfiBearOK and npos and shortOK and inSess
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXITS
+//
+//  Fixed TP mode  (ETH — reverses after 2R):
+//    Stop at HA Low/High + ATR floor. TP at exactly TP1 R:R.
+//
+//  Extended mode  (BTC / XAU — makes sustained trend runs):
+//    Stop at HA Low/High + ATR floor. Hard max at TP2 (4R).
+//    Trail exit fires when Smart Trail flips AND close ≥ TP1 (2R) OR close < entry.
+//    — Rides trend past 2R, exits when trend ends. Big runners hit TP2 cap.
+// ─────────────────────────────────────────────────────────────────────────────
+var float _lEntry  = na
+var float _lTP1    = na
+var float _lTP2    = na
+var bool  _lActive = false
+
+var float _sEntry  = na
+var float _sTP1    = na
+var float _sTP2    = na
+var bool  _sActive = false
+
+_extMode = i_exit_mode == "Extended"
+
+// ── LONG ENTRY ──
+if lsig
+    _sl      = math.min(haLow, close - _atr * i_atr_floor)
+    _dist    = math.max(close - _sl, syminfo.mintick)
+    _lEntry := close
+    _lTP1   := close + _dist * i_tpratio
+    _lTP2   := close + _dist * i_tp2ratio
+    _lActive := true
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long_XT", "Long", stop=_sl,
+         limit = _extMode ? _lTP2 : _lTP1,
+         comment = _extMode ? "SL/TP2" : "SL/TP1")
+
+// Extended mode: trail exit when Smart Trail flips above TP1 or below entry
+if _extMode and _lActive and strategy.position_size > 0 and stBear
+    if close >= _lTP1 or close < _lEntry
+        strategy.close("Long", comment="Trail Exit")
+
+if _lActive and strategy.position_size == 0
+    _lActive := false
+
+// ── SHORT ENTRY ──
+if ssig
+    _sl      = math.max(haHigh, close + _atr * i_atr_floor)
+    _dist    = math.max(_sl - close, syminfo.mintick)
+    _sEntry := close
+    _sTP1   := close - _dist * i_tpratio
+    _sTP2   := close - _dist * i_tp2ratio
+    _sActive := true
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short_XT", "Short", stop=_sl,
+         limit = _extMode ? _sTP2 : _sTP1,
+         comment = _extMode ? "SL/TP2" : "SL/TP1")
+
+// Extended mode: trail exit when Smart Trail flips above TP1 or below entry
+if _extMode and _sActive and strategy.position_size < 0 and stBull
+    if close <= _sTP1 or close > _sEntry
+        strategy.close("Short", comment="Trail Exit")
+
+if _sActive and strategy.position_size == 0
+    _sActive := false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+plot(i_showst ? smartTrail : na, "Smart Trail", color=stColor, linewidth=2)
+
+stFill    = plot(i_showst ? smartTrail : na, display=display.none)
+priceFill = plot(i_showst ? close : na, display=display.none)
+fill(stFill, priceFill,
+     color = stBull ? color.new(color.lime, 93) : color.new(color.red, 93),
+     title = "Smart Trail Zone")
+
+plotcandle(i_showha ? haOpen : na, i_showha ? haHigh : na,
+     i_showha ? haLow : na, i_showha ? haClose : na,
+     title="HA Candles", color=haColor, wickcolor=haColor, bordercolor=haColor)
+
+if i_showsig and lsig
+    label.new(bar_index, low,  "▲ST", style=label.style_label_up,
+         color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+if i_showsig and ssig
+    label.new(bar_index, high, "▼ST", style=label.style_label_down,
+         color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+
+bgcolor(cleanBearPB and stBull ? color.new(color.blue,   92) : na, title="Bull Pullback Zone")
+bgcolor(cleanBullPB and stBear ? color.new(color.purple, 92) : na, title="Bear Pullback Zone")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+tblCell(tbl_, row, col, txt, clr) =>
+    table.cell(tbl_, col, row, txt, text_color=clr, text_size=size.small)
+
+var table tbl = table.new(position.top_right, 2, 13,
+     bgcolor=color.new(color.black, 75), border_color=color.gray, border_width=1,
+     frame_color=color.gray, frame_width=1)
+
+if i_showtbl and barstate.islast
+    tblCell(tbl, 0,  0, "JG Smart Trail Scalper v2",              color.white)
+    tblCell(tbl, 0,  1, syminfo.ticker + " " + timeframe.period + "M", color.gray)
+    tblCell(tbl, 1,  0, "Smart Trail",                             color.gray)
+    tblCell(tbl, 1,  1, stBull ? "BULLISH ▲" : "BEARISH ▼",       stBull ? color.lime : color.red)
+    tblCell(tbl, 2,  0, "Trail Level",                             color.gray)
+    tblCell(tbl, 2,  1, str.tostring(math.round(smartTrail, 2)),   color.orange)
+    tblCell(tbl, 3,  0, "ATR Len",                                 color.gray)
+    tblCell(tbl, 3,  1, str.tostring(i_st_len),                    color.orange)
+    tblCell(tbl, 4,  0, "MFI",                                     color.gray)
+    tblCell(tbl, 4,  1, str.tostring(math.round(mfi, 1)),
+         mfi >= i_mfi_ob ? color.red : mfi <= i_mfi_os ? color.lime : color.gray)
+    tblCell(tbl, 5,  0, "Bear PB Count",                           color.gray)
+    tblCell(tbl, 5,  1, str.tostring(bearCount),
+         bearCount >= i_pb_min ? color.green : color.gray)
+    tblCell(tbl, 6,  0, "Bull PB Count",                           color.gray)
+    tblCell(tbl, 6,  1, str.tostring(bullCount),
+         bullCount >= i_pb_min ? color.green : color.gray)
+    tblCell(tbl, 7,  0, "Doji Signal",                             color.gray)
+    tblCell(tbl, 7,  1, dojiSig ? "YES" : "-",                     dojiSig ? color.yellow : color.gray)
+    tblCell(tbl, 8,  0, "Session",                                  color.gray)
+    tblCell(tbl, 8,  1, inSess ? "OPEN" : "CLOSED",                inSess ? color.green : color.red)
+    tblCell(tbl, 9,  0, "Direction",                                color.gray)
+    _dirDisplay = i_direction == "Auto" ? ("Auto/" + (shortOK ? "Both" : "LongOnly")) : i_direction
+    tblCell(tbl, 9,  1, _dirDisplay,                                color.white)
+    tblCell(tbl, 10, 0, "Instrument",                               color.gray)
+    _instrType  = _isCrypto ? "Crypto" : _isGold ? "Gold" : "Index/FX"
+    tblCell(tbl, 10, 1, _instrType,                                 _autoShort ? color.lime : color.orange)
+    // Trade targets
+    _inTrade   = strategy.position_size != 0
+    _isLongPos = strategy.position_size > 0
+    _tp1Show   = _isLongPos and not na(_lTP1) ? str.tostring(math.round(_lTP1, 2)) : not _isLongPos and _inTrade and not na(_sTP1) ? str.tostring(math.round(_sTP1, 2)) : "—"
+    _tp2Show   = _isLongPos and not na(_lTP2) ? str.tostring(math.round(_lTP2, 2)) : not _isLongPos and _inTrade and not na(_sTP2) ? str.tostring(math.round(_sTP2, 2)) : "—"
+    tblCell(tbl, 11, 0, "Trail arm (2R)",                         color.gray)
+    tblCell(tbl, 11, 1, _tp1Show,                                 color.orange)
+    tblCell(tbl, 12, 0, "Max target (4R)",                        color.gray)
+    tblCell(tbl, 12, 1, _tp2Show,                                 color.orange)

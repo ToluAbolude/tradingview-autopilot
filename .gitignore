@@ -4,3 +4,13 @@ scripts/current.pine
 temp_*
 *.log
 discovery-log.json
+
+# Auto-generated cloud config (machine-specific paths)
+scripts/cloud/cloud_config.sh
+
+# Scheduler runtime logs
+data/trade_log/scheduler_logs/
+
+# Local session state files
+data/trade_log/session_last.txt
+data/trade_log/verify_last.txt

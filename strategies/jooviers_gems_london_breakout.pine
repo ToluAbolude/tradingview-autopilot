@@ -1,0 +1,200 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║   Jooviers Gems — 5M London Session Breakout Strategy                  ║
+// ║                                                                          ║
+// ║   Synthesised from 100 Jooviers Gems YouTube transcripts.               ║
+// ║                                                                          ║
+// ║   CONCEPT:                                                               ║
+// ║   Mark the London session high & low (3:00–8:00 AM ET).                 ║
+// ║   After 8:00 AM ET, enter when a 5M candle BODY closes outside the      ║
+// ║   range. One trade per day, 2:1 R:R take-profit. No entries after       ║
+// ║   11:00 AM ET (volume dies). Designed for NQ/ES futures but works       ║
+// ║   on any liquid instrument.                                              ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy(
+     title      = "Jooviers Gems — London Session Breakout",
+     shorttitle = "JG_LndnBO",
+     overlay    = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.02,
+     slippage          = 2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Strategy"
+// Use input.session for valid HHMM-HHMM session strings (TradingView format)
+i_lon_sess   = input.session("0300-0800", "London Range Window (ET)",
+     group=GS, tooltip="Time the London high/low is built: default 03:00–08:00 ET")
+i_entry_sess = input.session("0800-1100", "Entry Window (ET)",
+     group=GS, tooltip="Breakouts only valid in this window: default 08:00–11:00 ET")
+i_tpratio    = input.float(2.0, "Take Profit R:R",             minval=0.5, maxval=10.0, group=GS)
+i_direction  = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=GS)
+i_body_pct   = input.float(0.3, "Body/Range Min for Breakout Candle",
+     minval=0.1, maxval=1.0, group=GS,
+     tooltip="Candle body must be at least this fraction of its total range (filters out doji breakouts)")
+i_startdate  = input.time(timestamp("2022-01-01"), "Backtest Start Date", group=GS)
+
+var GD = "🎨  Display"
+i_showbox    = input.bool(true, "Show London Session Box", group=GD)
+i_showsig    = input.bool(true, "Show Entry Signals",      group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION TIME HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+inLondon   = not na(time(timeframe.period, i_lon_sess,   "America/New_York"))
+inEntryWin = not na(time(timeframe.period, i_entry_sess, "America/New_York"))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LONDON RANGE TRACKING (reset each day)
+// ─────────────────────────────────────────────────────────────────────────────
+var float lonHigh  = na
+var float lonLow   = na
+var bool  rangeSet = false   // true once London session closes for the day
+
+// New day → reset
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    lonHigh  := na
+    lonLow   := na
+    rangeSet := false
+
+// During London session: track H/L
+if inLondon
+    lonHigh := na(lonHigh) ? high : math.max(lonHigh, high)
+    lonLow  := na(lonLow)  ? low  : math.min(lonLow,  low)
+
+// Once we exit London session, lock the range
+if not inLondon and not na(lonHigh) and not rangeSet
+    rangeSet := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE-TRADE-PER-DAY GATE
+// ─────────────────────────────────────────────────────────────────────────────
+var bool tradedToday = false
+if isNewDay
+    tradedToday := false
+
+npos = strategy.position_size == 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BREAKOUT SIGNALS
+// Direction: current 5M candle body must close outside the London range.
+// Body = open→close (we check the close and open, not wicks).
+// "Body closes above" = close > lonHigh AND open < close (bullish body above)
+// We also require the body to be at least i_body_pct of the total range.
+// ─────────────────────────────────────────────────────────────────────────────
+candleRange  = high - low
+bodySize     = math.abs(close - open)
+bodyFraction = candleRange > 0 ? bodySize / candleRange : 0.0
+
+// Candle body must be solid (not a doji) to count as a real breakout
+solidBody    = bodyFraction >= i_body_pct
+
+// Conditions
+afterStart = time >= i_startdate
+
+boBull = afterStart and rangeSet and inEntryWin and not tradedToday and npos and solidBody and
+     close > lonHigh and open < close    // bullish body closes above London high
+
+boBear = afterStart and rangeSet and inEntryWin and not tradedToday and npos and solidBody and
+     close < lonLow and open > close     // bearish body closes below London low
+
+longOK  = i_direction != "Short Only"
+shortOK = i_direction != "Long Only"
+
+lsig = boBull and longOK
+ssig = boBear and shortOK
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES & EXITS
+// ─────────────────────────────────────────────────────────────────────────────
+if lsig
+    _sl   = low                                      // just below breakout candle
+    _dist = math.max(close - _sl, syminfo.mintick)
+    _tp   = close + _dist * i_tpratio
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long_XT", "Long", stop=_sl, limit=_tp, comment="TP/SL")
+    tradedToday := true
+
+if ssig
+    _sl   = high                                     // just above breakout candle
+    _dist = math.max(_sl - close, syminfo.mintick)
+    _tp   = close - _dist * i_tpratio
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short_XT", "Short", stop=_sl, limit=_tp, comment="TP/SL")
+    tradedToday := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+// London range box — use xloc.bar_time to avoid "bar too far" runtime error
+var box   lonBox     = na
+var int   _boxLeftT  = na   // timestamp of first London bar each day
+var float _boxTop    = na
+var float _boxBot    = na
+
+if isNewDay
+    _boxLeftT := na
+
+if inLondon
+    if na(_boxLeftT)
+        _boxLeftT := time
+    _boxTop := lonHigh
+    _boxBot := lonLow
+
+// Redraw box on each bar (delete old, create new with time coords)
+if i_showbox and not na(_boxLeftT) and not na(_boxTop)
+    box.delete(lonBox)
+    // right = current time + 1 bar forward
+    int _tfMs = timeframe.in_seconds() * 1000
+    lonBox := box.new(
+         left   = _boxLeftT,
+         right  = time + _tfMs,
+         top    = _boxTop,
+         bottom = _boxBot,
+         xloc          = xloc.bar_time,
+         bgcolor       = color.new(color.orange, 88),
+         border_color  = color.new(color.orange, 40),
+         border_width  = 1)
+
+// Signal labels
+if i_showsig and lsig
+    label.new(bar_index, low,  "▲BO", style=label.style_label_up,   color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+if i_showsig and ssig
+    label.new(bar_index, high, "▼BO", style=label.style_label_down, color=color.new(color.red,   10), textcolor=color.white, size=size.small)
+
+// London range lines on the chart (always visible)
+hline_h = plot(rangeSet or inLondon ? lonHigh : na, "London High",
+     color=color.new(color.orange, 20), linewidth=1, style=plot.style_stepline)
+hline_l = plot(rangeSet or inLondon ? lonLow  : na, "London Low",
+     color=color.new(color.orange, 20), linewidth=1, style=plot.style_stepline)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE (top-right)
+// ─────────────────────────────────────────────────────────────────────────────
+tblCell(tbl_, row, col, txt, clr) =>
+    table.cell(tbl_, col, row, txt, text_color=clr, text_size=size.small)
+
+var table tbl = table.new(position.top_right, 2, 6,
+     bgcolor=color.new(color.black, 75), border_color=color.gray, border_width=1,
+     frame_color=color.gray, frame_width=1)
+
+if barstate.islast
+    tblCell(tbl, 0, 0, "JG London Breakout",    color.white)
+    tblCell(tbl, 0, 1, timeframe.period + "M",  color.gray)
+    tblCell(tbl, 1, 0, "London Range",          color.gray)
+    tblCell(tbl, 1, 1, not na(lonHigh) ? str.tostring(math.round(lonHigh, 2)) + " / " + str.tostring(math.round(lonLow, 2)) : "Building...", color.orange)
+    tblCell(tbl, 2, 0, "Range Set",             color.gray)
+    tblCell(tbl, 2, 1, rangeSet ? "YES" : "NO", rangeSet ? color.green : color.red)
+    tblCell(tbl, 3, 0, "Traded Today",          color.gray)
+    tblCell(tbl, 3, 1, tradedToday ? "YES" : "NO", tradedToday ? color.orange : color.green)
+    tblCell(tbl, 4, 0, "Entry Window",          color.gray)
+    tblCell(tbl, 4, 1, inEntryWin ? "OPEN" : "CLOSED", inEntryWin ? color.green : color.red)
+    tblCell(tbl, 5, 0, "Direction",             color.gray)
+    tblCell(tbl, 5, 1, i_direction,             color.white)

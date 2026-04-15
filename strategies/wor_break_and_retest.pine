@@ -1,0 +1,252 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  WORDS OF RIZDOM — VINCENT DESIANO BREAK & RETEST STRATEGY               ║
+// ║  Synthesised from transcript #031 (2025-05-29)                           ║
+// ║                                                                           ║
+// ║  CORE RULES (from interview):                                             ║
+// ║  • Identify a MAJOR key level (swing high/low, prior range boundary)     ║
+// ║  • Wait for a DECISIVE CLOSE through the level — NOT a wick              ║
+// ║  • Do NOT chase the initial break move                                   ║
+// ║  • Wait for price to PULL BACK and RETEST the broken level               ║
+// ║  • Enter at the retest: level now acts as support (was resistance) or    ║
+// ║    resistance (was support)                                               ║
+// ║  • Stop: beyond the key level (on the other side of the retest)          ║
+// ║  • Target: next significant level — positive R:R required                ║
+// ║  • Win rate: 50%+ — edge comes from good R:R, not high win rate          ║
+// ║  • Timeframe: Daily/4H for level identification, 1H/15M for entry        ║
+// ║  • Patience is the edge — skip trades that don't give a clean retest     ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("WOR — Vincent Desiano Break & Retest",
+     shorttitle        = "WOR_BnR",
+     overlay           = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 2.0,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2,
+     pyramiding        = 0,
+     calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Strategy"
+i_pivot_len    = input.int  (20,  "Key Level Pivot Lookback",          minval=5, maxval=100,  group=GS,
+     tooltip="Bars on each side to confirm a swing high/low as a major key level")
+i_break_atr    = input.float(0.1, "Min Break Distance × ATR (avoid wicks)", minval=0.0, maxval=2.0, group=GS,
+     tooltip="Close must be this many ATRs beyond the level to count as a valid break")
+i_retest_atr   = input.float(1.0, "Retest Proximity × ATR",            minval=0.1, maxval=5.0, group=GS,
+     tooltip="Price is considered to be 'at the level' when within this many ATRs")
+i_retest_bars  = input.int  (30,  "Max Bars to Wait for Retest",        minval=5, maxval=200,  group=GS,
+     tooltip="If no retest within this many bars, the setup expires")
+i_stop_buf     = input.float(0.5, "Stop Buffer × ATR beyond level",     minval=0.0, maxval=3.0, group=GS)
+i_rr           = input.float(2.0, "Take Profit R:R",                    minval=0.5, maxval=10.0, group=GS)
+i_direction    = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=GS)
+
+var GF = "✅  A+ Checklist Filters"
+i_htf_filter   = input.bool(true,  "HTF Trend Filter (Daily EMA 50)",   group=GF)
+i_htf_ema      = input.int (50,    "HTF EMA Length",  minval=10, maxval=200, group=GF)
+i_sess_filter  = input.bool(false, "London/NY Session Only",             group=GF)
+
+var GD = "🎨  Display"
+i_show_levels  = input.bool(true, "Show Key Levels",      group=GD)
+i_show_signals = input.bool(true, "Show Entry Signals",   group=GD)
+i_show_table   = input.bool(true, "Show Setup Table",     group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+_atr = ta.atr(14)
+
+// Higher timeframe bias
+_d_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+_d_ema   = request.security(syminfo.tickerid, "D", ta.ema(close, i_htf_ema), lookahead=barmerge.lookahead_off)
+_htf_bull = _d_close > _d_ema
+_htf_bear = _d_close < _d_ema
+
+// Session filter — London (02:00-11:00 ET) + New York (08:00-17:00 ET)
+_in_sess = not na(time(timeframe.period, "0200-1700", "America/New_York"))
+f_session = not i_sess_filter or _in_sess
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KEY LEVEL DETECTION — swing highs and lows
+// ─────────────────────────────────────────────────────────────────────────────
+_phigh = ta.pivothigh(high, i_pivot_len, i_pivot_len)
+_plow  = ta.pivotlow (low,  i_pivot_len, i_pivot_len)
+
+// Track the most recent confirmed swing high and low
+var float level_high = na
+var float level_low  = na
+var int   level_high_bar = na
+var int   level_low_bar  = na
+
+if not na(_phigh)
+    level_high     := _phigh
+    level_high_bar := bar_index - i_pivot_len   // pivot confirmed i_pivot_len bars ago
+
+if not na(_plow)
+    level_low     := _plow
+    level_low_bar := bar_index - i_pivot_len
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BREAK & RETEST STATE MACHINE
+// State 0 = watching for break
+// State 1 = broke above → waiting for retest from above (bullish setup)
+// State 2 = broke below → waiting for retest from below (bearish setup)
+// ─────────────────────────────────────────────────────────────────────────────
+var int   state        = 0
+var float broken_level = na
+var int   break_bar    = na
+var bool  setup_long   = false
+var bool  setup_short  = false
+
+// Reset expired setups
+if state != 0 and not na(break_bar)
+    if (bar_index - break_bar) > i_retest_bars
+        state        := 0
+        broken_level := na
+        break_bar    := na
+
+// ── BULLISH BREAK: close decisively above swing high ─────────────────────────
+bull_break = state == 0 and not na(level_high) and
+     close > level_high + i_break_atr * _atr and
+     (i_direction == "Both" or i_direction == "Long Only") and
+     (not i_htf_filter or _htf_bull)
+
+if bull_break
+    state        := 1
+    broken_level := level_high
+    break_bar    := bar_index
+
+// ── BEARISH BREAK: close decisively below swing low ──────────────────────────
+bear_break = state == 0 and not na(level_low) and
+     close < level_low - i_break_atr * _atr and
+     (i_direction == "Both" or i_direction == "Short Only") and
+     (not i_htf_filter or _htf_bear)
+
+if bear_break
+    state        := 2
+    broken_level := level_low
+    break_bar    := bar_index
+
+// ── RETEST DETECTION ─────────────────────────────────────────────────────────
+// Bullish: price pulls back to the broken level and a bullish bar confirms
+bull_retest = state == 1 and not na(broken_level) and f_session and
+     low  <= broken_level + i_retest_atr * _atr and
+     low  >= broken_level - i_retest_atr * _atr and
+     close > open  // bullish confirmation candle
+
+// Bearish: price pulls back up to the broken level and a bearish bar confirms
+bear_retest = state == 2 and not na(broken_level) and f_session and
+     high >= broken_level - i_retest_atr * _atr and
+     high <= broken_level + i_retest_atr * _atr and
+     close < open  // bearish confirmation candle
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES
+// ─────────────────────────────────────────────────────────────────────────────
+if bull_retest
+    float stop_price   = broken_level - i_stop_buf * _atr
+    float stop_dist    = close - stop_price
+    float target_price = close + i_rr * stop_dist
+    strategy.entry("Long_BnR", strategy.long, comment="BnR Long")
+    strategy.exit ("Long_BnR_X", from_entry="Long_BnR",
+         stop   = stop_price,
+         limit  = target_price)
+    state        := 0
+    broken_level := na
+
+if bear_retest
+    float stop_price   = broken_level + i_stop_buf * _atr
+    float stop_dist    = stop_price - close
+    float target_price = close - i_rr * stop_dist
+    strategy.entry("Short_BnR", strategy.short, comment="BnR Short")
+    strategy.exit ("Short_BnR_X", from_entry="Short_BnR",
+         stop  = stop_price,
+         limit = target_price)
+    state        := 0
+    broken_level := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Draw key level lines
+if i_show_levels
+    if not na(_phigh)
+        line.new(bar_index - i_pivot_len, _phigh, bar_index, _phigh,
+             color=color.new(color.red, 30), width=1, style=line.style_dashed)
+    if not na(_plow)
+        line.new(bar_index - i_pivot_len, _plow, bar_index, _plow,
+             color=color.new(color.green, 30), width=1, style=line.style_dashed)
+
+// Broken level horizontal line while waiting for retest
+var line retest_line = na
+if state == 1 or state == 2
+    if na(retest_line)
+        retest_line := line.new(bar_index, broken_level, bar_index + 1, broken_level,
+             color= state == 1 ? color.new(color.lime, 0) : color.new(color.red, 0),
+             width=2, extend=extend.right)
+    else
+        line.set_y1(retest_line, broken_level)
+        line.set_y2(retest_line, broken_level)
+        line.set_color(retest_line, state == 1 ? color.new(color.lime, 0) : color.new(color.red, 0))
+else
+    if not na(retest_line)
+        line.delete(retest_line)
+        retest_line := na
+
+// Entry signals
+if i_show_signals
+    if bull_retest
+        label.new(bar_index, low - _atr, "BnR\nLong",
+             color=color.new(color.lime, 20), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+    if bear_retest
+        label.new(bar_index, high + _atr, "BnR\nShort",
+             color=color.new(color.red, 20), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+
+// Break signals
+if i_show_signals
+    if bull_break
+        label.new(bar_index, high + _atr * 0.5, "BREAK ↑",
+             color=color.new(color.blue, 40), textcolor=color.white,
+             style=label.style_label_down, size=size.tiny)
+    if bear_break
+        label.new(bar_index, low - _atr * 0.5, "BREAK ↓",
+             color=color.new(color.orange, 40), textcolor=color.white,
+             style=label.style_label_up, size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+if i_show_table and barstate.islast
+    var table t = table.new(position.top_right, 2, 7,
+         bgcolor=color.new(color.black, 70), border_color=color.gray, border_width=1)
+
+    table.cell(t, 0, 0, "WOR Break & Retest", text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+    table.cell(t, 1, 0, "Vincent Desiano",    text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+
+    table.cell(t, 0, 1, "State",    text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 1, state == 0 ? "Watching" : state == 1 ? "Awaiting Bull Retest" : "Awaiting Bear Retest",
+         text_color= state == 0 ? color.gray : state == 1 ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(t, 0, 2, "Broken Level", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 2, na(broken_level) ? "—" : str.tostring(broken_level, "#.##"),
+         text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "HTF Bias",  text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 3, _htf_bull ? "Bullish" : "Bearish",
+         text_color= _htf_bull ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(t, 0, 4, "ATR(14)",   text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(_atr, "#.##"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "Pivot Lookback", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(i_pivot_len), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 6, "R:R Target", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(i_rr, "#.#") + "R", text_color=color.white, text_size=size.tiny)

@@ -1,0 +1,453 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  TORI TRADES — 4H TRENDLINE BREAK STRATEGY                               ║
+// ║  Synthesised from 100 YouTube video transcripts                          ║
+// ║                                                                           ║
+// ║  CORE RULES (from transcripts):                                           ║
+// ║  • Top-down: Monthly → Weekly → Daily → 4H entry timeframe               ║
+// ║  • Resistance TL = connects lower highs (downward slope)                  ║
+// ║  • Support TL    = connects higher lows  (upward slope)                   ║
+// ║  • Minimum 3 touchpoints, minimum 1 week of data                         ║
+// ║  • LONG  entry: close breaks ABOVE resistance TL                          ║
+// ║  • SHORT entry: close breaks BELOW support TL                             ║
+// ║  • Safety Line = opposing TL (locked at entry, never adjusted mid-trade) ║
+// ║  • Exit when price closes through Safety Line                             ║
+// ║  • Stop = Safety Line ± ATR buffer                                        ║
+// ║                                                                           ║
+// ║  Optimised for: NQ1! and CL1! (NASDAQ 100 & Crude Oil futures) @ 4H     ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("Tori Trades — 4H Trendline Break v2",
+     shorttitle        = "ToriT_v2",
+     overlay           = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 2.0,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2,
+     pyramiding        = 0,
+     calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Strategy"
+i_plen     = input.int  (5,   "Pivot Lookback (bars)",           minval=3,  maxval=30,  group=GS)
+i_minbars  = input.int  (10,  "Min Bars on TL  (10 ≈ 1.7d @4H)", minval=5,  maxval=200, group=GS)
+i_mintch   = input.int  (2,   "Min Touch Points",                minval=2,  maxval=6,   group=GS)
+i_tol      = input.float(0.5,  "Touch Tolerance × ATR14",         minval=0.1, maxval=2.0, group=GS)
+i_slbuf    = input.float(0.5,  "Safety Line Buffer × ATR14",      minval=0.1, maxval=5.0, group=GS)
+i_tpratio  = input.float(2.0,  "Take Profit R:R (× stop distance)", minval=0.5, maxval=10.0, group=GS, tooltip="Exit when profit = this × initial stop distance. 0 = no TP (safety line only)")
+i_trend    = input.string("Long Only", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=GS)
+
+// ── A+ Setup Checklist Filters ────────────────────────────────────────────────
+// These replicate the discretionary checks Tori runs before every trade.
+// All enabled filters must pass for a signal to fire.
+var GF = "✅  A+ Checklist Filters"
+i_ny_filter    = input.bool(false, "NY Session Only  (08:00–17:00 ET)",      group=GF)
+i_htf_filter   = input.bool(true,  "Higher TF Bias   (Daily EMA50)",          group=GF)
+i_trend_filter = input.bool(false, "Trending Market  (ADX > threshold)",      group=GF)
+i_adx_min      = input.int (20,    "ADX Min Threshold",  minval=10, maxval=50, group=GF)
+i_htf_ema_len  = input.int (50,    "HTF EMA Length",     minval=10, maxval=200, group=GF)
+
+var GD = "🎨  Display"
+i_showtl   = input.bool(true, "Show Trendlines",    group=GD)
+i_showsl   = input.bool(true, "Show Safety Line",   group=GD)
+i_showsig  = input.bool(true, "Show Entry Signals", group=GD)
+i_checklist= input.bool(true, "Show Checklist Table",group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+_atr = ta.atr(14)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A+ CHECKLIST FILTERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 1. NEW YORK SESSION  ─────────────────────────────────────────────────────────
+// True when this bar falls inside 09:30–16:00 New York time.
+// On 4H bars, use a wider window so the 08:00 and 09:00 ET bars are included.
+// (Pine checks bar OPEN time, so "0930" misses the 09:00 bar that covers the NY open.)
+_ny_sess     = not na(time(timeframe.period, "0800-1700", "America/New_York"))
+f_ny_session = not i_ny_filter or _ny_sess
+
+// 2. HIGHER TIMEFRAME BIAS  ────────────────────────────────────────────────────
+// Long bias : Daily close > Daily EMA(50)  (daily is sufficient; weekly moves too slowly)
+// Short bias: Daily close < Daily EMA(50)
+_d_close = request.security(syminfo.tickerid, "D", close,              lookahead=barmerge.lookahead_off)
+_d_ema   = request.security(syminfo.tickerid, "D", ta.ema(close, i_htf_ema_len), lookahead=barmerge.lookahead_off)
+
+f_htf_long  = not i_htf_filter or (_d_close > _d_ema)
+f_htf_short = not i_htf_filter or (_d_close < _d_ema)
+
+// 3. TRENDING MARKET (not consolidating)  ─────────────────────────────────────
+// ADX > threshold = trending; avoids whipsaw entries during ranging periods
+[_diPlus, _diMinus, _adx] = ta.dmi(14, 14)
+f_trending = not i_trend_filter or _adx > i_adx_min
+
+// DI direction (used in checklist display only — not gating entries to avoid over-filtering)
+f_di_long  = _diPlus  > _diMinus   // buyers in control
+f_di_short = _diMinus > _diPlus    // sellers in control
+
+// Combined directional filters (DI is informational, not a gate)
+f_long_ok  = f_ny_session and f_htf_long  and f_trending
+f_short_ok = f_ny_session and f_htf_short and f_trending
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PIVOT DETECTION & STORAGE
+// ─────────────────────────────────────────────────────────────────────────────
+_ph = ta.pivothigh(high, i_plen, i_plen)
+_pl = ta.pivotlow (low,  i_plen, i_plen)
+
+int MAXPIV = 12
+
+var int[]   phb = array.new_int  (0)
+var float[] php = array.new_float(0)
+var int[]   plb = array.new_int  (0)
+var float[] plp = array.new_float(0)
+
+if not na(_ph)
+    array.push(phb, bar_index - i_plen)
+    array.push(php, _ph)
+    if array.size(phb) > MAXPIV
+        array.shift(phb)
+        array.shift(php)
+
+if not na(_pl)
+    array.push(plb, bar_index - i_plen)
+    array.push(plp, _pl)
+    if array.size(plb) > MAXPIV
+        array.shift(plb)
+        array.shift(plp)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRENDLINE MATH
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Price of trendline at a given bar
+tlAt(int x1, float y1, int x2, float y2, int x) =>
+    x1 == x2 ? y1 : y1 + (y2 - y1) / float(x2 - x1) * float(x - x1)
+
+// Count pivot touches for resistance trendline (uses phb/php)
+touchCntR(int x1, float y1, int x2, float y2) =>
+    int c = 0
+    for i = 0 to array.size(phb) - 1
+        int   px = array.get(phb, i)
+        float py = array.get(php, i)
+        if math.abs(py - tlAt(x1, y1, x2, y2, px)) <= _atr * i_tol
+            c += 1
+    c
+
+// Count pivot touches for support trendline (uses plb/plp)
+touchCntS(int x1, float y1, int x2, float y2) =>
+    int c = 0
+    for i = 0 to array.size(plb) - 1
+        int   px = array.get(plb, i)
+        float py = array.get(plp, i)
+        if math.abs(py - tlAt(x1, y1, x2, y2, px)) <= _atr * i_tol
+            c += 1
+    c
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIND BEST RESISTANCE TRENDLINE (lower highs = downward slope)
+// ─────────────────────────────────────────────────────────────────────────────
+findResTL() =>
+    int n = array.size(phb)
+    bool  fv = false
+    int   fx1 = 0
+    float fy1 = 0.0
+    int   fx2 = 0
+    float fy2 = 0.0
+    if n >= 2
+        for j = n - 1 to 1
+            int   _x2 = array.get(phb, j)
+            float _y2 = array.get(php, j)
+            int   _x1 = array.get(phb, j - 1)
+            float _y1 = array.get(php, j - 1)
+            if _y2 < _y1 and (_x2 - _x1) >= i_minbars
+                if touchCntR(_x1, _y1, _x2, _y2) >= i_mintch and not fv
+                    fv  := true
+                    fx1 := _x1
+                    fy1 := _y1
+                    fx2 := _x2
+                    fy2 := _y2
+    [fv, fx1, fy1, fx2, fy2]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIND BEST SUPPORT TRENDLINE (higher lows = upward slope)
+// ─────────────────────────────────────────────────────────────────────────────
+findSupTL() =>
+    int n = array.size(plb)
+    bool  fv = false
+    int   fx1 = 0
+    float fy1 = 0.0
+    int   fx2 = 0
+    float fy2 = 0.0
+    if n >= 2
+        for j = n - 1 to 1
+            int   _x2 = array.get(plb, j)
+            float _y2 = array.get(plp, j)
+            int   _x1 = array.get(plb, j - 1)
+            float _y1 = array.get(plp, j - 1)
+            if _y2 > _y1 and (_x2 - _x1) >= i_minbars
+                if touchCntS(_x1, _y1, _x2, _y2) >= i_mintch and not fv
+                    fv  := true
+                    fx1 := _x1
+                    fy1 := _y1
+                    fx2 := _x2
+                    fy2 := _y2
+    [fv, fx1, fy1, fx2, fy2]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVALUATE TRENDLINES THIS BAR
+// ─────────────────────────────────────────────────────────────────────────────
+[rv, rx1, ry1, rx2, ry2] = findResTL()
+[sv, sx1, sy1, sx2, sy2] = findSupTL()
+
+rnow = rv ? tlAt(rx1, ry1, rx2, ry2, bar_index) : na  // resistance value
+snow = sv ? tlAt(sx1, sy1, sx2, sy2, bar_index) : na  // support value
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAME-TRENDLINE CROSSOVER CHECK
+// Only fire entry when the SAME trendline was below/above price on prev bar
+// Prevents false signals from trendline recalculation events
+// ─────────────────────────────────────────────────────────────────────────────
+var int   prev_rx1  = 0
+var int   prev_rx2  = 0
+var float prev_rnow = na
+var int   prev_sx1  = 0
+var int   prev_sx2  = 0
+var float prev_snow = na
+
+// True if resistance TL anchor points unchanged from last bar
+res_stable = rv and rx1 == prev_rx1 and rx2 == prev_rx2
+sup_stable = sv and sx1 == prev_sx1 and sx2 == prev_sx2
+
+// Update prev state at end of bar
+prev_rx1  := rv ? rx1 : prev_rx1
+prev_rx2  := rv ? rx2 : prev_rx2
+prev_rnow := rv ? rnow : na
+prev_sx1  := sv ? sx1 : prev_sx1
+prev_sx2  := sv ? sx2 : prev_sx2
+prev_snow := sv ? snow : na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// Long:  close crosses ABOVE resistance TL + support TL exists (safety line)
+// Short: close crosses BELOW support TL   + resistance TL exists (safety line)
+// ─────────────────────────────────────────────────────────────────────────────
+longOK  = i_trend != "Short Only"
+shortOK = i_trend != "Long Only"
+
+// TL break conditions (price + same-trendline crossover)
+_tl_long  = rv and sv and res_stable and not na(rnow) and not na(prev_rnow) and close > rnow and close[1] < prev_rnow
+_tl_short = rv and sv and sup_stable and not na(snow) and not na(prev_snow) and close < snow and close[1] > prev_snow
+
+// Full A+ signal: TL break + ALL checklist filters
+lsig = longOK  and _tl_long  and f_long_ok
+ssig = shortOK and _tl_short and f_short_ok
+
+npos = strategy.position_size == 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAFETY LINE STATE
+// Stop is locked at entry and only trailed in the profitable direction.
+// Safety line TL is capped so it never exceeds current price (prevents
+// the trendline extrapolation bug that triggers stops immediately).
+// ─────────────────────────────────────────────────────────────────────────────
+var bool  inL         = false
+var bool  inS         = false
+var int   slx1        = 0
+var float sly1        = 0.0
+var int   slx2        = 0
+var float sly2        = 0.0
+var float running_stp = na   // never-widen trailing stop
+
+// Raw projected safety line value this bar (locked to entry-time trendline)
+slnow_raw = (inL or inS) ? tlAt(slx1, sly1, slx2, sly2, bar_index) : na
+
+// The safety line is the raw projected support/resistance TL value.
+// Only cap prevents the safety line from CROSSING price (which would
+// indicate Tori's exit condition has already been met on the open).
+float slnow = na
+if inL
+    // Longs: safety line (support TL) should be below close; cap at close - 1 tick
+    slnow := na(slnow_raw) ? close - _atr * 2 : math.min(slnow_raw, close - syminfo.mintick)
+else if inS
+    // Shorts: safety line (resistance TL) should be above close
+    slnow := na(slnow_raw) ? close + _atr * 2 : math.max(slnow_raw, close + syminfo.mintick)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES
+// ─────────────────────────────────────────────────────────────────────────────
+if lsig and npos
+    inL  := true
+    inS  := false
+    slx1 := sx1
+    sly1 := sy1   // safety line = support TL (below price) locked at entry
+    slx2 := sx2
+    sly2 := sy2
+    // Stop: support TL projected value minus buffer, clamped so it is
+    //   (a) always below close (prevents immediate stop if TL extrapolates above price)
+    //   (b) never more than 3 ATR from close (prevents unreachable TP on wide TLs)
+    _sl_raw     = tlAt(sx1, sy1, sx2, sy2, bar_index) - _atr * i_slbuf
+    _sl_init    = math.max(math.min(_sl_raw, close - _atr * 0.5), close - _atr * 3.0)
+    _stop_dist  = close - _sl_init
+    _tp_long    = close + _stop_dist * i_tpratio
+    running_stp := _sl_init
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long_SL", "Long", stop=_sl_init, limit=_tp_long, comment="TP/SL")
+
+if ssig and npos
+    inS  := true
+    inL  := false
+    slx1 := rx1
+    sly1 := ry1   // safety line = resistance TL (above price) locked at entry
+    slx2 := rx2
+    sly2 := ry2
+    _sl_raw     = tlAt(rx1, ry1, rx2, ry2, bar_index) + _atr * i_slbuf
+    _sl_init    = math.min(math.max(_sl_raw, close + _atr * 0.5), close + _atr * 3.0)
+    _stop_dist  = _sl_init - close
+    _tp_short   = close - _stop_dist * i_tpratio
+    running_stp := _sl_init
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short_SL", "Short", stop=_sl_init, limit=_tp_short, comment="TP/SL")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXED STOP — no trailing; stop is locked at initial support/resistance TL value.
+// This matches Tori's rule: stay in trade until price crosses the safety line.
+// ─────────────────────────────────────────────────────────────────────────────
+// (No trailing block — the strategy.exit placed at entry remains active)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESET when flat
+// ─────────────────────────────────────────────────────────────────────────────
+if strategy.position_size == 0
+    inL         := false
+    inS         := false
+    running_stp := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+var line rln  = na
+var line sln  = na
+var line slln = na
+
+if barstate.islast
+    if i_showtl
+        line.delete(rln)
+        line.delete(sln)
+        int ext = bar_index + 30
+        if rv
+            rln := line.new(rx1, ry1, ext, tlAt(rx1, ry1, rx2, ry2, ext),
+                 color=color.new(#ff4444, 0), width=2, style=line.style_solid)
+        if sv
+            sln := line.new(sx1, sy1, ext, tlAt(sx1, sy1, sx2, sy2, ext),
+                 color=color.new(#00cc44, 0), width=2, style=line.style_solid)
+
+    if i_showsl and (inL or inS)
+        line.delete(slln)
+        int ext2 = bar_index + 30
+        slln := line.new(slx1, sly1, ext2, tlAt(slx1, sly1, slx2, sly2, ext2),
+             color=color.new(#ff9900, 0), width=2, style=line.style_dashed)
+
+// Signals
+plotshape(i_showsig and lsig and npos, "▲ Long",
+     shape.triangleup,   location.belowbar, color.lime, size=size.normal)
+plotshape(i_showsig and ssig and npos, "▼ Short",
+     shape.triangledown, location.abovebar, color.red,  size=size.normal)
+
+// Trendline value overlays (faint, for visual reference)
+plot(rnow,  "Resistance TL", color=color.new(color.red,   55), linewidth=1)
+plot(snow,  "Support TL",    color=color.new(color.green, 55), linewidth=1)
+plot(slnow, "Safety Line",   color=color.new(color.orange,25), linewidth=2, style=plot.style_circles)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A+ CHECKLIST TABLE
+// Visible on every bar so you can see exactly which conditions pass/fail
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: returns [symbol, color] for pass/fail
+chk(bool pass) =>
+    [pass ? "✔" : "✗", pass ? color.lime : color.red]
+
+var table ck = table.new(position.top_left, 3, 12,
+     bgcolor=color.new(#0d0d1a, 60), border_width=1,
+     border_color=color.new(color.gray, 70))
+
+if barstate.islast and i_checklist
+    // Header
+    table.cell(ck, 0, 0, "TORI TRADES  A+ CHECKLIST", text_color=color.white,
+         text_size=size.small, bgcolor=color.new(#1a1a2e, 0))
+    table.cell(ck, 0, 1, "Filter",   text_color=color.silver, text_size=size.small, bgcolor=color.new(#111122,0))
+    table.cell(ck, 1, 1, "LONG",     text_color=color.lime,   text_size=size.small, bgcolor=color.new(#111122,0))
+    table.cell(ck, 2, 1, "SHORT",    text_color=color.red,    text_size=size.small, bgcolor=color.new(#111122,0))
+
+    // 1. Resistance / Support TL detected
+    [rl, rc] = chk(rv)
+    [sl2, sc2] = chk(sv)
+    table.cell(ck, 0, 2, "Resistance TL",  text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 2, rl, text_color=rc, text_size=size.small)
+    table.cell(ck, 2, 2, sl2, text_color=sc2, text_size=size.small)
+
+    // 2. Stable TL (same trendline as prev bar)
+    [rl3, rc3] = chk(res_stable)
+    [sl3, sc3] = chk(sup_stable)
+    table.cell(ck, 0, 3, "Stable TL (no shift)", text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 3, rl3, text_color=rc3, text_size=size.small)
+    table.cell(ck, 2, 3, sl3, text_color=sc3, text_size=size.small)
+
+    // 3. TL Break (price crossed this bar)
+    [rb4, rc4] = chk(_tl_long)
+    [sb4, sc4] = chk(_tl_short)
+    table.cell(ck, 0, 4, "TL Break (this bar)",  text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 4, rb4, text_color=rc4, text_size=size.small)
+    table.cell(ck, 2, 4, sb4, text_color=sc4, text_size=size.small)
+
+    // 4. NY Session
+    [ns5, nc5] = chk(f_ny_session)
+    table.cell(ck, 0, 5, "NY Session (08:00–17:00)", text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 5, ns5, text_color=nc5, text_size=size.small)
+    table.cell(ck, 2, 5, ns5, text_color=nc5, text_size=size.small)
+
+    // 5. Higher TF Bias
+    [hl6, hc6] = chk(f_htf_long)
+    [hs6, hsc6] = chk(f_htf_short)
+    _d_bias = _d_close > _d_ema ? "D▲" : "D▼"
+    table.cell(ck, 0, 6, "HTF Bias  " + _d_bias + "  (Daily EMA" + str.tostring(i_htf_ema_len) + ")", text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 6, hl6, text_color=hc6, text_size=size.small)
+    table.cell(ck, 2, 6, hs6, text_color=hsc6, text_size=size.small)
+
+    // 6. ADX trending
+    [at7, ac7] = chk(f_trending)
+    table.cell(ck, 0, 7, "Trending  ADX=" + str.tostring(math.round(_adx, 1)), text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 7, at7, text_color=ac7, text_size=size.small)
+    table.cell(ck, 2, 7, at7, text_color=ac7, text_size=size.small)
+
+    // 7. DI direction
+    [dl8, dc8] = chk(f_di_long)
+    [ds8, dsc8] = chk(f_di_short)
+    table.cell(ck, 0, 8, "DI Bias  +DI=" + str.tostring(math.round(_diPlus,1)) + "  -DI=" + str.tostring(math.round(_diMinus,1)),
+         text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 8, dl8, text_color=dc8, text_size=size.small)
+    table.cell(ck, 2, 8, ds8, text_color=dsc8, text_size=size.small)
+
+    // 8. SIGNAL READY
+    [ls9, lsc9] = chk(lsig)
+    [ss9, ssc9] = chk(ssig)
+    table.cell(ck, 0, 9, "━━━━━ SIGNAL READY ━━━━━", text_color=color.white, text_size=size.small, bgcolor=color.new(#111122,0))
+    table.cell(ck, 1, 9, lsig ? "▲ LONG" : "—", text_color=lsig ? color.lime : color.gray, text_size=size.small, bgcolor=color.new(#111122,0))
+    table.cell(ck, 2, 9, ssig ? "▼ SHORT": "—", text_color=ssig ? color.red  : color.gray, text_size=size.small, bgcolor=color.new(#111122,0))
+
+    // 9. Position + P&L
+    _pos = strategy.position_size
+    _pos_str = _pos > 0 ? "LONG ▲" : _pos < 0 ? "SHORT ▼" : "FLAT"
+    _pos_col = _pos > 0 ? color.lime : _pos < 0 ? color.red : color.gray
+    table.cell(ck, 0, 10, "Position", text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 10, _pos_str, text_color=_pos_col, text_size=size.small)
+    _pnl = strategy.netprofit
+    table.cell(ck, 0, 11, "Net P&L", text_color=color.silver, text_size=size.small)
+    table.cell(ck, 1, 11, str.tostring(math.round(_pnl, 0), "#,###") + " USD",
+         text_color=_pnl >= 0 ? color.lime : color.red, text_size=size.small)

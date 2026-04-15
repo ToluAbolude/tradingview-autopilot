@@ -1,0 +1,245 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  WORDS OF RIZDOM — OKALA NQ FIXED-STOP SCALPER                           ║
+// ║  Synthesised from transcript #003 (2026-03-26) — $5M+ Prop Firm Trader  ║
+// ║                                                                           ║
+// ║  CORE RULES (from interview):                                             ║
+// ║  • NQ (NASDAQ) futures ONLY — most liquid, cleanest price action         ║
+// ║  • FIXED 10-point stop loss — always. No ATR, no variable stops.         ║
+// ║  • 70-78% win rate target — size down when in a streak                  ║
+// ║  • Profit targets: 15–40 points (quick exits, scalp mentality)          ║
+// ║  • REVERSION based: fade over-extended intraday moves                    ║
+// ║  • Price action ONLY — no indicators, read the tape                      ║
+// ║  • Risk management: fixed daily loss limit, stop trading after 2 losses  ║
+// ║  • Session: active during NY morning (09:30-12:00 ET)                   ║
+// ║  • Key insight: let winners run to 40pts, cut losers at exactly 10pts   ║
+// ║                                                                           ║
+// ║  NOTE: For NQ futures, 1 point = $20/contract. 10-point SL = $200/ct   ║
+// ║  Best on NQ1! or MNQ1! 1-minute or 5-minute chart                       ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("WOR — OkalaNQ Fixed-Stop Scalper",
+     shorttitle        = "WOR_Okala",
+     overlay           = true,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     initial_capital   = 50000,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 4.0,
+     slippage          = 2,
+     pyramiding        = 0,
+     calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Strategy"
+i_stop_pts     = input.float(10.0,  "Fixed Stop Loss (points)",        minval=2, maxval=50,   group=GS,
+     tooltip="OkalaNQ's fixed 10-point stop. 1 point = $20 on NQ futures.")
+i_tp1_pts      = input.float(15.0,  "TP1 (points) — partial 50%",     minval=5, maxval=100,  group=GS)
+i_tp2_pts      = input.float(40.0,  "TP2 (points) — full exit",       minval=10, maxval=200, group=GS)
+i_ext_lookback = input.int  (10,    "Over-extension Lookback (bars)",  minval=3, maxval=50,   group=GS,
+     tooltip="Bars to measure if price has moved unusually far in one direction")
+i_ext_mult     = input.float(2.0,   "Extension Factor × EMA Distance", minval=1.0, maxval=5.0, group=GS,
+     tooltip="Price is 'over-extended' when it's this many times beyond the EMA band")
+i_fast_ema     = input.int  (9,     "Fast EMA",                        minval=3, maxval=20,   group=GS)
+i_slow_ema     = input.int  (21,    "Slow EMA",                        minval=10, maxval=50,  group=GS)
+i_direction    = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=GS)
+
+var GF = "✅  Risk Management"
+i_max_trades   = input.int  (6,     "Max Trades Per Day",              minval=1, maxval=20,   group=GF)
+i_max_losses   = input.int  (2,     "Stop Trading After N Losses",     minval=1, maxval=5,    group=GF,
+     tooltip="OkalaNQ rule: stop for the day after 2 consecutive losses")
+i_sess_filter  = input.bool(true,  "NY Session Only (09:30-12:00 ET)", group=GF)
+i_vol_filter   = input.bool(true,  "Volume Spike Filter",              group=GF)
+
+var GD = "🎨  Display"
+i_show_emas    = input.bool(true, "Show EMAs",           group=GD)
+i_show_signals = input.bool(true, "Show Signals",        group=GD)
+i_show_table   = input.bool(true, "Show Stats Table",    group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+_fast = ta.ema(close, i_fast_ema)
+_slow = ta.ema(close, i_slow_ema)
+_atr  = ta.atr(14)
+
+// Volume spike: volume is above its 20-bar average
+_vol_avg   = ta.sma(volume, 20)
+_vol_spike = not i_vol_filter or volume > _vol_avg * 1.2
+
+// ─── OVER-EXTENSION DETECTION ────────────────────────────────────────────────
+// OkalaNQ fades moves that have gone "too far too fast"
+// We define over-extension as: price has moved significantly beyond the slow EMA
+// in one direction, AND the fast move happened in few bars (momentum exhaustion)
+
+// Distance from slow EMA, normalised
+_ema_dist   = close - _slow
+_ema_dist_n = _ema_dist / _slow * 100   // as % of EMA
+
+// Max and min of the EMA distance over lookback — establishes "normal" range
+_dist_max = ta.highest(_ema_dist, i_ext_lookback)
+_dist_min = ta.lowest (_ema_dist, i_ext_lookback)
+
+// Average true range of EMA distance over the lookback
+_normal_band = ta.atr(i_ext_lookback) * i_ext_mult
+
+// Over-extended UP: close well above slow EMA, reversal bar forming
+_over_bull = _ema_dist >  _normal_band and close < open   // price above EMA, bearish bar = exhaustion
+_over_bear = _ema_dist < -_normal_band and close > open   // price below EMA, bullish bar = exhaustion
+
+// ─── REVERSION CONFIRMATION ──────────────────────────────────────────────────
+// Need at least one confirming bar before entry
+// Bullish reversion: prior bar was bearish extreme, current closes above its open
+_rev_long  = _over_bear and                           // below EMA, exhaustion signal
+             _fast > _fast[2] and                     // fast EMA flattening/turning up
+             low > low[1] and                         // higher low forming
+             _vol_spike
+
+// Bearish reversion: prior bar was bullish extreme, current closes below its open
+_rev_short = _over_bull and                           // above EMA, exhaustion signal
+             _fast < _fast[2] and                     // fast EMA flattening/turning down
+             high < high[1] and                       // lower high forming
+             _vol_spike
+
+// ─── SESSION FILTER ──────────────────────────────────────────────────────────
+_in_ny = not na(time(timeframe.period, "0930-1200", "America/New_York"))
+f_session = not i_sess_filter or _in_ny
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAILY TRADE COUNTER & CONSECUTIVE LOSS GUARD
+// ─────────────────────────────────────────────────────────────────────────────
+var int  _day_trades    = 0
+var int  _consec_losses = 0
+var int  _last_day      = na
+var bool _paused        = false
+
+// Reset counters at start of new day
+_today = dayofweek
+if na(_last_day) or _today != _last_day
+    _day_trades    := 0
+    _consec_losses := 0
+    _paused        := false
+    _last_day      := _today
+
+// Track consecutive losses from strategy results
+if strategy.closedtrades > 0
+    _last_pl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if _last_pl < 0
+        _consec_losses += 1
+    else
+        _consec_losses := 0
+
+if _consec_losses >= i_max_losses
+    _paused := true
+
+// Can we take a trade?
+f_can_trade = f_session and not _paused and
+              _day_trades < i_max_trades and
+              strategy.position_size == 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES & EXITS
+// ─────────────────────────────────────────────────────────────────────────────
+f_long  = f_can_trade and _rev_long  and (i_direction == "Both" or i_direction == "Long Only")
+f_short = f_can_trade and _rev_short and (i_direction == "Both" or i_direction == "Short Only")
+
+if f_long
+    float sl = close - i_stop_pts
+    float t1 = close + i_tp1_pts
+    float t2 = close + i_tp2_pts
+    strategy.entry("Long_NQ", strategy.long, comment="NQ Scalp L")
+    strategy.exit ("Long_NQ_TP1", from_entry="Long_NQ",
+         limit=t1, qty_percent=50, comment="TP1")
+    strategy.exit ("Long_NQ_TP2", from_entry="Long_NQ",
+         limit=t2, stop=sl, comment="TP2/SL")
+    _day_trades += 1
+
+if f_short
+    float sl = close + i_stop_pts
+    float t1 = close - i_tp1_pts
+    float t2 = close - i_tp2_pts
+    strategy.entry("Short_NQ", strategy.short, comment="NQ Scalp S")
+    strategy.exit ("Short_NQ_TP1", from_entry="Short_NQ",
+         limit=t1, qty_percent=50, comment="TP1")
+    strategy.exit ("Short_NQ_TP2", from_entry="Short_NQ",
+         limit=t2, stop=sl, comment="TP2/SL")
+    _day_trades += 1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+plot(i_show_emas ? _fast : na, "Fast EMA", color=color.new(color.yellow, 0), linewidth=1)
+plot(i_show_emas ? _slow : na, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
+
+// Over-extension shading
+bgcolor(_over_bull ? color.new(color.red,   88) : na, title="Over-extended Up")
+bgcolor(_over_bear ? color.new(color.green, 88) : na, title="Over-extended Down")
+
+if i_show_signals
+    if f_long
+        label.new(bar_index, low - 5, "NQ\nLong\n10pt SL",
+             color=color.new(color.lime, 20), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+    if f_short
+        label.new(bar_index, high + 5, "NQ\nShort\n10pt SL",
+             color=color.new(color.red, 20), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+
+    // Pause signal (bgcolor must be at global scope in Pine v6)
+bgcolor((_paused and f_session) ? color.new(color.purple, 90) : na, title="Trading Paused (loss limit)")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+if i_show_table and barstate.islast
+    int    _total  = strategy.closedtrades
+    int    _wins   = 0
+    float  _pnl    = strategy.netprofit
+
+    // Count winning trades
+    for i = 0 to _total - 1
+        if strategy.closedtrades.profit(i) > 0
+            _wins += 1
+
+    float _wr = _total > 0 ? (_wins / _total) * 100 : 0.0
+
+    var table t = table.new(position.top_right, 2, 9,
+         bgcolor=color.new(color.black, 70), border_color=color.gray, border_width=1)
+
+    table.cell(t, 0, 0, "WOR OkalaNQ Scalper", text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+    table.cell(t, 1, 0, "Fixed 10-pt Stop",    text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+
+    table.cell(t, 0, 1, "Win Rate",      text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 1, str.tostring(_wr, "#.#") + "%",
+         text_color= _wr >= 70 ? color.lime : _wr >= 50 ? color.yellow : color.red,
+         text_size=size.tiny)
+
+    table.cell(t, 0, 2, "Total Trades",  text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 2, str.tostring(_total),      text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "Net P&L",       text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 3, "$" + str.tostring(_pnl, "#"),
+         text_color= _pnl > 0 ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(t, 0, 4, "Today Trades",  text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(_day_trades) + " / " + str.tostring(i_max_trades),
+         text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "Consec Losses", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(_consec_losses),
+         text_color= _consec_losses >= i_max_losses ? color.red : color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 6, "Status",        text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 6, _paused ? "PAUSED" : f_session ? "ACTIVE" : "OFF-SESS",
+         text_color= _paused ? color.red : f_session ? color.lime : color.gray,
+         text_size=size.tiny)
+
+    table.cell(t, 0, 7, "Fixed SL (pts)", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(i_stop_pts, "#") + " pts",
+         text_color=color.orange, text_size=size.tiny)
+
+    table.cell(t, 0, 8, "EMAs",          text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 8, str.tostring(i_fast_ema) + "/" + str.tostring(i_slow_ema),
+         text_color=color.white, text_size=size.tiny)

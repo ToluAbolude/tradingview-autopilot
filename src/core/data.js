@@ -141,7 +141,12 @@ export async function getStrategyResults() {
         var strat = null;
         for (var i = 0; i < sources.length; i++) {
           var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
+          if (!s.metaInfo) continue;
+          try {
+            var meta = s.metaInfo();
+            var isStrat = meta.is_price_study === false || (meta.shortId && meta.shortId.indexOf('StrategyScript') === 0);
+            if (isStrat && (s.reportData || s.performance)) { strat = s; break; }
+          } catch(e) {}
         }
         if (!strat) return {metrics: {}, source: 'internal_api', error: 'No strategy found on chart. Add a strategy indicator first.'};
         var metrics = {};
@@ -174,7 +179,12 @@ export async function getTrades({ max_trades } = {}) {
         var strat = null;
         for (var i = 0; i < sources.length; i++) {
           var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.ordersData || s.reportData)) { strat = s; break; }
+          if (!s.metaInfo) continue;
+          try {
+            var meta = s.metaInfo();
+            var isStrat = meta.is_price_study === false || (meta.shortId && meta.shortId.indexOf('StrategyScript') === 0);
+            if (isStrat && (s.ordersData || s.reportData)) { strat = s; break; }
+          } catch(e) {}
         }
         if (!strat) return {trades: [], source: 'internal_api', error: 'No strategy found on chart.'};
         var orders = null;

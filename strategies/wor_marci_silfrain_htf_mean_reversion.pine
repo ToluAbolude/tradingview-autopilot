@@ -1,0 +1,233 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  WORDS OF RIZDOM — MARCI SILFRAIN HTF MEAN REVERSION                     ║
+// ║  Synthesised from transcript #009 (2026-01-15) — Futures World #2 Trader ║
+// ║                                                                           ║
+// ║  CORE RULES (from interview):                                             ║
+// ║  • Top-down analysis: Monthly → Weekly → Daily trendlines, wedges, S/R   ║
+// ║  • Only trade NQ (NASDAQ) and ES (S&P) futures — most liquid              ║
+// ║  • Wait for HTF trend context: are we in a bull or bear structure?        ║
+// ║  • Intraday: wait for price to reach an EXTREME (top or bottom of range) ║
+// ║  • Enter AGAINST the intraday move (mean reversion) WITH HTF trend       ║
+// ║  • Static stop loss — NEVER trail, never move stop                       ║
+// ║  • Add to winners once trade moves in your favour                        ║
+// ║  • ~50% win rate — edge comes from disciplined R:R and adds              ║
+// ║  • Session: New York primary; look for opening range extremes             ║
+// ║  • Key insight: institutions revert price to value — fade exhaustion     ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("WOR — Marci Silfrain HTF Mean Reversion",
+     shorttitle        = "WOR_Marci",
+     overlay           = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 1.5,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2,
+     pyramiding        = 1,
+     calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Strategy"
+i_htf_ema_w    = input.int  (20,   "Weekly EMA for Trend",              minval=5, maxval=50, group=GS)
+i_htf_ema_d    = input.int  (50,   "Daily EMA for Trend",               minval=10, maxval=200, group=GS)
+i_range_bars   = input.int  (20,   "Intraday Range Lookback (bars)",    minval=5, maxval=100, group=GS,
+     tooltip="Defines the intraday range whose top/bottom are the extremes to fade")
+i_extreme_atr  = input.float(1.5,  "Extreme = range edge ± × ATR14",   minval=0.5, maxval=5.0, group=GS,
+     tooltip="Price must touch the range edge within this many ATRs to be an extreme")
+i_rsi_len      = input.int  (14,   "RSI Length",                        minval=5, maxval=30,  group=GS)
+i_rsi_ob       = input.int  (65,   "RSI Overbought (extreme high)",     minval=60, maxval=90,  group=GS)
+i_rsi_os       = input.int  (35,   "RSI Oversold (extreme low)",        minval=10, maxval=40,  group=GS)
+i_stop_atr     = input.float(1.5,  "Stop × ATR14 (STATIC — never move)", minval=0.5, maxval=5.0, group=GS)
+i_tp1_atr      = input.float(2.0,  "TP1 × ATR14 (partial exit 50%)",   minval=0.5, maxval=10.0, group=GS)
+i_tp2_atr      = input.float(4.0,  "TP2 × ATR14 (full exit)",          minval=1.0, maxval=20.0, group=GS)
+i_add_atr      = input.float(1.0,  "Add to Winner after × ATR move",   minval=0.5, maxval=5.0, group=GS)
+i_direction    = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=GS)
+
+var GF = "✅  Checklist Filters"
+i_weekly_filter = input.bool(true,  "Weekly Trend Filter (Weekly EMA)",  group=GF)
+i_daily_filter  = input.bool(true,  "Daily Trend Filter (Daily EMA)",    group=GF)
+i_rsi_filter    = input.bool(true,  "RSI Extreme Filter",                group=GF)
+i_sess_filter   = input.bool(true,  "NY Session Only (08:00-16:00 ET)",  group=GF)
+
+var GD = "🎨  Display"
+i_show_range   = input.bool(true, "Show Intraday Range",     group=GD)
+i_show_emas    = input.bool(true, "Show Trend EMAs",         group=GD)
+i_show_signals = input.bool(true, "Show Entry Signals",      group=GD)
+i_show_table   = input.bool(true, "Show Setup Table",        group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+_atr = ta.atr(14)
+_rsi = ta.rsi(close, i_rsi_len)
+
+// ─── MULTI-TIMEFRAME TREND CONTEXT ──────────────────────────────────────────
+// Weekly EMA — higher structure
+_w_close = request.security(syminfo.tickerid, "W", close, lookahead=barmerge.lookahead_off)
+_w_ema   = request.security(syminfo.tickerid, "W", ta.ema(close, i_htf_ema_w), lookahead=barmerge.lookahead_off)
+
+// Daily EMA — intermediate trend
+_d_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+_d_ema   = request.security(syminfo.tickerid, "D", ta.ema(close, i_htf_ema_d), lookahead=barmerge.lookahead_off)
+
+// Trend alignment
+_bull = ((not i_weekly_filter or _w_close > _w_ema) and
+        (not i_daily_filter  or _d_close > _d_ema))
+_bear = ((not i_weekly_filter or _w_close < _w_ema) and
+        (not i_daily_filter  or _d_close < _d_ema))
+
+// ─── INTRADAY RANGE (top and bottom of recent bars) ─────────────────────────
+_range_high = ta.highest(high, i_range_bars)
+_range_low  = ta.lowest (low,  i_range_bars)
+_range_mid  = (_range_high + _range_low) / 2
+
+// Plot EMAs
+plot(i_show_emas ? _d_ema : na, "Daily EMA", color=color.new(color.orange, 20), linewidth=2)
+
+// Plot intraday range
+_rh_plot = plot(i_show_range ? _range_high : na, "Range High", color=color.new(color.red,   50), linewidth=1, style=plot.style_stepline)
+_rl_plot = plot(i_show_range ? _range_low  : na, "Range Low",  color=color.new(color.green, 50), linewidth=1, style=plot.style_stepline)
+fill(_rh_plot, _rl_plot, color=color.new(color.blue, 92))
+
+// ─── SESSION FILTER ──────────────────────────────────────────────────────────
+_in_ny = not na(time(timeframe.period, "0800-1600", "America/New_York"))
+f_session = not i_sess_filter or _in_ny
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS — Mean Reversion at Extremes WITH HTF Trend
+// ─────────────────────────────────────────────────────────────────────────────
+
+// LONG: At intraday LOW (oversold extreme), with HTF BULLISH trend
+// Price has pushed down to the range low; fade the down move back toward mean
+long_at_extreme = f_session and _bull and
+     low  <= _range_low + i_extreme_atr * _atr and    // touched range low
+     close > low and                                    // not a continuation candle
+     close > open and                                   // bullish reversal bar
+     (not i_rsi_filter or _rsi < i_rsi_ob)             // RSI not overbought
+
+// SHORT: At intraday HIGH (overbought extreme), with HTF BEARISH trend
+short_at_extreme = f_session and _bear and
+     high >= _range_high - i_extreme_atr * _atr and   // touched range high
+     close < high and                                   // not continuation
+     close < open and                                   // bearish reversal bar
+     (not i_rsi_filter or _rsi > i_rsi_os)             // RSI not oversold
+
+// Direction gates
+f_long  = long_at_extreme  and (i_direction == "Both" or i_direction == "Long Only")
+f_short = short_at_extreme and (i_direction == "Both" or i_direction == "Short Only")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES & EXITS
+// Marci's key rule: STATIC stop — never move it. Add to winners.
+// ─────────────────────────────────────────────────────────────────────────────
+var float entry_price_long  = na
+var float entry_price_short = na
+var bool  added_long  = false
+var bool  added_short = false
+
+if f_long and strategy.position_size == 0
+    float sl = close - i_stop_atr * _atr
+    float t1 = close + i_tp1_atr * _atr
+    float t2 = close + i_tp2_atr * _atr
+    strategy.entry("Long_MR", strategy.long, comment="MR Long")
+    strategy.exit ("Long_MR_TP1", from_entry="Long_MR",
+         limit=t1, qty_percent=50, comment="TP1")
+    strategy.exit ("Long_MR_TP2", from_entry="Long_MR",
+         limit=t2, stop=sl, comment="TP2/SL")
+    entry_price_long := close
+    added_long := false
+
+if f_short and strategy.position_size == 0
+    float sl = close + i_stop_atr * _atr
+    float t1 = close - i_tp1_atr * _atr
+    float t2 = close - i_tp2_atr * _atr
+    strategy.entry("Short_MR", strategy.short, comment="MR Short")
+    strategy.exit ("Short_MR_TP1", from_entry="Short_MR",
+         limit=t1, qty_percent=50, comment="TP1")
+    strategy.exit ("Short_MR_TP2", from_entry="Short_MR",
+         limit=t2, stop=sl, comment="TP2/SL")
+    entry_price_short := close
+    added_short := false
+
+// Add to winning long
+if strategy.position_size > 0 and not added_long and not na(entry_price_long)
+    if close >= entry_price_long + i_add_atr * _atr
+        strategy.entry("Long_MR_Add", strategy.long,
+             qty = strategy.position_size * 0.5, comment="Add Long")
+        added_long := true
+
+// Add to winning short
+if strategy.position_size < 0 and not added_short and not na(entry_price_short)
+    if close <= entry_price_short - i_add_atr * _atr
+        strategy.entry("Short_MR_Add", strategy.short,
+             qty = math.abs(strategy.position_size) * 0.5, comment="Add Short")
+        added_short := true
+
+// Reset on flat
+if strategy.position_size == 0
+    entry_price_long  := na
+    entry_price_short := na
+    added_long  := false
+    added_short := false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+if i_show_signals
+    if f_long
+        label.new(bar_index, low - _atr * 0.8, "MR\nLong",
+             color=color.new(color.lime, 20), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+    if f_short
+        label.new(bar_index, high + _atr * 0.8, "MR\nShort",
+             color=color.new(color.red, 20), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+
+// RSI extreme background highlight
+bgcolor(_rsi > i_rsi_ob ? color.new(color.red, 90) : na,   title="RSI Overbought Zone")
+bgcolor(_rsi < i_rsi_os ? color.new(color.green, 90) : na, title="RSI Oversold Zone")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+if i_show_table and barstate.islast
+    var table t = table.new(position.top_right, 2, 9,
+         bgcolor=color.new(color.black, 70), border_color=color.gray, border_width=1)
+
+    table.cell(t, 0, 0, "WOR Marci Silfrain", text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+    table.cell(t, 1, 0, "HTF Mean Reversion", text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+
+    table.cell(t, 0, 1, "Weekly Trend", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 1, _w_close > _w_ema ? "Bullish" : "Bearish",
+         text_color= _w_close > _w_ema ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(t, 0, 2, "Daily Trend",  text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 2, _d_close > _d_ema ? "Bullish" : "Bearish",
+         text_color= _d_close > _d_ema ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "HTF Alignment", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 3, _bull ? "BULL" : _bear ? "BEAR" : "Mixed",
+         text_color= _bull ? color.lime : _bear ? color.red : color.gray, text_size=size.tiny)
+
+    table.cell(t, 0, 4, "Range High",  text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(_range_high, "#.##"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "Range Low",   text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(_range_low, "#.##"),  text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 6, "RSI(14)",     text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(_rsi, "#.#"),
+         text_color= _rsi > i_rsi_ob ? color.red : _rsi < i_rsi_os ? color.lime : color.white,
+         text_size=size.tiny)
+
+    table.cell(t, 0, 7, "ATR(14)",     text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(_atr, "#.##"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 8, "Position",    text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 8, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color= strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray,
+         text_size=size.tiny)

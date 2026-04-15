@@ -1,0 +1,43 @@
+# =============================================================================
+#  TradingMCP — systemd service: Xvfb + Chromium (TradingView Web)
+#  Installed to: /etc/systemd/system/tv_browser.service
+#
+#  Starts automatically on boot, restarts on crash.
+#  Provides the virtual display + browser that all trading sessions need.
+# =============================================================================
+
+[Unit]
+Description=TradingMCP - TradingView Web Browser (Xvfb + Chromium)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/tradingview-autopilot
+
+ExecStart=/bin/bash /home/ubuntu/tradingview-autopilot/scripts/cloud/launch_tv_chromium.sh
+ExecStop=/bin/bash -c 'pkill -f "remote-debugging-port=9222" || true; pkill -f "Xvfb :99" || true'
+
+Restart=on-failure
+RestartSec=15s
+
+# Environment
+Environment=HOME=/home/ubuntu
+Environment=USER=ubuntu
+Environment=DISPLAY=:99
+
+# Resource limits
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+# Logging — view with: journalctl -u tv_browser -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tv_browser
+
+[Install]
+WantedBy=multi-user.target

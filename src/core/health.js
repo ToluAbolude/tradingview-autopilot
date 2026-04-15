@@ -173,6 +173,7 @@ export async function launch({ port, kill_existing } = {}) {
       `${process.env.LOCALAPPDATA}\\TradingView\\TradingView.exe`,
       `${process.env.PROGRAMFILES}\\TradingView\\TradingView.exe`,
       `${process.env['PROGRAMFILES(X86)']}\\TradingView\\TradingView.exe`,
+      // Windows Store (MSIX) install — detected dynamically below
     ],
     linux: [
       '/opt/TradingView/tradingview',
@@ -207,8 +208,37 @@ export async function launch({ port, kill_existing } = {}) {
     } catch { /* ignore */ }
   }
 
+  // Windows Store (MSIX) fallback — use PowerShell Get-AppxPackage
+  let isMsixInstall = false;
+  if (!tvPath && platform === 'win32') {
+    try {
+      const installDir = execSync(
+        'powershell -Command "Get-AppxPackage -Name \'*TradingView*\' | Select-Object -ExpandProperty InstallLocation"',
+        { timeout: 8000, shell: true }
+      ).toString().trim().split('\n')[0].trim();
+      if (installDir) {
+        const { join } = await import('path');
+        const candidate = join(installDir, 'TradingView.exe');
+        if (existsSync(candidate)) {
+          tvPath = candidate;
+          isMsixInstall = true;
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   if (!tvPath) {
     throw new Error(`TradingView not found on ${platform}. Searched: ${candidates.join(', ')}. Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
+  }
+
+  if (isMsixInstall) {
+    return {
+      success: false,
+      platform,
+      binary: tvPath,
+      msix_install: true,
+      error: 'TradingView is installed from the Microsoft Store (MSIX). The Store version runs in a UWP sandbox and cannot be launched with --remote-debugging-port. CDP will not work. To fix this: uninstall the Store version and install the direct .exe from tradingview.com — it installs to %LOCALAPPDATA%\\TradingView\\TradingView.exe and supports CDP.',
+    };
   }
 
   if (killFirst) {
@@ -219,7 +249,18 @@ export async function launch({ port, kill_existing } = {}) {
     } catch { /* may not be running */ }
   }
 
-  const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
+  // MSIX apps ignore CLI args and env vars due to UWP sandboxing.
+  // Use the VBS workaround which sets ELECTRON_EXTRA_LAUNCH_ARGS before launch.
+  let child;
+  if (isMsixInstall && platform === 'win32') {
+    const { fileURLToPath } = await import('url');
+    const { dirname, join } = await import('path');
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const vbsPath = join(__dirname, '..', '..', 'scripts', 'launch_tv_debug.vbs');
+    child = spawn('cscript', [vbsPath], { detached: true, stdio: 'ignore', shell: true });
+  } else {
+    child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
+  }
   child.unref();
 
   for (let i = 0; i < 15; i++) {

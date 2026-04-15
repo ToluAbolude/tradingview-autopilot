@@ -1,0 +1,356 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  WORDS OF RIZDOM — NBB TRADER ICT POWER OF 3 (AMD MODEL)                 ║
+// ║  Synthesised from transcript #075 (2024-06-20) — WOR Podcast EP.11       ║
+// ║                                                                           ║
+// ║  CORE RULES (from interview):                                             ║
+// ║  • AMD Model: Accumulation → Manipulation → Distribution                 ║
+// ║  • Daily directional bias first: is today a buy day or sell day?         ║
+// ║  • Weekly structure: note the prior week high/low — these are magnets    ║
+// ║  • Asia session: accumulation (identify range high/low)                  ║
+// ║  • London/NY open: MANIPULATION — price sweeps stops on one side         ║
+// ║    (false break of Asia range → opposite direction is the true move)     ║
+// ║  • Entry: 15M timeframe at the manipulation point — FVG or OTE entry    ║
+// ║  • OTE = Optimal Trade Entry = 0.62-0.79 Fibonacci retracement zone     ║
+// ║  • FVG = Fair Value Gap — 3-bar imbalance structure                      ║
+// ║  • Target: Distribution = daily candle expansion to opposite extreme     ║
+// ║  • Stop: beyond the manipulation wick (the false break)                  ║
+// ║  • Weekly high/low sweeps = highest probability setups                   ║
+// ║  • Only trade when bias is clear — when in doubt, stay out               ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("WOR — NBB Trader ICT Power of 3 (AMD)",
+     shorttitle        = "WOR_NBB_AMD",
+     overlay           = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 2.0,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2,
+     pyramiding        = 0,
+     calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Strategy"
+i_ote_low      = input.float(0.62, "OTE Zone Low  (Fib level)",     minval=0.50, maxval=0.75, group=GS,
+     tooltip="Optimal Trade Entry — lower bound of the 62-79% retracement zone")
+i_ote_high     = input.float(0.79, "OTE Zone High (Fib level)",     minval=0.60, maxval=0.85, group=GS,
+     tooltip="Optimal Trade Entry — upper bound of the 62-79% retracement zone")
+i_fvg_min      = input.float(0.5,  "Min FVG Size × ATR14",          minval=0.1, maxval=3.0,  group=GS,
+     tooltip="Fair Value Gap must be at least this large to qualify")
+i_manip_atr    = input.float(0.5,  "Manipulation Wick Min × ATR14", minval=0.1, maxval=3.0,  group=GS,
+     tooltip="The false-break wick into stops must be at least this large")
+i_stop_buf     = input.float(0.3,  "Stop Buffer × ATR beyond wick", minval=0.0, maxval=2.0,  group=GS)
+i_rr           = input.float(3.0,  "Take Profit R:R",               minval=1.0, maxval=10.0, group=GS)
+i_direction    = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=GS)
+
+var GA = "📅  Session Times (Server Time)"
+i_asia_open    = input.session("1700-0000", "Asia Session",          group=GA)
+i_london_open  = input.session("0200-0500", "London Open Window",    group=GA)
+i_ny_open      = input.session("0700-1000", "NY Open Window",        group=GA)
+
+var GF = "✅  Filters"
+i_weekly_filter = input.bool(true, "Weekly Bias Filter (W EMA 8)",  group=GF)
+i_daily_filter  = input.bool(true, "Daily Bias Filter (D EMA 20)",  group=GF)
+i_asia_range    = input.bool(true, "Require Asia Range Sweep",      group=GF,
+     tooltip="Manipulation must sweep beyond the Asia session high or low")
+
+var GD = "🎨  Display"
+i_show_asia    = input.bool(true, "Show Asia Range",       group=GD)
+i_show_weekly  = input.bool(true, "Show Weekly H/L",       group=GD)
+i_show_fvg     = input.bool(true, "Show FVG Boxes",        group=GD)
+i_show_signals = input.bool(true, "Show Entry Signals",    group=GD)
+i_show_table   = input.bool(true, "Show AMD Table",        group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+_atr = ta.atr(14)
+
+// ─── WEEKLY STRUCTURE ────────────────────────────────────────────────────────
+_pw_high = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_on)
+_pw_low  = request.security(syminfo.tickerid, "W", low[1],  lookahead=barmerge.lookahead_on)
+
+// Weekly trend
+_w_close = request.security(syminfo.tickerid, "W", close, lookahead=barmerge.lookahead_off)
+_w_ema8  = request.security(syminfo.tickerid, "W", ta.ema(close, 8), lookahead=barmerge.lookahead_off)
+
+// ─── DAILY BIAS ──────────────────────────────────────────────────────────────
+_d_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+_d_ema20 = request.security(syminfo.tickerid, "D", ta.ema(close, 20), lookahead=barmerge.lookahead_off)
+_d_prev_high = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+_d_prev_low  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+
+// Trend alignment
+_bull_bias = (not i_weekly_filter or _w_close > _w_ema8) and
+             (not i_daily_filter  or _d_close > _d_ema20)
+_bear_bias = (not i_weekly_filter or _w_close < _w_ema8) and
+             (not i_daily_filter  or _d_close < _d_ema20)
+
+// ─── SESSION DETECTION ───────────────────────────────────────────────────────
+_in_asia   = not na(time(timeframe.period, i_asia_open))
+_in_london = not na(time(timeframe.period, i_london_open))
+_in_ny     = not na(time(timeframe.period, i_ny_open))
+
+// ─── ASIA RANGE TRACKING ────────────────────────────────────────────────────
+// Track high/low during Asia session for each day
+var float _asia_high = na
+var float _asia_low  = na
+var bool  _asia_done = false
+var int   _asia_day  = na
+
+_current_day = dayofmonth
+
+// Reset Asia range at start of new day
+if _current_day != _asia_day
+    _asia_high := na
+    _asia_low  := na
+    _asia_done := false
+    _asia_day  := _current_day
+
+// Build Asia range during Asia session
+if _in_asia
+    _asia_high := na(_asia_high) ? high : math.max(_asia_high, high)
+    _asia_low  := na(_asia_low)  ? low  : math.min(_asia_low,  low)
+
+// Mark Asia done when London opens
+if _in_london and not _asia_done and not na(_asia_high)
+    _asia_done := true
+
+// ─── FAIR VALUE GAP DETECTION ────────────────────────────────────────────────
+// Bullish FVG: high[2] < low[0]  (gap between bar-2 high and current low)
+// Bearish FVG: low[2]  > high[0] (gap between bar-2 low and current high)
+_bull_fvg_size = low  - high[2]
+_bear_fvg_size = low[2] - high
+
+_bull_fvg = _bull_fvg_size > i_fvg_min * _atr  // bullish imbalance
+_bear_fvg = _bear_fvg_size > i_fvg_min * _atr  // bearish imbalance
+
+// FVG midpoints (entry areas)
+_bull_fvg_mid = (_bull_fvg_size > 0) ? (high[2] + low) / 2 : na
+_bear_fvg_mid = (_bear_fvg_size > 0) ? (low[2] + high) / 2 : na
+
+// Draw FVG boxes
+if i_show_fvg
+    if _bull_fvg
+        box.new(bar_index - 2, high[2], bar_index + 10, low,
+             border_color=color.new(color.lime, 50), bgcolor=color.new(color.lime, 88),
+             extend=extend.right)
+    if _bear_fvg
+        box.new(bar_index - 2, low[2], bar_index + 10, high,
+             border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 88),
+             extend=extend.right)
+
+// ─── MANIPULATION DETECTION ──────────────────────────────────────────────────
+// Bullish manipulation (bear trap): price sweeps BELOW Asia low (or prev low)
+// then reverses — the stop hunt is complete, true move is UP
+_ref_low  = i_asia_range ? _asia_low : _d_prev_low
+_ref_high = i_asia_range ? _asia_high : _d_prev_high
+
+// Bear trap / bullish manipulation: wick below reference low, body closes above
+_bull_manip = not na(_ref_low) and
+     low < _ref_low - i_manip_atr * _atr * 0.1 and   // swept below the low
+     close > _ref_low and                               // closed back above
+     (low[1] >= _ref_low) and                           // wasn't already through
+     (_in_london or _in_ny) and                         // in manipulation window
+     _bull_bias
+
+// Bull trap / bearish manipulation: wick above reference high, body closes below
+_bear_manip = not na(_ref_high) and
+     high > _ref_high + i_manip_atr * _atr * 0.1 and  // swept above the high
+     close < _ref_high and                               // closed back below
+     (high[1] <= _ref_high) and                          // wasn't already through
+     (_in_london or _in_ny) and                          // in manipulation window
+     _bear_bias
+
+// ─── OTE ZONE (Optimal Trade Entry — Fibonacci 0.62-0.79 retracement) ──────
+// After manipulation: price retraces back into the 62-79% zone of the swing
+// Track swing for OTE calculation
+var float _swing_high = na
+var float _swing_low  = na
+var bool  _manip_bull_active = false
+var bool  _manip_bear_active = false
+var int   _manip_bar         = na
+
+if _bull_manip
+    _swing_low           := low
+    _swing_high          := na
+    _manip_bull_active   := true
+    _manip_bear_active   := false
+    _manip_bar           := bar_index
+
+if _bear_manip
+    _swing_high          := high
+    _swing_low           := na
+    _manip_bear_active   := true
+    _manip_bull_active   := false
+    _manip_bar           := bar_index
+
+// After bullish manipulation, track the swing high (distribution target)
+if _manip_bull_active and not na(_swing_low)
+    _swing_high := na(_swing_high) ? high : math.max(_swing_high, high)
+
+// After bearish manipulation, track the swing low
+if _manip_bear_active and not na(_swing_high)
+    _swing_low := na(_swing_low) ? low : math.min(_swing_low, low)
+
+// Expire setups after 50 bars
+if not na(_manip_bar) and (bar_index - _manip_bar) > 50
+    _manip_bull_active := false
+    _manip_bear_active := false
+
+// OTE zones (for visual)
+float _ote_bull_low  = na
+float _ote_bull_high = na
+float _ote_bear_low  = na
+float _ote_bear_high = na
+
+if _manip_bull_active and not na(_swing_low) and not na(_swing_high)
+    float _range = _swing_high - _swing_low
+    _ote_bull_low  := _swing_high - i_ote_low  * _range   // 62% retrace
+    _ote_bull_high := _swing_high - i_ote_high * _range   // wait, logic: retracement from high back down
+
+if _manip_bear_active and not na(_swing_high) and not na(_swing_low)
+    float _range = _swing_high - _swing_low
+    _ote_bear_low  := _swing_low + i_ote_high * _range
+    _ote_bear_high := _swing_low + i_ote_low  * _range
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+// LONG: After bullish manipulation, price retraces into OTE or FVG, then bounces
+_long_ote = _manip_bull_active and not na(_ote_bull_low) and not na(_ote_bull_high) and
+     close >= _ote_bull_high and close <= _ote_bull_low and
+     close > open   // bullish confirmation in the OTE zone
+
+_long_fvg = _manip_bull_active and _bull_fvg and
+     close > open
+
+// SHORT: After bearish manipulation, price retraces into OTE or FVG, then reverses
+_short_ote = _manip_bear_active and not na(_ote_bear_low) and not na(_ote_bear_high) and
+     close >= _ote_bear_low and close <= _ote_bear_high and
+     close < open   // bearish confirmation in the OTE zone
+
+_short_fvg = _manip_bear_active and _bear_fvg and
+     close < open
+
+f_long  = (_long_ote  or _long_fvg)  and strategy.position_size == 0 and
+          (i_direction == "Both" or i_direction == "Long Only")
+
+f_short = (_short_ote or _short_fvg) and strategy.position_size == 0 and
+          (i_direction == "Both" or i_direction == "Short Only")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES & EXITS
+// ─────────────────────────────────────────────────────────────────────────────
+if f_long
+    float sl   = not na(_swing_low) ? _swing_low - i_stop_buf * _atr : close - 2 * _atr
+    float dist = close - sl
+    float tp   = close + i_rr * dist
+    strategy.entry("Long_AMD", strategy.long, comment="AMD Long")
+    strategy.exit ("Long_AMD_X", from_entry="Long_AMD",
+         stop=sl, limit=tp)
+    _manip_bull_active := false
+
+if f_short
+    float sl   = not na(_swing_high) ? _swing_high + i_stop_buf * _atr : close + 2 * _atr
+    float dist = sl - close
+    float tp   = close - i_rr * dist
+    strategy.entry("Short_AMD", strategy.short, comment="AMD Short")
+    strategy.exit ("Short_AMD_X", from_entry="Short_AMD",
+         stop=sl, limit=tp)
+    _manip_bear_active := false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Weekly levels
+if i_show_weekly and barstate.islast
+    line.new(bar_index - 50, _pw_high, bar_index + 10, _pw_high,
+         color=color.new(color.red, 20), width=2, style=line.style_dotted,
+         extend=extend.right)
+    label.new(bar_index, _pw_high + _atr * 0.3, "Prev W High",
+         color=color.new(color.red, 60), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+    line.new(bar_index - 50, _pw_low, bar_index + 10, _pw_low,
+         color=color.new(color.lime, 20), width=2, style=line.style_dotted,
+         extend=extend.right)
+    label.new(bar_index, _pw_low - _atr * 0.3, "Prev W Low",
+         color=color.new(color.lime, 60), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+// Asia range
+bgcolor((i_show_asia and not na(_asia_high) and not na(_asia_low) and (_asia_done or _in_asia) and _in_asia) ? color.new(color.blue, 92) : na, title="Asia Session")
+
+// Manipulation signals
+if i_show_signals
+    if _bull_manip
+        label.new(bar_index, low - _atr, "MANIP\nBull Trap↑",
+             color=color.new(color.lime, 20), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+    if _bear_manip
+        label.new(bar_index, high + _atr, "MANIP\nBear Trap↓",
+             color=color.new(color.red, 20), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+
+    if f_long
+        label.new(bar_index, low - _atr * 0.5, "OTE\nLong",
+             color=color.new(color.aqua, 20), textcolor=color.white,
+             style=label.style_label_up, size=size.normal)
+    if f_short
+        label.new(bar_index, high + _atr * 0.5, "OTE\nShort",
+             color=color.new(color.orange, 20), textcolor=color.white,
+             style=label.style_label_down, size=size.normal)
+
+// Session backgrounds
+bgcolor(_in_london ? color.new(color.yellow, 95) : na, title="London Window")
+bgcolor(_in_ny     ? color.new(color.aqua,   95) : na, title="NY Window")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE — AMD Checklist
+// ─────────────────────────────────────────────────────────────────────────────
+if i_show_table and barstate.islast
+    var table t = table.new(position.top_right, 2, 10,
+         bgcolor=color.new(color.black, 70), border_color=color.gray, border_width=1)
+
+    table.cell(t, 0, 0, "WOR NBB Trader", text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+    table.cell(t, 1, 0, "ICT Power of 3", text_color=color.yellow,   text_size=size.small, bgcolor=color.new(color.navy, 50))
+
+    table.cell(t, 0, 1, "Daily Bias",     text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 1, _bull_bias ? "BULLISH" : _bear_bias ? "BEARISH" : "MIXED",
+         text_color= _bull_bias ? color.lime : _bear_bias ? color.red : color.gray,
+         text_size=size.tiny)
+
+    table.cell(t, 0, 2, "Weekly Trend",   text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 2, _w_close > _w_ema8 ? "Above EMA8" : "Below EMA8",
+         text_color= _w_close > _w_ema8 ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "Asia Range",     text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 3, na(_asia_high) ? "Building" : str.tostring(_asia_low, "#.#") + " – " + str.tostring(_asia_high, "#.#"),
+         text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 4, "Session",        text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 4, _in_asia ? "ASIA" : _in_london ? "LONDON" : _in_ny ? "NY OPEN" : "—",
+         text_color= _in_asia ? color.blue : _in_london ? color.yellow : _in_ny ? color.aqua : color.gray,
+         text_size=size.tiny)
+
+    table.cell(t, 0, 5, "AMD Phase",      text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 5, _in_asia ? "ACCUMULATION" : (_in_london or _in_ny) ? "MANIPULATION" : "DISTRIBUTION",
+         text_color= _in_asia ? color.blue : (_in_london or _in_ny) ? color.orange : color.lime,
+         text_size=size.tiny)
+
+    table.cell(t, 0, 6, "Manip Signal",   text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 6, _manip_bull_active ? "Bull Active" : _manip_bear_active ? "Bear Active" : "None",
+         text_color= _manip_bull_active ? color.lime : _manip_bear_active ? color.red : color.gray,
+         text_size=size.tiny)
+
+    table.cell(t, 0, 7, "Prev W High",    text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(_pw_high, "#.##"), text_color=color.red,  text_size=size.tiny)
+
+    table.cell(t, 0, 8, "Prev W Low",     text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 8, str.tostring(_pw_low, "#.##"),  text_color=color.lime, text_size=size.tiny)
+
+    table.cell(t, 0, 9, "ATR(14)",        text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 9, str.tostring(_atr, "#.##"),     text_color=color.white, text_size=size.tiny)

@@ -5,19 +5,19 @@ This file is a step-by-step guide for Claude Code (or any LLM agent) to install 
 ## Step 1: Clone and Install
 
 ```bash
-git clone https://github.com/LewisWJackson/tradingview-mcp-jackson.git ~/tradingview-mcp-jackson
-cd ~/tradingview-mcp-jackson
+git clone https://github.com/LewisWJackson/tradingview-autopilot.git ~/tradingview-autopilot
+cd ~/tradingview-autopilot
 npm install
 ```
 
-If the user specifies a different install path, use that instead of `~/tradingview-mcp-jackson`.
+If the user specifies a different install path, use that instead of `~/tradingview-autopilot`.
 
 ## Step 2: Set Up Rules
 
 Copy the example rules file and open it for the user to fill in:
 
 ```bash
-cp ~/tradingview-mcp-jackson/rules.example.json ~/tradingview-mcp-jackson/rules.json
+cp ~/tradingview-autopilot/rules.example.json ~/tradingview-autopilot/rules.json
 ```
 
 Tell the user: "Open `rules.json` and fill in your watchlist (the symbols you trade), your bias criteria (what makes something bullish/bearish for you), and your risk rules. This is what the morning brief uses every day."
@@ -31,7 +31,7 @@ Add the server to the user's Claude Code MCP configuration. The config file is a
   "mcpServers": {
     "tradingview": {
       "command": "node",
-      "args": ["/Users/YOUR_USERNAME/tradingview-mcp-jackson/src/server.js"]
+      "args": ["/Users/YOUR_USERNAME/tradingview-autopilot/src/server.js"]
     }
   }
 }
@@ -104,7 +104,7 @@ To retrieve tomorrow: *"Get yesterday's session using session_get"*
 To use the `tv` CLI command globally:
 
 ```bash
-cd ~/tradingview-mcp-jackson
+cd ~/tradingview-autopilot
 npm link
 ```
 
