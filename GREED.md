@@ -342,6 +342,24 @@ ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
 tail -f /home/ubuntu/trading-data/trade_log/trades.csv
 ```
 
+### Viewing the VM desktop via RealVNC Viewer
+
+x11vnc runs on the VM at display `:1` (port 5901), bound to localhost only. To connect:
+
+**Step 1 — Open an SSH tunnel** (run in a local terminal, leave it open):
+```bash
+ssh -i ~/.ssh/id_rsa_oracle -L 5901:localhost:5901 -N ubuntu@132.145.44.68
+```
+
+**Step 2 — Open RealVNC Viewer** and connect to:
+```
+localhost:5901
+```
+
+You will see the Xvfb virtual desktop running TradingView (Chrome) at 1920×1080.
+
+> The VNC server is bound to localhost on the VM — it is never exposed to the public internet. The SSH tunnel is required every time.
+
 ### Running scripts manually — ALWAYS use run.sh
 Any script run manually over SSH must use `run.sh` so it survives if the SSH connection drops.
 **Never run `node script.mjs` directly for manual tasks** — it will die if SSH disconnects.
