@@ -1,0 +1,9 @@
+//@version=6
+// Minimal diagnostic - should enter every bar
+strategy("AMD OTE Diag Min", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1.0, initial_capital=10000)
+
+// Just enter every bar, close every bar
+if strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+if strategy.position_size != 0
+    strategy.close("L")

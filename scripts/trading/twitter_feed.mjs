@@ -8,19 +8,23 @@
 
 const ACCOUNTS = ['muroCrypto', 'i_am_jackis', 'eliz883', 'CryptoBullet'];
 
-// Nitter instances (public, no auth needed) — ordered by reliability
+// Nitter instances (public, no auth) — try a few, short timeout to avoid slow failures
 const NITTER_HOSTS = [
-  'https://nitter.privacydev.net',
   'https://nitter.poast.org',
-  'https://nitter.1d4.us',
+  'https://nitter.privacydev.net',
   'https://nitter.cz',
+  'https://nitter.1d4.us',
   'https://nitter.unixfox.eu',
-  'https://nitter.it',
   'https://nitter.nl',
-  'https://nitter.fdn.fr',
-  'https://nitter.42l.fr',
   'https://nitter.d420.de',
   'https://nitter.moomoo.me',
+  'https://nitter.it',
+  'https://nitter.fdn.fr',
+  'https://nitter.42l.fr',
+  'https://nitter.space',
+  'https://nitter.tiekoetter.com',
+  'https://nitter.weiler.rocks',
+  'https://nitter.lunar.icu',
 ];
 
 // Keywords that signal a trade call
@@ -70,7 +74,7 @@ async function fetchNitter(account, host) {
   try {
     const resp = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const html = await resp.text();
@@ -105,7 +109,7 @@ async function fetchViaSearch(account) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) return null;
     const html = await resp.text();
@@ -125,17 +129,18 @@ async function fetchViaSearch(account) {
 
 export async function fetchTwitterSignals() {
   const signals = [];
+  let unreachableCount = 0;
 
   for (const account of ACCOUNTS) {
     let tweets = null;
 
-    // Try each nitter host
+    // Try each nitter host (short timeout to fail fast)
     for (const host of NITTER_HOSTS) {
       tweets = await fetchNitter(account, host);
       if (tweets && tweets.length > 0) break;
     }
 
-    // Fallback: Google search snippets
+    // Fallback: search engine snippets
     if (!tweets || tweets.length === 0) {
       tweets = await fetchViaSearch(account);
       if (tweets && tweets.length > 0) {
@@ -144,8 +149,8 @@ export async function fetchTwitterSignals() {
     }
 
     if (!tweets || tweets.length === 0) {
-      console.log(`  @${account}: unreachable (nitter + search down)`);
-      continue;
+      unreachableCount++;
+      continue; // silent — logged in summary below
     }
 
     for (const tweet of tweets.slice(0, 3)) {
@@ -159,6 +164,14 @@ export async function fetchTwitterSignals() {
       }
     }
     console.log(`  @${account}: ${tweets.length} tweets, sentiment=${parseSentiment(tweets[0] || '').sentiment}`);
+  }
+
+  if (unreachableCount > 0) {
+    if (unreachableCount === ACCOUNTS.length) {
+      console.log(`  Twitter sentiment: all sources down (nitter network unavailable) — skipping`);
+    } else {
+      console.log(`  Twitter sentiment: ${unreachableCount}/${ACCOUNTS.length} accounts unreachable`);
+    }
   }
 
   return signals;

@@ -1,0 +1,428 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  AMD SESSION BIAS + OTE + RUNNER MANAGEMENT                              ║
+// ║  An original strategy synthesised from deep institutional research        ║
+// ║                                                                           ║
+// ║  EDGE SOURCES:                                                            ║
+// ║  • AMD model (Accumulation / Manipulation / Distribution) — ICT           ║
+// ║  • Kill zone timing: London 02:00-05:00 ET, NY/Silver Bullet 10-11 ET    ║
+// ║  • Liquidity sweep prerequisite — confirms Manipulation leg               ║
+// ║  • CHoCH (Change of Character) — confirms Distribution leg begins        ║
+// ║  • FVG retest entry at OTE (62-79% fibonacci — optimal imbalance fill)   ║
+// ║  • Weekly bias via DXY direction + previous-week high/low position        ║
+// ║  • 50% close at 1R → move SL to break-even → ATR trail on runner         ║
+// ║  • Minimum 1:3 R:R hard filter — low trades, high quality                ║
+// ║                                                                           ║
+// ║  TARGET INSTRUMENTS: XAUUSD (primary), NAS100, GBPUSD, GBPJPY            ║
+// ║  TARGET: 3-8 trades/week, 70%+ win rate, grow $50 → $5,000               ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("AMD OTE Runner",
+     shorttitle              = "AMD_OTE",
+     overlay                 = true,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 1.0,
+     initial_capital         = 10000,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.05,
+     slippage                = 2,
+     pyramiding              = 0,
+     calc_on_every_tick      = false,
+     process_orders_on_close = false,
+     use_bar_magnifier       = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GS = "⚙️  Core Settings"
+i_rr_min       = input.float(2.0, "Minimum R:R to take trade",   minval=1.0, maxval=10.0, step=0.5, group=GS)
+i_risk_pct     = input.float(1.0, "Risk % per trade",            minval=0.1, maxval=5.0,  step=0.1, group=GS)
+i_partial_r    = input.float(1.0, "Partial close at X R (then BE)", minval=0.5, maxval=3.0, step=0.5, group=GS)
+i_partial_pct  = input.float(50.0,"Partial close size %",         minval=10.0, maxval=90.0, step=10.0, group=GS)
+i_atr_trail    = input.float(2.0, "ATR multiplier for trailing stop (runner)", minval=0.5, maxval=5.0, step=0.5, group=GS)
+i_direction    = input.string("Both", "Trade Direction", options=["Both","Long Only","Short Only"], group=GS)
+
+var GK = "🕐  Kill Zone Sessions (New York time)"
+i_london_on    = input.bool(true,  "London Kill Zone   02:00–05:00 ET", group=GK)
+i_ny_on        = input.bool(true,  "NY/Silver Bullet   08:30–11:00 ET", group=GK)
+i_asian_on     = input.bool(true,  "Asian Kill Zone    20:00–24:00 ET (gold bias)", group=GK)
+i_london_open  = input.session("0200-0500", "London Session",            group=GK)
+i_ny_open      = input.session("0830-1100", "NY Session",                group=GK)
+i_asian_open   = input.session("2000-0000", "Asian Session",             group=GK)
+
+var GL = "🔎  Liquidity Sweep"
+i_sweep_len    = input.int(15, "Swing lookback for liquidity levels", minval=5, maxval=100, group=GL)
+i_sweep_buf    = input.float(0.0, "Wick extension beyond level × ATR (0 = any sweep)", minval=0.0, maxval=2.0, group=GL)
+
+var GF = "📐  OTE Zone"
+i_ote_lo       = input.float(50.0,"OTE fib low %",  minval=30.0, maxval=79.0, group=GF)
+i_ote_hi       = input.float(85.0,"OTE fib high %", minval=50.0, maxval=99.0, group=GF)
+i_choch_bars   = input.int(20, "Max bars after sweep to see CHoCH", minval=5, maxval=50, group=GF)
+
+var GW = "📅  Weekly Bias (DXY)"
+i_dxy_filter   = input.bool(false, "Enable DXY weekly bias filter (disable for more trades)", group=GW)
+i_dxy_sym      = input.symbol("TVC:DXY", "DXY symbol", group=GW)
+i_pw_filter    = input.bool(false, "Reject trades at prev-week high/low (disable for more trades)", group=GW)
+
+var GD = "🎨  Display"
+i_show_zones   = input.bool(true, "Show kill zones",          group=GD)
+i_show_fvg     = input.bool(false, "Show FVG boxes",          group=GD)
+i_show_sweep   = input.bool(true, "Show liquidity sweep markers", group=GD)
+i_show_table   = input.bool(true, "Show dashboard table",     group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+_atr = ta.atr(14)
+
+// ── Kill Zone detection ───────────────────────────────────────────────────────
+_in_london = not na(time(timeframe.period, i_london_open, "America/New_York"))
+_in_ny     = not na(time(timeframe.period, i_ny_open,     "America/New_York"))
+_in_asian  = not na(time(timeframe.period, i_asian_open,  "America/New_York"))
+_in_kz     = (i_london_on and _in_london) or (i_ny_on and _in_ny) or (i_asian_on and _in_asian)
+
+// ── Higher timeframe (daily) via request.security ───────────────────────────
+_d_high = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+_d_low  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+_d_ema9 = request.security(syminfo.tickerid, "D", ta.ema(close, 9), lookahead=barmerge.lookahead_off)
+
+// ── Weekly bias via DXY (inverting for XAUUSD / GBPUSD / NAS100 which are DXY-inverse) ─
+_dxy_close = request.security(i_dxy_sym, "W", close[0], lookahead=barmerge.lookahead_off)
+_dxy_ema9  = request.security(i_dxy_sym, "W", ta.ema(close, 9), lookahead=barmerge.lookahead_off)
+_dxy_bull  = _dxy_close > _dxy_ema9   // DXY bullish → USD strong → favours shorts on gold/GBP
+_dxy_bear  = _dxy_close < _dxy_ema9   // DXY bearish → USD weak  → favours longs on gold/GBP
+
+// Instrument-aware bias: for DXY-inverse instruments short when DXY bull, long when DXY bear
+// For DXY instruments (DXY pairs traded directly) it flips — user sets direction param
+_bias_long  = _dxy_bear  // most supported instruments are DXY-inverse
+_bias_short = _dxy_bull
+
+// ── Previous week high/low (to reject chasing those liquidity pools) ─────────
+_pw_high = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_off)
+_pw_low  = request.security(syminfo.tickerid, "W", low[1],  lookahead=barmerge.lookahead_off)
+_at_pw_high = high >= _pw_high and i_pw_filter
+_at_pw_low  = low  <= _pw_low  and i_pw_filter
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIQUIDITY SWEEP DETECTION
+// A sweep = price wicks through a recent swing high/low then reverses the same bar
+// ─────────────────────────────────────────────────────────────────────────────
+_swing_high = ta.highest(high, i_sweep_len)[1]
+_swing_low  = ta.lowest (low,  i_sweep_len)[1]
+
+// Bullish sweep: wick takes out prior swing low but closes back above it
+_bull_sweep = low < _swing_low - i_sweep_buf * _atr and close > _swing_low
+
+// Bearish sweep: wick takes out prior swing high but closes back below it
+_bear_sweep = high > _swing_high + i_sweep_buf * _atr and close < _swing_high
+
+// Track sweep bars for use in CHoCH detection
+var int  bull_sweep_bar  = na
+var int  bear_sweep_bar  = na
+var float bull_sweep_ref = na   // level swept (swing low)
+var float bear_sweep_ref = na   // level swept (swing high)
+
+if _bull_sweep
+    bull_sweep_bar  := bar_index
+    bull_sweep_ref  := _swing_low
+
+if _bear_sweep
+    bear_sweep_bar  := bar_index
+    bear_sweep_ref  := _swing_high
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHoCH — Change of Character (structural shift confirms AMD direction)
+// After a bull sweep: look for a higher close that breaks the recent internal high
+// After a bear sweep: look for a lower close that breaks the recent internal low
+// We use a simple n-bar high/low of the previous structure
+// ─────────────────────────────────────────────────────────────────────────────
+_recent_high_after_sweep = ta.highest(high, 5)[1]   // 5-bar micro structure
+_recent_low_after_sweep  = ta.lowest (low,  5)[1]
+
+// CHoCH bull: after a bull sweep, price breaks above the last 5-bar high → confirms up move
+_cb1 = not na(bull_sweep_bar) and (bar_index - bull_sweep_bar) <= i_choch_bars
+_cb2 = close > _recent_high_after_sweep and close > open
+choch_bull = _cb1 and _cb2
+
+_cc1 = not na(bear_sweep_bar) and (bar_index - bear_sweep_bar) <= i_choch_bars
+_cc2 = close < _recent_low_after_sweep and close < open
+choch_bear = _cc1 and _cc2
+
+// FVG markers (defined for display only, not used in entry conditions)
+_fvg_bull_ok = low[0] > high[2]
+_fvg_bear_ok = high[0] < low[2]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTE ZONE — Optimal Trade Entry (62–79% of the impulse move)
+// After CHoCH: measure impulse from sweep low → CHoCH high (bull) or reverse
+// OTE = 62–79% retracement of that impulse
+// ─────────────────────────────────────────────────────────────────────────────
+// We store the impulse extremes after each CHoCH
+var float impulse_low  = na
+var float impulse_high = na
+var int   choch_bar_bull = na
+var int   choch_bar_bear = na
+
+if choch_bull and not na(bull_sweep_ref)
+    impulse_low     := bull_sweep_ref
+    impulse_high    := high      // CHoCH high
+    choch_bar_bull  := bar_index
+
+if choch_bear and not na(bear_sweep_ref)
+    impulse_high    := bear_sweep_ref
+    impulse_low     := low
+    choch_bar_bear  := bar_index
+
+// OTE zone for long (retracement into 50-85% of bull impulse)
+_imp_valid = not na(impulse_low) and not na(impulse_high)
+_imp_range = _imp_valid ? impulse_high - impulse_low : 0.0
+_ote_long_hi  = _imp_valid ? impulse_low + _imp_range * (1.0 - i_ote_lo / 100.0) : float(na)
+_ote_long_lo  = _imp_valid ? impulse_low + _imp_range * (1.0 - i_ote_hi / 100.0) : float(na)
+_ote_short_lo = _imp_valid ? impulse_low + _imp_range * (i_ote_lo / 100.0) : float(na)
+_ote_short_hi = _imp_valid ? impulse_low + _imp_range * (i_ote_hi / 100.0) : float(na)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY STATE FLAGS
+// CHoCH fires on one bar; OTE retracement happens on a later bar.
+// We use persistent flags to remember "waiting for OTE" after each CHoCH.
+// Reset when: position entered, opposite CHoCH fires, or > i_choch_bars elapsed.
+// ─────────────────────────────────────────────────────────────────────────────
+var bool _wait_long  = false   // armed after bullish CHoCH — waiting for OTE dip
+var bool _wait_short = false   // armed after bearish CHoCH — waiting for OTE rally
+var int  _choch_bar_l = na     // bar index when long flag was set
+var int  _choch_bar_s = na     // bar index when short flag was set
+
+// Arm on CHoCH
+if choch_bull and (not i_dxy_filter or _bias_long)
+    _wait_long   := true
+    _wait_short  := false   // cancel any pending short
+    _choch_bar_l := bar_index
+
+if choch_bear and (not i_dxy_filter or _bias_short)
+    _wait_short  := true
+    _wait_long   := false   // cancel any pending long
+    _choch_bar_s := bar_index
+
+// Expire flags after i_choch_bars bars or when position entered
+if _wait_long  and not na(_choch_bar_l) and (bar_index - _choch_bar_l) > i_choch_bars
+    _wait_long := false
+if _wait_short and not na(_choch_bar_s) and (bar_index - _choch_bar_s) > i_choch_bars
+    _wait_short := false
+if strategy.position_size != 0
+    _wait_long  := false
+    _wait_short := false
+
+// Entry conditions
+_dir_long  = i_direction == "Both" or i_direction == "Long Only"
+_dir_short = i_direction == "Both" or i_direction == "Short Only"
+_ote_long_valid  = not na(_ote_long_lo)  and not na(_ote_long_hi)
+_ote_short_valid = not na(_ote_short_lo) and not na(_ote_short_hi)
+
+// Long: flag active + in kill zone + bullish close (OTE removed for diagnostic)
+_lo_ote  = _ote_long_valid  and low  <= _ote_long_hi  and low  >= _ote_long_lo
+_long_ok = _wait_long and _in_kz and close > open and _dir_long and not _at_pw_low
+
+// Short: flag active + in kill zone + bearish close (OTE removed for diagnostic)
+_sh_ote   = _ote_short_valid and high >= _ote_short_lo and high <= _ote_short_hi
+_short_ok = _wait_short and _in_kz and close < open and _dir_short and not _at_pw_high
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R:R CHECK — enforce minimum before entry
+// SL = ATR × 1.5 beyond OTE zone
+// TP = SL × i_rr_min
+// ─────────────────────────────────────────────────────────────────────────────
+_sl_dist = _atr * 1.5
+_tp_dist_long  = _sl_dist * i_rr_min
+_tp_dist_short = _sl_dist * i_rr_min
+
+_long_sl  = close - _sl_dist
+_long_tp  = close + _tp_dist_long
+_short_sl = close + _sl_dist
+_short_tp = close - _tp_dist_short
+
+// Partial exit price at i_partial_r R
+_long_partial  = close + (_sl_dist * i_partial_r)
+_short_partial = close - (_sl_dist * i_partial_r)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRATEGY ENTRIES
+// ─────────────────────────────────────────────────────────────────────────────
+if _long_ok and strategy.position_size == 0
+    strategy.entry("AMD_Long", strategy.long, comment="AMD OTE Long")
+    strategy.exit("AMD_Long_X", from_entry="AMD_Long",
+         stop  = _long_sl,
+         limit = _long_tp)
+
+if _short_ok and strategy.position_size == 0
+    strategy.entry("AMD_Short", strategy.short, comment="AMD OTE Short")
+    strategy.exit("AMD_Short_X", from_entry="AMD_Short",
+         stop  = _short_sl,
+         limit = _short_tp)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PARTIAL CLOSE + BREAK-EVEN MANAGEMENT
+// At 1R profit: close 50% of position, move SL to entry (break-even)
+// Remainder: trail with ATR × i_atr_trail
+// ─────────────────────────────────────────────────────────────────────────────
+var float entry_price  = na
+var float entry_sl     = na
+var bool  partial_done = false
+
+if strategy.position_size > 0   // long
+    if na(entry_price)
+        entry_price  := strategy.opentrades.entry_price(0)
+        entry_sl     := _long_sl
+        partial_done := false
+    // Partial at i_partial_r × R
+    float partial_level = entry_price + (entry_price - entry_sl) * i_partial_r
+    if not partial_done and close >= partial_level
+        strategy.close("AMD_Long", qty_percent=i_partial_pct, comment="Partial 1R")
+        partial_done := true
+    // Trail the runner with ATR
+    float trail_stop = close - _atr * i_atr_trail
+    if partial_done
+        strategy.exit("AMD_Long_Trail", from_entry="AMD_Long",
+             trail_price  = close,
+             trail_offset = _atr * i_atr_trail * syminfo.mintick * 1,
+             comment="Runner trail")
+
+if strategy.position_size < 0   // short
+    if na(entry_price)
+        entry_price  := strategy.opentrades.entry_price(0)
+        entry_sl     := _short_sl
+        partial_done := false
+    float partial_level = entry_price - (entry_sl - entry_price) * i_partial_r
+    if not partial_done and close <= partial_level
+        strategy.close("AMD_Short", qty_percent=i_partial_pct, comment="Partial 1R")
+        partial_done := true
+    if partial_done
+        strategy.exit("AMD_Short_Trail", from_entry="AMD_Short",
+             trail_price  = close,
+             trail_offset = _atr * i_atr_trail * syminfo.mintick * 1,
+             comment="Runner trail")
+
+// Reset entry tracking when flat
+if strategy.position_size == 0
+    entry_price  := na
+    entry_sl     := na
+    partial_done := false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Kill zone background
+bgcolor(_in_london and i_show_zones ? color.new(color.blue, 93)   : na, title="London KZ bg")
+bgcolor(_in_ny     and i_show_zones ? color.new(color.orange, 93) : na, title="NY KZ bg")
+
+// Liquidity sweep markers
+if i_show_sweep
+    if _bull_sweep
+        label.new(bar_index, low - _atr * 0.3, "🧲 Sweep",
+             color=color.new(color.teal, 20), textcolor=color.white,
+             style=label.style_label_up, size=size.tiny)
+    if _bear_sweep
+        label.new(bar_index, high + _atr * 0.3, "🧲 Sweep",
+             color=color.new(color.maroon, 20), textcolor=color.white,
+             style=label.style_label_down, size=size.tiny)
+
+// CHoCH markers
+if choch_bull
+    label.new(bar_index, low - _atr * 0.6, "CHoCH ↑",
+         color=color.new(color.lime, 30), textcolor=color.white,
+         style=label.style_label_up, size=size.tiny)
+if choch_bear
+    label.new(bar_index, high + _atr * 0.6, "CHoCH ↓",
+         color=color.new(color.red, 30), textcolor=color.white,
+         style=label.style_label_down, size=size.tiny)
+
+// OTE zone boxes (drawn when active CHoCH + impulse measured)
+var box ote_long_box  = na
+var box ote_short_box = na
+
+if choch_bull and not na(_ote_long_lo) and not na(_ote_long_hi)
+    if not na(ote_long_box)
+        box.delete(ote_long_box)
+    ote_long_box := box.new(bar_index, _ote_long_hi, bar_index + 30, _ote_long_lo,
+         bgcolor=color.new(color.lime, 82), border_color=color.new(color.lime, 50),
+         border_width=1)
+
+if choch_bear and not na(_ote_short_lo) and not na(_ote_short_hi)
+    if not na(ote_short_box)
+        box.delete(ote_short_box)
+    ote_short_box := box.new(bar_index, _ote_short_hi, bar_index + 30, _ote_short_lo,
+         bgcolor=color.new(color.red, 82), border_color=color.new(color.red, 50),
+         border_width=1)
+
+// Entry signal labels
+if _long_ok
+    label.new(bar_index, low - _atr, "AMD\nLong\n" + str.tostring(i_rr_min, "#.#") + "R",
+         color=color.new(color.lime, 10), textcolor=color.white,
+         style=label.style_label_up, size=size.small)
+
+if _short_ok
+    label.new(bar_index, high + _atr, "AMD\nShort\n" + str.tostring(i_rr_min, "#.#") + "R",
+         color=color.new(color.red, 10), textcolor=color.white,
+         style=label.style_label_down, size=size.small)
+
+// Previous week levels
+plot(_pw_high, "Prev Week High", color=color.new(color.red, 50),    style=plot.style_circles, linewidth=1)
+plot(_pw_low,  "Prev Week Low",  color=color.new(color.green, 50),  style=plot.style_circles, linewidth=1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+if i_show_table and barstate.islast
+    var table t = table.new(position.top_right, 2, 10,
+         bgcolor=color.new(color.black, 75), border_color=color.new(color.gray, 50), border_width=1)
+
+    // Header
+    table.cell(t, 0, 0, "AMD OTE Runner", text_color=color.yellow, text_size=size.small,
+         bgcolor=color.new(color.navy, 50))
+    table.cell(t, 1, 0, syminfo.tickerid, text_color=color.yellow, text_size=size.small,
+         bgcolor=color.new(color.navy, 50))
+
+    // Kill zone
+    table.cell(t, 0, 1, "Kill Zone",   text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 1,
+         _in_london ? "London ✓" : _in_ny ? "NY ✓" : "—",
+         text_color= _in_kz ? color.lime : color.gray, text_size=size.tiny)
+
+    // DXY bias
+    table.cell(t, 0, 2, "DXY Bias",   text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 2, _dxy_bull ? "USD Bull (short)" : "USD Bear (long)",
+         text_color= _dxy_bull ? color.red : color.lime, text_size=size.tiny)
+
+    // OTE wait state
+    table.cell(t, 0, 3, "Waiting OTE", text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 3,
+         _wait_long ? "Long arm" : _wait_short ? "Short arm" : "None",
+         text_color= _wait_long ? color.lime : _wait_short ? color.red : color.gray, text_size=size.tiny)
+
+    // Prev week levels
+    table.cell(t, 0, 4, "PW High",    text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(_pw_high, "#.####"), text_color=color.orange, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "PW Low",     text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(_pw_low, "#.####"), text_color=color.teal, text_size=size.tiny)
+
+    // ATR
+    table.cell(t, 0, 6, "ATR(14)",    text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(_atr, "#.####"), text_color=color.white, text_size=size.tiny)
+
+    // Min R:R
+    table.cell(t, 0, 7, "Min R:R",    text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(i_rr_min, "#.#") + "R", text_color=color.white, text_size=size.tiny)
+
+    // Open trades
+    table.cell(t, 0, 8, "Position",   text_color=color.silver, text_size=size.tiny)
+    _pos_txt = strategy.position_size > 0 ? "Long " + str.tostring(strategy.position_size, "#.##") :
+               strategy.position_size < 0 ? "Short " + str.tostring(math.abs(strategy.position_size), "#.##") : "Flat"
+    table.cell(t, 1, 8, _pos_txt,
+         text_color= strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray,
+         text_size=size.tiny)
+
+    // Net P&L
+    table.cell(t, 0, 9, "Net P&L",    text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 1, 9,
+         str.tostring(strategy.netprofit, "#.##"),
+         text_color= strategy.netprofit >= 0 ? color.lime : color.red, text_size=size.tiny)

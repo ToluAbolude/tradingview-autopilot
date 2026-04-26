@@ -11,13 +11,18 @@
  * Pass a strategy name to run just one: node push_reload_verify.mjs jg_smart_trail
  */
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import os from 'os';
 import { setSource, save, ensurePineEditorOpen, getErrors } from '../src/core/pine.js';
 import { evaluate, getClient } from '../src/connection.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const STRAT_DIR = 'C:/Users/Tda-d/tradingview-autopilot/strategies';
+const STRAT_DIR = os.platform() === 'linux'
+  ? '/home/ubuntu/trading-data/strategies'
+  : join(__dirname, '../strategies');
 
 // All 8 strategies with their best backtest combos and v1 baselines
 const STRATEGIES = [
@@ -98,9 +103,9 @@ const STRATEGIES = [
     file: 'wor_okala_nq_scalper.pine',
     name: 'WOR Okala NQ Scalper',
     combos: [
-      { sym: 'BLACKBULL:NAS100', tf: '5', label: 'NAS100 5M', v1: { net: 0, wr: 0, pf: 0 } },
-      { sym: 'BLACKBULL:NAS100', tf: '1', label: 'NAS100 1M', v1: { net: 0, wr: 0, pf: 0 } },
-      { sym: 'BLACKBULL:US30',   tf: '5', label: 'US30 5M',   v1: { net: 0, wr: 0, pf: 0 } },
+      { sym: 'BLACKBULL:ETHUSD', tf: '5', label: 'ETH 5M',   v1: { net: 0, wr: 0, pf: 0 } },
+      { sym: 'NASDAQ:QQQ',      tf: '5', label: 'QQQ 5M',   v1: { net: 0, wr: 0, pf: 0 } },
+      { sym: 'NASDAQ:QQQ',      tf: '1', label: 'QQQ 1M',   v1: { net: 0, wr: 0, pf: 0 } },
     ],
   },
 ];
@@ -111,36 +116,47 @@ const ACTIVE_STRATEGIES = filterKey
   ? STRATEGIES.filter(s => s.key === filterKey || s.file.includes(filterKey))
   : STRATEGIES;
 
-async function removeExisting() {
-  const entityId = await evaluate(`(function() {
-    try {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value();
-      var sources = chart._chartWidget.model().model().dataSources();
-      for (var i = 0; i < sources.length; i++) {
-        var s = sources[i];
-        if (!s.metaInfo) continue;
-        try {
-          if ((s.metaInfo().description || '').indexOf('Smart Trail') >= 0) {
-            var id = s._id && typeof s._id.value === 'function' ? s._id.value() : null;
-            return id;
-          }
-        } catch(e) {}
-      }
-    } catch(e) {}
-    return null;
-  })()`);
+async function removeExisting(stratName) {
+  // Remove ALL instances of a strategy by name substring (prevents duplicate accumulation)
+  let removed = 0;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const entityId = await evaluate(`(function() {
+      try {
+        var chart = window.TradingViewApi._activeChartWidgetWV.value();
+        var sources = chart._chartWidget.model().model().dataSources();
+        for (var i = 0; i < sources.length; i++) {
+          var s = sources[i];
+          if (!s.metaInfo) continue;
+          try {
+            var desc = s.metaInfo().description || '';
+            var nameToMatch = ${JSON.stringify(stratName || '')};
+            var matches = nameToMatch
+              ? desc.indexOf(nameToMatch) >= 0
+              : (desc.indexOf('Smart Trail') >= 0 || desc.indexOf('OkalaNQ') >= 0 ||
+                 desc.indexOf('WOR') >= 0 || desc.indexOf('JG ') >= 0 ||
+                 desc.indexOf('Tori') >= 0 || desc.indexOf('TEST') >= 0);
+            if (matches) {
+              var id = s._id && typeof s._id.value === 'function' ? s._id.value() : null;
+              return id;
+            }
+          } catch(e) {}
+        }
+      } catch(e) {}
+      return null;
+    })()`);
 
-  if (entityId) {
-    console.log(`  Removing existing: ${entityId}`);
+    if (!entityId) break;
+    console.log(`  Removing: ${entityId}`);
     await evaluate(`(function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value();
       chart.removeEntity('${entityId}', { disableUndo: false });
     })()`);
-    await sleep(700);
-  } else {
-    console.log('  No existing strategy instance found.');
+    await sleep(500);
+    removed++;
   }
-  return entityId;
+  if (removed === 0) console.log('  No existing strategy instance found.');
+  else console.log(`  Removed ${removed} existing instance(s).`);
+  return removed;
 }
 
 async function clickAddToChart() {
@@ -154,7 +170,8 @@ async function clickAddToChart() {
       var title = (btns[i].getAttribute('title') || '').trim();
       var ltext = text.toLowerCase();
       if (ltext === 'add to chart' || ltext === 'update on chart' ||
-          ltext === 'save and add to chart' || title === 'Add to chart') {
+          ltext === 'save and add to chart' ||
+          title === 'Add to chart' || title === 'Update on chart') {
         btns[i].click();
         return 'clicked:' + (text || title);
       }
@@ -317,7 +334,7 @@ async function pushStrategy(filePath, stratName) {
   console.log('═'.repeat(80));
 
   console.log('\n[1] Remove existing...');
-  await removeExisting();
+  await removeExisting(stratName);
 
   console.log('\n[2] Push source...');
   const editorReady = await ensurePineEditorOpen();
@@ -380,6 +397,7 @@ async function main() {
   for (const c of strat.combos) {
     process.stdout.write(`${c.label}... `);
     await setChart(c.sym, c.tf);
+    await sleep(15000); // wait for TradingView to recalculate strategy tester
 
     // Switch Exit Mode if needed (only applies to JG Smart Trail)
     if (c.exitMode && c.exitMode !== lastExitMode) {
@@ -389,7 +407,7 @@ async function main() {
       await sleep(1000);
     }
 
-    const m = await waitMetrics(18);
+    const m = await waitMetrics(90);
 
     if (!m || m.error || m.loading) {
       console.log('ERROR:', JSON.stringify(m));

@@ -1,0 +1,120 @@
+#cloud-config
+# Oracle Cloud VM - TradingView Autopilot Setup
+# Target: Ubuntu 22.04 amd64 (x86_64)
+# Repo: https://github.com/ToluAbolude/tradingview-autopilot.git
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - git
+  - curl
+  - xvfb
+  - x11vnc
+  - cron
+
+write_files:
+  - path: /usr/local/bin/start-vnc.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      pkill x11vnc 2>/dev/null
+      sleep 1
+      x11vnc -display :1 -forever -localhost -rfbport 5900 \
+        >> /opt/tradingview-autopilot/data/vnc.log 2>&1 &
+      echo "VNC running on localhost:5900 (SSH-tunnel only)"
+
+  - path: /etc/systemd/system/xvfb.service
+    content: |
+      [Unit]
+      Description=X Virtual Frame Buffer
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStartPre=/bin/rm -f /tmp/.X1-lock
+      ExecStart=/usr/bin/Xvfb :1 -screen 0 1920x1080x24 -ac -noreset
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/tradingview.service
+    content: |
+      [Unit]
+      Description=TradingView Google Chrome CDP on port 9222
+      After=network.target xvfb.service
+      Requires=xvfb.service
+
+      [Service]
+      Type=simple
+      User=ubuntu
+      Group=ubuntu
+      Environment=HOME=/home/ubuntu
+      Environment=DISPLAY=:1
+      ExecStart=/usr/bin/google-chrome --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir=/home/ubuntu/chrome-profile --no-first-run --no-default-browser-check --disable-dev-shm-usage --disable-gpu --no-sandbox --window-size=1920,1080 https://www.tradingview.com/chart/
+      Restart=always
+      RestartSec=15
+      StandardOutput=append:/opt/tradingview-autopilot/data/chrome.log
+      StandardError=append:/opt/tradingview-autopilot/data/chrome.log
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/tradingview-vnc.service
+    content: |
+      [Unit]
+      Description=VNC for TradingView SSH-tunnel access only
+      After=tradingview.service
+
+      [Service]
+      Type=forking
+      User=ubuntu
+      Group=ubuntu
+      ExecStart=/usr/local/bin/start-vnc.sh
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  - apt-get install -y nodejs
+  - wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
+  - apt-get install -y libgtk-3-0 libvulkan1 xdg-utils
+  - dpkg -i /tmp/chrome.deb || apt-get install -f -y
+  - git clone https://github.com/ToluAbolude/tradingview-autopilot.git /opt/tradingview-autopilot
+  - cd /opt/tradingview-autopilot && npm install
+  - mkdir -p /opt/tradingview-autopilot/data/trade_log
+  - find /opt/tradingview-autopilot/scripts -name "*.mjs" -exec sed -i 's|C:/Users/Tda-d/tradingview-autopilot|/opt/tradingview-autopilot|g' {} \;
+  - find /opt/tradingview-autopilot/scripts -name "*.mjs" -exec sed -i 's|C:/Users/Tda-d/tradingview-mcp-jackson|/opt/tradingview-autopilot|g' {} \;
+  - chown -R ubuntu:ubuntu /opt/tradingview-autopilot
+  - systemctl daemon-reload
+  - systemctl enable xvfb tradingview
+  - systemctl start xvfb
+  - sleep 3
+  - systemctl start tradingview
+  - |
+    (crontab -u ubuntu -l 2>/dev/null; echo "
+    # TradingView Trading Sessions - UTC times (BST=UTC+1 Apr-Oct, GMT=UTC Oct-Apr)
+    # London open  09:07 BST = 08:07 UTC
+    7 8 * * 1-5  cd /opt/tradingview-autopilot && /usr/bin/node scripts/trading/session_runner.mjs >> data/london.log 2>&1
+    # NY open  14:07 BST = 13:07 UTC
+    7 13 * * 1-5 cd /opt/tradingview-autopilot && /usr/bin/node scripts/trading/session_runner.mjs >> data/ny.log 2>&1
+    # Asian open  01:07 BST = 00:07 UTC
+    7 0 * * *    cd /opt/tradingview-autopilot && /usr/bin/node scripts/trading/session_runner.mjs >> data/asian.log 2>&1
+    # London close  18:03 BST = 17:03 UTC
+    3 17 * * 1-5 cd /opt/tradingview-autopilot && /usr/bin/node scripts/trading/session_runner.mjs >> data/london_close.log 2>&1
+    ") | crontab -u ubuntu -
+
+final_message: |
+  TradingView VM setup complete!
+  Next steps:
+  1. SSH in: ssh -i ~/Downloads/ssh-key-2026-04-15.key ubuntu@YOUR_VM_IP
+  2. Check services: systemctl status xvfb tradingview
+  3. Start VNC: systemctl start tradingview-vnc
+  4. SSH tunnel: ssh -L 5900:localhost:5900 -i ~/Downloads/ssh-key-2026-04-15.key ubuntu@YOUR_VM_IP -N
+  5. Connect VNC viewer to localhost:5900 and log into TradingView + connect BlackBull broker
+  6. Stop VNC after login: systemctl stop tradingview-vnc
+  Cron jobs fire automatically. Logs at /opt/tradingview-autopilot/data/

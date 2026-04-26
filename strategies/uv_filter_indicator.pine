@@ -1,0 +1,278 @@
+//@version=6
+// UV Filter Comparison — Indicator (4 combos, no strategy tester)
+// Tests Factor U (PDH/PDL proximity) and Factor V (ADR <70% consumed) vs baseline.
+// Outputs wins/total as hidden plots readable by DOM scraper at last bar.
+indicator("UV Filter Comparison [4 Combos]", overlay=false, max_bars_back=500)
+
+i_bos_lb     = input.int(5,    "BOS pivot lookback",       minval=2, maxval=20)
+i_sl_mult    = input.float(1.5,"SL x ATR14",               minval=0.5, maxval=4.0, step=0.1)
+i_tp_mult    = input.float(3.0,"TP x ATR14",               minval=1.0, maxval=8.0, step=0.5)
+i_retest_tol = input.float(0.5,"Retest tolerance x ATR14", minval=0.1, maxval=2.0, step=0.1)
+
+_atr   = ta.atr(14)
+_ema21 = ta.ema(close, 21)
+_ema50 = ta.ema(close, 50)
+
+// Previous day OHLC — lookahead_off gives last confirmed daily bar (= yesterday)
+_pdh = request.security(syminfo.tickerid, "D", high,  lookahead=barmerge.lookahead_off)
+_pdl = request.security(syminfo.tickerid, "D", low,   lookahead=barmerge.lookahead_off)
+_pdc = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+// ADR: 5-day SMA of confirmed daily ranges
+_adr_raw = request.security(syminfo.tickerid, "D", ta.sma(high - low, 5), lookahead=barmerge.lookahead_off)
+_adr = _adr_raw > 0 ? _adr_raw : _pdh - _pdl
+
+// Today's developing range — tracked manually via day-change detection (no lookahead)
+var float _td_h = na
+var float _td_l = na
+bool _is_new_day = na(time("D")[1]) or time("D") != time("D")[1]
+if _is_new_day or na(_td_h)
+    _td_h := high
+    _td_l := low
+else
+    _td_h := math.max(_td_h, high)
+    _td_l := math.min(_td_l, low)
+
+// UV filter conditions
+_range_consumed = _adr > 0 ? (_td_h - _td_l) / _adr : 0.0
+_price_pos      = (_pdh > _pdl) ? (close - _pdl) / (_pdh - _pdl) : 0.5
+
+_u_long  = _price_pos < 0.40   // at PDL zone — lower 40% of prev day's range
+_u_short = _price_pos > 0.60   // at PDH zone — upper 40% of prev day's range
+_v_ok    = _range_consumed < 0.70  // ADR not yet exhausted
+
+// BOS detection
+_ph = ta.pivothigh(high, i_bos_lb, i_bos_lb)
+_pl = ta.pivotlow(low,   i_bos_lb, i_bos_lb)
+
+var float _last_ph = na
+var float _last_pl = na
+if not na(_ph)
+    _last_ph := _ph
+if not na(_pl)
+    _last_pl := _pl
+
+_bos_bull = not na(_last_ph) and close[1] <= _last_ph and close > _last_ph
+_bos_bear = not na(_last_pl) and close[1] >= _last_pl and close < _last_pl
+
+var float _bos_lvl_bull = na
+var float _bos_lvl_bear = na
+var int   _bos_bar_bull = na
+var int   _bos_bar_bear = na
+
+if _bos_bull
+    _bos_lvl_bull := _last_ph
+    _bos_bar_bull := bar_index
+if _bos_bear
+    _bos_lvl_bear := _last_pl
+    _bos_bar_bear := bar_index
+
+var bool _bull_active = false
+var bool _bear_active = false
+
+if _bos_bull
+    _bull_active := true
+    _bear_active := false
+if _bos_bear
+    _bear_active := true
+    _bull_active := false
+if not na(_bos_bar_bull) and (bar_index - _bos_bar_bull) > 30
+    _bull_active := false
+if not na(_bos_bar_bear) and (bar_index - _bos_bar_bear) > 30
+    _bear_active := false
+
+_retest_bull = _bull_active and not na(_bos_lvl_bull) and
+     math.abs(close - _bos_lvl_bull) < i_retest_tol * _atr and
+     close > _bos_lvl_bull * 0.998
+
+_retest_bear = _bear_active and not na(_bos_lvl_bear) and
+     math.abs(close - _bos_lvl_bear) < i_retest_tol * _atr and
+     close < _bos_lvl_bear * 1.002
+
+_ema_bull = close > _ema21 and _ema21 > _ema50
+_ema_bear = close < _ema21 and _ema21 < _ema50
+
+_raw_long  = _retest_bull and _ema_bull
+_raw_short = _retest_bear and _ema_bear
+
+// UV filter helpers (top-level — no local function defs inside if blocks)
+uv_long(uOn, vOn)  => (not uOn or _u_long)  and (not vOn or _v_ok)
+uv_short(uOn, vOn) => (not uOn or _u_short) and (not vOn or _v_ok)
+
+calcWR(w, n) => n > 0 ? math.round(w / n * 1000) / 10 : 0.0
+
+// Virtual trade state — one set per combo (no UDT, no semicolons)
+var float e1  = na
+var float sl1 = na
+var float tp1 = na
+var bool  il1 = false
+var bool  a1  = false
+var int   w1c = 0
+var int   n1  = 0
+
+var float e2  = na
+var float sl2 = na
+var float tp2 = na
+var bool  il2 = false
+var bool  a2  = false
+var int   w2  = 0
+var int   n2  = 0
+
+var float e3  = na
+var float sl3 = na
+var float tp3 = na
+var bool  il3 = false
+var bool  a3  = false
+var int   w3  = 0
+var int   n3  = 0
+
+var float e4  = na
+var float sl4 = na
+var float tp4 = na
+var bool  il4 = false
+var bool  a4  = false
+var int   w4  = 0
+var int   n4  = 0
+
+resolveWins(active, isLong, sl, tp, wins, total) =>
+    nw  = wins
+    nt  = total
+    na_ = active
+    if active
+        hit_tp = isLong ? high >= tp : low  <= tp
+        hit_sl = isLong ? low  <= sl : high >= sl
+        if hit_tp
+            nw  := wins + 1
+            nt  := total + 1
+            na_ := false
+        else if hit_sl
+            nt  := total + 1
+            na_ := false
+    [na_, nw, nt]
+
+openT(isLong) =>
+    nsl = isLong ? close - i_sl_mult * _atr : close + i_sl_mult * _atr
+    ntp = isLong ? close + i_tp_mult * _atr : close - i_tp_mult * _atr
+    [close, nsl, ntp, isLong, true]
+
+// --- Combo 1: No filter ---
+[a1n, w1n, n1n] = resolveWins(a1, il1, sl1, tp1, w1c, n1)
+a1  := a1n
+w1c := w1n
+n1  := n1n
+if (_raw_long and uv_long(false, false) and not a1) or (_raw_short and uv_short(false, false) and not a1)
+    lng = _raw_long and uv_long(false, false)
+    [ne, ns, nt2, ni, na2] = openT(lng)
+    e1  := ne
+    sl1 := ns
+    tp1 := nt2
+    il1 := ni
+    a1  := na2
+
+// --- Combo 2: U only (PDH/PDL proximity) ---
+[a2n, w2n, n2n] = resolveWins(a2, il2, sl2, tp2, w2, n2)
+a2 := a2n
+w2 := w2n
+n2 := n2n
+if (_raw_long and uv_long(true, false) and not a2) or (_raw_short and uv_short(true, false) and not a2)
+    lng = _raw_long and uv_long(true, false)
+    [ne, ns, nt2, ni, na2] = openT(lng)
+    e2  := ne
+    sl2 := ns
+    tp2 := nt2
+    il2 := ni
+    a2  := na2
+
+// --- Combo 3: V only (ADR room to move) ---
+[a3n, w3n, n3n] = resolveWins(a3, il3, sl3, tp3, w3, n3)
+a3 := a3n
+w3 := w3n
+n3 := n3n
+if (_raw_long and uv_long(false, true) and not a3) or (_raw_short and uv_short(false, true) and not a3)
+    lng = _raw_long and uv_long(false, true)
+    [ne, ns, nt2, ni, na2] = openT(lng)
+    e3  := ne
+    sl3 := ns
+    tp3 := nt2
+    il3 := ni
+    a3  := na2
+
+// --- Combo 4: U + V combined ---
+[a4n, w4n, n4n] = resolveWins(a4, il4, sl4, tp4, w4, n4)
+a4 := a4n
+w4 := w4n
+n4 := n4n
+if (_raw_long and uv_long(true, true) and not a4) or (_raw_short and uv_short(true, true) and not a4)
+    lng = _raw_long and uv_long(true, true)
+    [ne, ns, nt2, ni, na2] = openT(lng)
+    e4  := ne
+    sl4 := ns
+    tp4 := nt2
+    il4 := ni
+    a4  := na2
+
+// Plots (transparent but visible — display.none hides from _data)
+plot(n1,  "C1_total", color=color.new(color.white,99))
+plot(w1c, "C1_wins",  color=color.new(color.white,99))
+plot(n2,  "C2_total", color=color.new(color.white,99))
+plot(w2,  "C2_wins",  color=color.new(color.white,99))
+plot(n3,  "C3_total", color=color.new(color.white,99))
+plot(w3,  "C3_wins",  color=color.new(color.white,99))
+plot(n4,  "C4_total", color=color.new(color.white,99))
+plot(w4,  "C4_wins",  color=color.new(color.white,99))
+
+if barstate.islast
+    log.info("RESULT|NoFilter|{0}|{1}|{2}", n1, w1c, calcWR(w1c, n1))
+    log.info("RESULT|Uonly|{0}|{1}|{2}",    n2, w2,  calcWR(w2,  n2))
+    log.info("RESULT|Vonly|{0}|{1}|{2}",    n3, w3,  calcWR(w3,  n3))
+    log.info("RESULT|UV|{0}|{1}|{2}",       n4, w4,  calcWR(w4,  n4))
+
+// ── Summary table ──
+var table tbl = table.new(position.top_right, 5, 6,
+     bgcolor=color.new(color.black,70), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    hdr  = color.new(color.gray, 20)
+    wr1v = calcWR(w1c, n1)
+    table.cell(tbl,0,0,"Combo",  text_color=color.yellow, bgcolor=hdr, text_size=size.small)
+    table.cell(tbl,1,0,"Trades", text_color=color.yellow, bgcolor=hdr, text_size=size.small)
+    table.cell(tbl,2,0,"Wins",   text_color=color.yellow, bgcolor=hdr, text_size=size.small)
+    table.cell(tbl,3,0,"WR%",    text_color=color.yellow, bgcolor=hdr, text_size=size.small)
+    table.cell(tbl,4,0,"dWR",    text_color=color.yellow, bgcolor=hdr, text_size=size.small)
+
+    wr1 = calcWR(w1c, n1)
+    bg1 = color.new(color.navy, 60)
+    table.cell(tbl,0,1,"No Filter (base)", text_color=color.white, bgcolor=bg1, text_size=size.tiny)
+    table.cell(tbl,1,1,str.tostring(n1),   text_color=color.white, bgcolor=bg1, text_size=size.tiny)
+    table.cell(tbl,2,1,str.tostring(w1c),  text_color=color.lime,  bgcolor=bg1, text_size=size.tiny)
+    table.cell(tbl,3,1,str.tostring(wr1)+"%", text_color=color.white, bgcolor=bg1, text_size=size.tiny)
+    table.cell(tbl,4,1,"+0.0%",            text_color=color.silver, bgcolor=bg1, text_size=size.tiny)
+
+    wr2  = calcWR(w2, n2)
+    dwr2 = wr2 - wr1v
+    bg2  = color.new(color.black, 60)
+    dc2  = dwr2 > 0 ? color.lime : dwr2 < 0 ? color.red : color.silver
+    table.cell(tbl,0,2,"U only (PDH/PDL)", text_color=color.white, bgcolor=bg2, text_size=size.tiny)
+    table.cell(tbl,1,2,str.tostring(n2),   text_color=color.white, bgcolor=bg2, text_size=size.tiny)
+    table.cell(tbl,2,2,str.tostring(w2),   text_color=color.lime,  bgcolor=bg2, text_size=size.tiny)
+    table.cell(tbl,3,2,str.tostring(wr2)+"%", text_color=color.white, bgcolor=bg2, text_size=size.tiny)
+    table.cell(tbl,4,2,(dwr2>=0?"+":"")+str.tostring(math.round(dwr2*10)/10)+"%", text_color=dc2, bgcolor=bg2, text_size=size.tiny)
+
+    wr3  = calcWR(w3, n3)
+    dwr3 = wr3 - wr1v
+    bg3  = color.new(color.navy, 60)
+    dc3  = dwr3 > 0 ? color.lime : dwr3 < 0 ? color.red : color.silver
+    table.cell(tbl,0,3,"V only (ADR room)", text_color=color.white, bgcolor=bg3, text_size=size.tiny)
+    table.cell(tbl,1,3,str.tostring(n3),   text_color=color.white, bgcolor=bg3, text_size=size.tiny)
+    table.cell(tbl,2,3,str.tostring(w3),   text_color=color.lime,  bgcolor=bg3, text_size=size.tiny)
+    table.cell(tbl,3,3,str.tostring(wr3)+"%", text_color=color.white, bgcolor=bg3, text_size=size.tiny)
+    table.cell(tbl,4,3,(dwr3>=0?"+":"")+str.tostring(math.round(dwr3*10)/10)+"%", text_color=dc3, bgcolor=bg3, text_size=size.tiny)
+
+    wr4  = calcWR(w4, n4)
+    dwr4 = wr4 - wr1v
+    bg4  = color.new(color.black, 60)
+    dc4  = dwr4 > 0 ? color.lime : dwr4 < 0 ? color.red : color.silver
+    table.cell(tbl,0,4,"U+V combined",    text_color=color.white, bgcolor=bg4, text_size=size.tiny)
+    table.cell(tbl,1,4,str.tostring(n4),  text_color=color.white, bgcolor=bg4, text_size=size.tiny)
+    table.cell(tbl,2,4,str.tostring(w4),  text_color=color.lime,  bgcolor=bg4, text_size=size.tiny)
+    table.cell(tbl,3,4,str.tostring(wr4)+"%", text_color=color.white, bgcolor=bg4, text_size=size.tiny)
+    table.cell(tbl,4,4,(dwr4>=0?"+":"")+str.tostring(math.round(dwr4*10)/10)+"%", text_color=dc4, bgcolor=bg4, text_size=size.tiny)

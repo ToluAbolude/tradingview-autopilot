@@ -225,15 +225,41 @@ export async function closeAllPositions() {
 // ── Get account equity ──
 export async function getEquity() {
   return evaluate(`(function() {
-    var text = document.body.textContent || '';
-    var eq = text.match(/Equity[\\s\\n]*([\\d,\\.]+)/);
-    var bal = text.match(/Account Balance[\\s\\n]*([\\d,\\.]+)/);
-    var pnl = text.match(/Unrealized P\\/L[\\s\\n]*(-?[\\d,\\.]+)/);
-    return {
-      equity:  eq  ? parseFloat(eq[1].replace(/,/g,''))  : null,
-      balance: bal ? parseFloat(bal[1].replace(/,/g,'')) : null,
-      unrealisedPnl: pnl ? parseFloat(pnl[1].replace(/,/g,'')) : null,
-    };
+    var balance = null, equity = null;
+
+    // Primary: title-* label + value-* sibling in same parent row
+    var titles = document.querySelectorAll('[class*="title-"]');
+    for (var i = 0; i < titles.length; i++) {
+      var label = (titles[i].textContent || '').trim();
+      var row   = titles[i].parentElement;
+      if (!row) continue;
+      var valEl = row.querySelector('[class*="value-"]');
+      if (!valEl) continue;
+      var v = parseFloat((valEl.textContent || '').replace(/,/g, ''));
+      if (isNaN(v)) continue;
+      if (label === 'Account Balance') balance = v;
+      else if (label === 'Equity')     equity  = v;
+    }
+
+    // Fallback: value-* elements whose parent text starts with known labels
+    if (balance === null || equity === null) {
+      var valEls = document.querySelectorAll('[class*="value-"]');
+      for (var i = 0; i < valEls.length; i++) {
+        var p = valEls[i].parentElement;
+        if (!p) continue;
+        var pt = (p.textContent || '').trim();
+        var v  = parseFloat((valEls[i].textContent || '').replace(/,/g, ''));
+        if (isNaN(v)) continue;
+        if (balance === null && /^Account Balance/.test(pt)) balance = v;
+        if (equity  === null && /^Equity/.test(pt))          equity  = v;
+      }
+    }
+
+    var unrealisedPnl = (equity !== null && balance !== null)
+      ? Math.round((equity - balance) * 100) / 100
+      : null;
+
+    return { equity, balance, unrealisedPnl };
   })()`);
 }
 

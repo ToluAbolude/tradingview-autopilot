@@ -22,7 +22,7 @@ strategy("WOR — OkalaNQ Fixed-Stop Scalper",
      overlay           = true,
      default_qty_type  = strategy.fixed,
      default_qty_value = 1,
-     initial_capital   = 50000,
+     initial_capital   = 25000,
      commission_type   = strategy.commission.cash_per_contract,
      commission_value  = 4.0,
      slippage          = 2,
@@ -39,7 +39,7 @@ i_tp1_pts      = input.float(15.0,  "TP1 (points) — partial 50%",     minval=5
 i_tp2_pts      = input.float(40.0,  "TP2 (points) — full exit",       minval=10, maxval=200, group=GS)
 i_ext_lookback = input.int  (10,    "Over-extension Lookback (bars)",  minval=3, maxval=50,   group=GS,
      tooltip="Bars to measure if price has moved unusually far in one direction")
-i_ext_mult     = input.float(2.0,   "Extension Factor × EMA Distance", minval=1.0, maxval=5.0, group=GS,
+i_ext_mult     = input.float(0.5,   "Extension Factor × ATR",          minval=0.1, maxval=5.0, group=GS,
      tooltip="Price is 'over-extended' when it's this many times beyond the EMA band")
 i_fast_ema     = input.int  (9,     "Fast EMA",                        minval=3, maxval=20,   group=GS)
 i_slow_ema     = input.int  (21,    "Slow EMA",                        minval=10, maxval=50,  group=GS)
@@ -51,7 +51,7 @@ i_max_trades   = input.int  (6,     "Max Trades Per Day",              minval=1,
 i_max_losses   = input.int  (2,     "Stop Trading After N Losses",     minval=1, maxval=5,    group=GF,
      tooltip="OkalaNQ rule: stop for the day after 2 consecutive losses")
 i_sess_filter  = input.bool(true,  "NY Session Only (09:30-12:00 ET)", group=GF)
-i_vol_filter   = input.bool(true,  "Volume Spike Filter",              group=GF)
+i_vol_filter   = input.bool(false, "Volume Spike Filter",              group=GF)
 
 var GD = "🎨  Display"
 i_show_emas    = input.bool(true, "Show EMAs",           group=GD)
@@ -71,36 +71,31 @@ _vol_spike = not i_vol_filter or volume > _vol_avg * 1.2
 
 // ─── OVER-EXTENSION DETECTION ────────────────────────────────────────────────
 // OkalaNQ fades moves that have gone "too far too fast"
-// We define over-extension as: price has moved significantly beyond the slow EMA
-// in one direction, AND the fast move happened in few bars (momentum exhaustion)
+// Over-extension: prior bar closed significantly beyond the slow EMA
 
-// Distance from slow EMA, normalised
-_ema_dist   = close - _slow
-_ema_dist_n = _ema_dist / _slow * 100   // as % of EMA
+// Distance from slow EMA (prior bar)
+_ema_dist_prev = close[1] - _slow[1]
 
-// Max and min of the EMA distance over lookback — establishes "normal" range
-_dist_max = ta.highest(_ema_dist, i_ext_lookback)
-_dist_min = ta.lowest (_ema_dist, i_ext_lookback)
-
-// Average true range of EMA distance over the lookback
+// Threshold: ATR(10) * multiplier
 _normal_band = ta.atr(i_ext_lookback) * i_ext_mult
 
-// Over-extended UP: close well above slow EMA, reversal bar forming
-_over_bull = _ema_dist >  _normal_band and close < open   // price above EMA, bearish bar = exhaustion
-_over_bear = _ema_dist < -_normal_band and close > open   // price below EMA, bullish bar = exhaustion
+// Prior bar was over-extended (used as setup condition)
+_was_over_bull = _ema_dist_prev >  _normal_band   // prior close above EMA by >N×ATR
+_was_over_bear = _ema_dist_prev < -_normal_band   // prior close below EMA by >N×ATR
 
 // ─── REVERSION CONFIRMATION ──────────────────────────────────────────────────
-// Need at least one confirming bar before entry
-// Bullish reversion: prior bar was bearish extreme, current closes above its open
-_rev_long  = _over_bear and                           // below EMA, exhaustion signal
-             _fast > _fast[2] and                     // fast EMA flattening/turning up
-             low > low[1] and                         // higher low forming
+// Entry bar must show reversal: strong opposing candle moving back toward EMA
+
+// Bullish reversal: prior bar was stretched low, current bar is bullish engulfing
+_rev_long  = _was_over_bear and
+             close > open and                         // current bar is bullish
+             close > close[1] and                     // closes above prior close
              _vol_spike
 
-// Bearish reversion: prior bar was bullish extreme, current closes below its open
-_rev_short = _over_bull and                           // above EMA, exhaustion signal
-             _fast < _fast[2] and                     // fast EMA flattening/turning down
-             high < high[1] and                       // lower high forming
+// Bearish reversal: prior bar was stretched high, current bar is bearish engulfing
+_rev_short = _was_over_bull and
+             close < open and                         // current bar is bearish
+             close < close[1] and                     // closes below prior close
              _vol_spike
 
 // ─── SESSION FILTER ──────────────────────────────────────────────────────────
@@ -173,9 +168,9 @@ if f_short
 plot(i_show_emas ? _fast : na, "Fast EMA", color=color.new(color.yellow, 0), linewidth=1)
 plot(i_show_emas ? _slow : na, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
 
-// Over-extension shading
-bgcolor(_over_bull ? color.new(color.red,   88) : na, title="Over-extended Up")
-bgcolor(_over_bear ? color.new(color.green, 88) : na, title="Over-extended Down")
+// Over-extension shading (based on prior bar)
+bgcolor(_was_over_bull ? color.new(color.red,   88) : na, title="Over-extended Up")
+bgcolor(_was_over_bear ? color.new(color.green, 88) : na, title="Over-extended Down")
 
 if i_show_signals
     if f_long

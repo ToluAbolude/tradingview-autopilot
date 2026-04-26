@@ -1,0 +1,151 @@
+//@version=6
+// HTF Filter Comparison Strategy
+// Tests the impact of D1 (Factor S) and W1 (Factor T) bias filters
+// on a simple BOS + retest entry (the logic behind Alpha Kill).
+// Runs on XAUUSD H1 — our best validated symbol/TF.
+//
+// Baseline: BOS retest entry with no HTF filter
+// Test 1:  + D1 EMA trend required (Factor S)
+// Test 2:  + W1 EMA trend required (Factor T)
+// Test 3:  + Both D1 + W1 required (full S+T)
+strategy("HTF Filter Test (Factor S / T)",
+     shorttitle        = "HTF_ST_TEST",
+     overlay           = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 1.5,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2,
+     pyramiding        = 0,
+     calc_on_every_tick = false)
+
+// ── Inputs ──
+var GF = "HTF Filters"
+i_use_d1 = input.bool(true,  "Use D1 Trend Filter (Factor S)", group=GF)
+i_use_w1 = input.bool(true,  "Use W1 Trend Filter (Factor T)", group=GF)
+
+var GS = "Strategy"
+i_sl_mult = input.float(1.5, "SL × ATR14", minval=0.5, maxval=4.0, step=0.1, group=GS)
+i_tp_mult = input.float(3.0, "TP × ATR14", minval=1.0, maxval=8.0, step=0.5, group=GS)
+i_bos_lb  = input.int(5,    "BOS pivot lookback", minval=2, maxval=20, group=GS)
+i_retest_tol = input.float(0.5, "Retest tolerance × ATR14", minval=0.1, maxval=2.0, step=0.1, group=GS)
+
+// ── Core indicators ──
+_atr = ta.atr(14)
+_ema21 = ta.ema(close, 21)
+_ema50 = ta.ema(close, 50)
+
+// ── HTF Bias: D1 trend (Factor S proxy) ──
+// request.security gives us actual D1 EMA — the definitive test
+_d1_ema20 = request.security(syminfo.tickerid, "D", ta.ema(close, 20), lookahead=barmerge.lookahead_off)
+_d1_bull   = close > _d1_ema20
+_d1_bear   = close < _d1_ema20
+
+// ── HTF Bias: W1 trend (Factor T proxy) ──
+_w1_ema8 = request.security(syminfo.tickerid, "W", ta.ema(close, 8), lookahead=barmerge.lookahead_off)
+_w1_bull  = close > _w1_ema8
+_w1_bear  = close < _w1_ema8
+
+// ── D1 + W1 agreement ──
+_htf_bull = (not i_use_d1 or _d1_bull) and (not i_use_w1 or _w1_bull)
+_htf_bear = (not i_use_d1 or _d1_bear) and (not i_use_w1 or _w1_bear)
+
+// ── BOS detection: break of recent swing high/low ──
+// Pivot high/low with lookback
+_ph = ta.pivothigh(high, i_bos_lb, i_bos_lb)
+_pl = ta.pivotlow(low,   i_bos_lb, i_bos_lb)
+
+var float _last_ph = na
+var float _last_pl = na
+if not na(_ph)
+    _last_ph := _ph
+if not na(_pl)
+    _last_pl := _pl
+
+// BOS: close breaks above last pivot high (bull) / below last pivot low (bear)
+_bos_bull = not na(_last_ph) and close[1] <= _last_ph and close > _last_ph
+_bos_bear = not na(_last_pl) and close[1] >= _last_pl and close < _last_pl
+
+var float _bos_level_bull = na
+var float _bos_level_bear = na
+var int   _bos_bar_bull   = na
+var int   _bos_bar_bear   = na
+
+if _bos_bull
+    _bos_level_bull := _last_ph
+    _bos_bar_bull   := bar_index
+if _bos_bear
+    _bos_level_bear := _last_pl
+    _bos_bar_bear   := bar_index
+
+// Expire BOS after 30 bars
+var bool _bull_bos_active = false
+var bool _bear_bos_active = false
+
+if _bos_bull
+    _bull_bos_active := true
+    _bear_bos_active := false
+if _bos_bear
+    _bear_bos_active := true
+    _bull_bos_active := false
+if not na(_bos_bar_bull) and (bar_index - _bos_bar_bull) > 30
+    _bull_bos_active := false
+if not na(_bos_bar_bear) and (bar_index - _bos_bar_bear) > 30
+    _bear_bos_active := false
+
+// ── Retest: price pulls back to broken level within tolerance ──
+_retest_bull = _bull_bos_active and not na(_bos_level_bull) and
+     math.abs(close - _bos_level_bull) < i_retest_tol * _atr and
+     close > _bos_level_bull * 0.998  // still above the level (clean retest)
+
+_retest_bear = _bear_bos_active and not na(_bos_level_bear) and
+     math.abs(close - _bos_level_bear) < i_retest_tol * _atr and
+     close < _bos_level_bear * 1.002  // still below the level
+
+// ── EMA confirmation (intraday momentum) ──
+_ema_bull = close > _ema21 and _ema21 > _ema50
+_ema_bear = close < _ema21 and _ema21 < _ema50
+
+// ── Entry conditions ──
+_long_ok  = _retest_bull and _ema_bull and _htf_bull and strategy.position_size == 0
+_short_ok = _retest_bear and _ema_bear and _htf_bear and strategy.position_size == 0
+
+// ── Execute entries ──
+if _long_ok
+    float sl = close - i_sl_mult * _atr
+    float tp = close + i_tp_mult * _atr
+    strategy.entry("L", strategy.long)
+    strategy.exit("LX", "L", stop=sl, limit=tp)
+    _bull_bos_active := false
+
+if _short_ok
+    float sl = close + i_sl_mult * _atr
+    float tp = close - i_tp_mult * _atr
+    strategy.entry("S", strategy.short)
+    strategy.exit("SX", "S", stop=sl, limit=tp)
+    _bear_bos_active := false
+
+// ── Visuals ──
+plot(_d1_ema20, "D1 EMA20", color=color.new(color.orange, 40), linewidth=2)
+plot(_w1_ema8,  "W1 EMA8",  color=color.new(color.purple, 40), linewidth=2)
+
+bgcolor(_htf_bull ? color.new(color.lime, 96) : _htf_bear ? color.new(color.red, 96) : na)
+
+// ── Info Table ──
+var table t = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black,70), border_width=1)
+if barstate.islast
+    table.cell(t,0,0,"HTF Filter Test", text_color=color.yellow,  text_size=size.small)
+    table.cell(t,1,0,"S/T Comparison",  text_color=color.yellow,  text_size=size.small)
+    table.cell(t,0,1,"D1 Filter (S)",   text_color=color.silver,  text_size=size.tiny)
+    table.cell(t,1,1, i_use_d1 ? "ON" : "OFF", text_color= i_use_d1 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t,0,2,"W1 Filter (T)",   text_color=color.silver,  text_size=size.tiny)
+    table.cell(t,1,2, i_use_w1 ? "ON" : "OFF", text_color= i_use_w1 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t,0,3,"D1 Bias",         text_color=color.silver,  text_size=size.tiny)
+    table.cell(t,1,3, _d1_bull ? "BULL" : _d1_bear ? "BEAR" : "?",
+         text_color= _d1_bull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t,0,4,"W1 Bias",         text_color=color.silver,  text_size=size.tiny)
+    table.cell(t,1,4, _w1_bull ? "BULL" : _w1_bear ? "BEAR" : "?",
+         text_color= _w1_bull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t,0,5,"ATR14",           text_color=color.silver,  text_size=size.tiny)
+    table.cell(t,1,5, str.tostring(_atr, "#.##"), text_color=color.white, text_size=size.tiny)

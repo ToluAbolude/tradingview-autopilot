@@ -21,54 +21,91 @@
  */
 import { evaluate } from '../../src/connection.js';
 import { matchPattern, detectNamedPatterns } from './pattern_recognition.mjs';
+import { appendFileSync, existsSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import os from 'os';
+
+const IS_LINUX   = os.platform() === 'linux';
+const DATA_ROOT  = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
+const CTX_DIR    = join(DATA_ROOT, 'daily_context');
+
+function logDailyContext(label, tf, dc) {
+  try {
+    if (!existsSync(CTX_DIR)) mkdirSync(CTX_DIR, { recursive: true });
+    const date = new Date().toISOString().split('T')[0];
+    const file = join(CTX_DIR, `${date}.jsonl`);
+    const entry = JSON.stringify({
+      ts: new Date().toISOString(), sym: label, tf,
+      PDH: Math.round(dc.PDH * 10000) / 10000,
+      PDL: Math.round(dc.PDL * 10000) / 10000,
+      PDC: Math.round(dc.PDC * 10000) / 10000,
+      adr: Math.round(dc.adr * 10000) / 10000,
+      rangeConsumed: Math.round(dc.rangeConsumed * 1000) / 1000,
+      pricePos: Math.round(dc.pricePos * 1000) / 1000,
+      bias: dc.bias,
+    });
+    appendFileSync(file, entry + '\n');
+  } catch (_) {}
+}
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Full symbol universe (BlackBull Markets via TradingView) ──
 // Sorted by commission efficiency (spread/ADR ratio)
+// Scan order = WR performance rank from weekly_review.mjs audit.
+// All instruments kept — none permanently removed. Low-WR ones sit at the bottom
+// and only win if they post a genuinely high score (which requires EMA trend alignment).
+// The EMA flatness gate blocks ranging-market entries regardless of tier.
 export const FULL_SCAN_LIST = [
-  // ── TIER 1: Highest efficiency — move far relative to spread ──
-  { sym: 'BLACKBULL:XAUUSD',  label: 'XAUUSD',  tfs: ['15','30','5'],  autoShort: true,  tier: 1 },
-  { sym: 'BLACKBULL:NAS100',  label: 'NAS100',  tfs: ['5','15'],       autoShort: false, tier: 1 },
-  { sym: 'BLACKBULL:US30',    label: 'US30',    tfs: ['5','15'],       autoShort: false, tier: 1 },
-  { sym: 'BLACKBULL:BTCUSD',  label: 'BTCUSD',  tfs: ['15','5'],       autoShort: true,  tier: 1 },
-  { sym: 'BLACKBULL:ETHUSD',  label: 'ETHUSD',  tfs: ['5','1'],        autoShort: true,  tier: 1 },
-  { sym: 'BLACKBULL:XAGUSD',  label: 'XAGUSD',  tfs: ['15','5'],       autoShort: true,  tier: 1 },
-  { sym: 'BLACKBULL:WTI',     label: 'WTI',     tfs: ['15','5'],       autoShort: true,  tier: 1 },
+  // ── TIER 1: Proven high WR — ranked by 2-week audit (Apr 13-25) ──
+  // WTI 58%H1 | NAS100 48%H1 | US30 42%H1 | XAUUSD 34%H1 | EURUSD 40%H1 (rising)
+  { sym: 'BLACKBULL:WTI',     label: 'WTI',     tfs: ['60','15'],           autoShort: true,  tier: 1 },
+  { sym: 'BLACKBULL:NAS100',  label: 'NAS100',  tfs: ['60','15'],           autoShort: false, tier: 1 },
+  { sym: 'BLACKBULL:US30',    label: 'US30',    tfs: ['60','15'],           autoShort: false, tier: 1 },
+  { sym: 'BLACKBULL:XAUUSD',  label: 'XAUUSD',  tfs: ['60','15'],          autoShort: true,  tier: 1 },
+  { sym: 'BLACKBULL:SPX500',  label: 'SPX500',  tfs: ['60','15'],           autoShort: false, tier: 1 },
+  { sym: 'BLACKBULL:XAGUSD',  label: 'XAGUSD',  tfs: ['60','15'],          autoShort: true,  tier: 1 },
 
-  // ── TIER 2: Good efficiency ──
-  { sym: 'BLACKBULL:GBPUSD',  label: 'GBPUSD',  tfs: ['5','15'],       autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:EURUSD',  label: 'EURUSD',  tfs: ['5','15'],       autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:GBPJPY',  label: 'GBPJPY',  tfs: ['5','15'],       autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:USDJPY',  label: 'USDJPY',  tfs: ['5','15'],       autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:EURJPY',  label: 'EURJPY',  tfs: ['5','15'],       autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:SPX500',  label: 'SPX500',  tfs: ['5','15'],       autoShort: false, tier: 2 },
-  { sym: 'BLACKBULL:LTCUSD',  label: 'LTCUSD',  tfs: ['15'],           autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:BNBUSD',  label: 'BNBUSD',  tfs: ['15'],           autoShort: true,  tier: 2 },
+  // ── TIER 2: Situational — good in trending weeks, scan on H1 only ──
+  // EURUSD improved to 40% this week | JPY pairs consistent mid-20s
+  { sym: 'BLACKBULL:EURUSD',  label: 'EURUSD',  tfs: ['60'],      autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:USDJPY',  label: 'USDJPY',  tfs: ['60'],      autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:EURJPY',  label: 'EURJPY',  tfs: ['60'],      autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:GBPJPY',  label: 'GBPJPY',  tfs: ['60'],      autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:GBPUSD',  label: 'GBPUSD',  tfs: ['60'],      autoShort: true,  tier: 2 },
 
-  // ── TIER 3: Moderate efficiency ──
-  { sym: 'BLACKBULL:AUDUSD',  label: 'AUDUSD',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:USDCAD',  label: 'USDCAD',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:NZDUSD',  label: 'NZDUSD',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:USDCHF',  label: 'USDCHF',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:AUDJPY',  label: 'AUDJPY',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:SOLUSD',  label: 'SOLUSD',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:ADAUSD',  label: 'ADAUSD',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:XRPUSD',  label: 'XRPUSD',  tfs: ['15'],           autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:GER40',   label: 'GER40',   tfs: ['15'],           autoShort: false, tier: 3 },
-  { sym: 'BLACKBULL:UK100',   label: 'UK100',   tfs: ['15'],           autoShort: false, tier: 3 },
+  // ── TIER 3: Deprioritised — low recent WR, kept for trending opportunities ──
+  // BTCUSD/ETHUSD demoted: 2-6% WR this week — crypto bear/choppy conditions
+  // 15M removed from BTC/ETH — catastrophic signal quality (-40k pts)
+  // EMA flatness gate still blocks ranging entries regardless of tier
+  { sym: 'BLACKBULL:BTCUSD',  label: 'BTCUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:ETHUSD',  label: 'ETHUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:BNBUSD',  label: 'BNBUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:LTCUSD',  label: 'LTCUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:SOLUSD',  label: 'SOLUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:ADAUSD',  label: 'ADAUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:XRPUSD',  label: 'XRPUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:AUDUSD',  label: 'AUDUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:USDCAD',  label: 'USDCAD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:NZDUSD',  label: 'NZDUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:USDCHF',  label: 'USDCHF',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:AUDJPY',  label: 'AUDJPY',  tfs: ['60'],      autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:GER40',   label: 'GER40',   tfs: ['60'],      autoShort: false, tier: 3 },
+  { sym: 'BLACKBULL:UK100',   label: 'UK100',   tfs: ['60'],      autoShort: false, tier: 3 },
 ];
 
 // Session-aware: which symbols to prioritise per session
+// Ordered by 2-week audit WR: WTI(58%) > NAS100(48%) > US30(42%) > EURUSD(40%H1) > XAUUSD(34%)
+// BTC/ETH deprioritised — 2-6% WR week of Apr 21-25 (crypto bear conditions)
 function sessionSymbols(utcHour) {
   if (utcHour >= 0  && utcHour < 7)  // Asian
-    return ['BTCUSD','ETHUSD','XAUUSD','USDJPY','AUDUSD','GBPJPY'];
+    return ['BTCUSD','ETHUSD','XAUUSD','USDJPY','EURJPY'];
   if (utcHour >= 8  && utcHour < 13) // London
-    return ['XAUUSD','GBPUSD','EURUSD','BTCUSD','ETHUSD','GBPJPY','EURJPY','UK100','GER40','WTI'];
-  if (utcHour >= 13 && utcHour < 17) // London-NY overlap (BEST)
-    return ['XAUUSD','BTCUSD','ETHUSD','NAS100','US30','SPX500','GBPUSD','EURUSD','WTI','XAGUSD'];
+    return ['XAUUSD','WTI','BTCUSD','ETHUSD','EURJPY','USDJPY','UK100','GER40'];
+  if (utcHour >= 13 && utcHour < 17) // London-NY overlap (BEST) — indices dominate
+    return ['NAS100','US30','SPX500','WTI','XAUUSD','BTCUSD','ETHUSD','XAGUSD'];
   if (utcHour >= 17 && utcHour < 22) // NY only
-    return ['BTCUSD','ETHUSD','NAS100','US30','SPX500','XAUUSD','SOLUSD','BNBUSD'];
+    return ['NAS100','US30','SPX500','BTCUSD','ETHUSD','XAUUSD','SOLUSD','BNBUSD'];
   return ['BTCUSD','ETHUSD','XAUUSD']; // dead zone — crypto only
 }
 
@@ -183,8 +220,50 @@ function sessionQuality(utcHour) {
   return 0;
 }
 
+// ── Daily price range context ──
+// Segments bars by UTC day. Returns PDH/PDL/PDC, today's range, ADR, and bias.
+function buildDailyContext(bars) {
+  const dayOf = t => Math.floor(t / 86400);
+  const byDay = new Map();
+  for (const b of bars) {
+    const d = dayOf(b.t);
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(b);
+  }
+  const days = [...byDay.keys()].sort((a, b) => a - b);
+  if (days.length < 2) return null;
+
+  const todayDay = days[days.length - 1];
+  const ydayDay  = days[days.length - 2];
+  const todayBars = byDay.get(todayDay);
+  const ydayBars  = byDay.get(ydayDay);
+
+  const PDH = Math.max(...ydayBars.map(b => b.h));
+  const PDL = Math.min(...ydayBars.map(b => b.l));
+  const PDC = ydayBars[ydayBars.length - 1].c;
+
+  const todayH = Math.max(...todayBars.map(b => b.h));
+  const todayL = Math.min(...todayBars.map(b => b.l));
+
+  // ADR from last 5 complete days
+  const completeDays = days.slice(-6, -1);
+  const adr = completeDays.length > 0
+    ? completeDays.reduce((sum, d) => {
+        const db = byDay.get(d);
+        return sum + Math.max(...db.map(b => b.h)) - Math.min(...db.map(b => b.l));
+      }, 0) / completeDays.length
+    : PDH - PDL;
+
+  const lastClose    = bars[bars.length - 1].c;
+  const rangeConsumed = adr > 0 ? (todayH - todayL) / adr : 0;
+  const pricePos     = (PDH > PDL) ? (lastClose - PDL) / (PDH - PDL) : 0.5;
+  const bias         = lastClose > PDC ? 'bullish' : lastClose < PDC ? 'bearish' : 'neutral';
+
+  return { PDH, PDL, PDC, todayH, todayL, adr, rangeConsumed, pricePos, bias };
+}
+
 // ────────────────────────────────────────────────────────────────
-// STRATEGY ENGINE — runs ALL 8 strategies, returns vote + reasons
+// STRATEGY ENGINE — runs ALL strategies, returns vote + reasons
 //
 //  A  JG Smart Trail HA Scalper      (validated: BTC +$165, XAU +$114)
 //  B  JG EMA Stack                   (trend confirmation 8/21/50/100)
@@ -202,8 +281,13 @@ function sessionQuality(utcHour) {
 //  N  WOR Marci HTF Mean Reversion   (price at range extreme + HTF bias)
 //  O  WOR NBB ICT Power of 3 / OTE   (AMD model + Fibonacci OTE 62-79%)
 //  P  WOR Okala NQ Scalper           (over-extension fade, NAS100/indices)
+  //  Q  Alpha Kill v1 BOS+Retest       (XAUUSD H1 only — PF=1.209, +2 pts)
+  //  R  Ironclad MTF Market Structure  (D1 trend + 15M MSS, 72% WR backtested)
+  //  S  Daily Trend Alignment          (D1 EMA proxy — filters counter-trend day trades)
+  //  T  Weekly Trend Alignment         (W1 EMA proxy — macro direction confirmation)
+  //  U  Daily Extreme Zone             (price in favorable half of PDH-PDL — +1 bonus)
 // ────────────────────────────────────────────────────────────────
-function runAllStrategies(bars, dir, utcHour, label) {
+function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
   const atr    = calcATR(bars);
   const ema8   = calcEMA(bars, 8);
@@ -223,6 +307,15 @@ function runAllStrategies(bars, dir, utcHour, label) {
   let score = 0;
   const reasons = [];
   const strats  = [];
+
+  // ── Flatness gate: if EMA8/21/50 are all within 0.4% of each other the market
+  //    is dead-ranging — weekly audit showed 8–14% WR in those conditions.
+  //    Hard-cap score at 2 so it never reaches the 11-point threshold.
+  const emaSpread = Math.max(ema8[n], ema21[n], ema50[n]) - Math.min(ema8[n], ema21[n], ema50[n]);
+  const emaFlat   = emaSpread / ema50[n] < 0.004;
+  if (emaFlat) {
+    return { score: 2, reasons: ['EMA flat (ranging market — no edge)'], strategies: [], rsi: 50, atrVal: atr[n] };
+  }
 
   // ── A. JG Smart Trail direction ──
   if (st.dir[n] !== null) {
@@ -404,28 +497,111 @@ function runAllStrategies(bars, dir, utcHour, label) {
     if (atRangeTop)    { score++; reasons.push(`Mean reversion (range top ${(rangePos*100).toFixed(0)}%)`);    strats.push('N'); }
   }
 
-  // ── O. WOR NBB ICT Power of 3 — AMD model + OTE Fibonacci ──
-  // Detect: false break (manipulation) of recent swing → OTE retracement for distribution
-  // OTE = 61.8%-79% retracement of the impulse move (Fibonacci)
+  // ── O. WOR NBB ICT Power of 3 — AMD model + OTE Fibonacci (two-stage) ──
+  // Stage 1 (depth):  price entered the 61.8–79% zone within the last 15 bars
+  // Stage 2 (retest): current candle is at the zone boundary with a rejection body
+  // Both stages must pass independently — prevents firing on pass-through moves
   {
     if (n >= 20) {
-      // Find the impulse move (last significant swing)
-      const swing = bars.slice(n-20, n-2);
-      const swHigh = Math.max(...swing.map(b=>b.h));
-      const swLow  = Math.min(...swing.map(b=>b.l));
+      const swing   = bars.slice(n-20, n-2);
+      const swHigh  = Math.max(...swing.map(b=>b.h));
+      const swLow   = Math.min(...swing.map(b=>b.l));
       const swRange = swHigh - swLow;
+
       if (swRange > atr[n] * 1.5) {
-        // For long: impulse was down (swLow recent), price retracing up, OTE = 62-79% of range
-        const fibLong618 = swLow + swRange * 0.618;
-        const fibLong79  = swLow + swRange * 0.79;
-        const inOTELong  = last.c >= fibLong618 && last.c <= fibLong79 * 1.005 && dir === 'long';
-        // For short: impulse was up (swHigh recent), price retracing down, OTE = 62-79%
+        // Fib levels — long: retracement up from swLow; short: retracement down from swHigh
+        const fibLong618  = swLow  + swRange * 0.618;
+        const fibLong79   = swLow  + swRange * 0.79;
         const fibShort618 = swHigh - swRange * 0.618;
         const fibShort79  = swHigh - swRange * 0.79;
-        const inOTEShort  = last.c <= fibShort618 && last.c >= fibShort79 * 0.995 && dir === 'short';
-        if (inOTELong)  { score++; reasons.push('ICT OTE zone (61.8-79% long)');  strats.push('O'); }
-        if (inOTEShort) { score++; reasons.push('ICT OTE zone (61.8-79% short)'); strats.push('O'); }
+
+        // Stage 1: did any bar in the last 15 candles touch inside the OTE zone?
+        const recent = bars.slice(n-15, n);
+        const zoneEnteredLong  = recent.some(b => b.l <= fibLong79  * 1.002 && b.h >= fibLong618  * 0.998);
+        const zoneEnteredShort = recent.some(b => b.h >= fibShort79 * 0.998 && b.l <= fibShort618 * 1.002);
+
+        // Stage 2a: current close is at or near zone boundary (not blown through)
+        const atBoundaryLong  = last.c >= fibLong618  * 0.998 && last.c <= fibLong79  * 1.003;
+        const atBoundaryShort = last.c <= fibShort618 * 1.002 && last.c >= fibShort79 * 0.997;
+
+        // Stage 2b: rejection body — candle body < 45% of its full range (pin bar / doji character)
+        const candleRange = last.h - last.l;
+        const hasRejection = candleRange > 0 && Math.abs(last.c - last.o) / candleRange < 0.45;
+
+        const inOTELong  = dir === 'long'  && zoneEnteredLong  && atBoundaryLong  && hasRejection;
+        const inOTEShort = dir === 'short' && zoneEnteredShort && atBoundaryShort && hasRejection;
+
+        if (inOTELong)  { score++; reasons.push(`ICT OTE long (${fibLong618.toFixed(1)}–${fibLong79.toFixed(1)})`);   strats.push('O'); }
+        if (inOTEShort) { score++; reasons.push(`ICT OTE short (${fibShort79.toFixed(1)}–${fibShort618.toFixed(1)})`); strats.push('O'); }
       }
+    }
+  }
+
+  // ── Q. Alpha Kill v1 — H1 BOS+Retest, XAUUSD only (PF=1.209, best config 2026-04-20) ──
+  // D1 proxy: EMA200 slope on H1 (200 H1 bars ≈ 8 trading days)
+  // H4 proxy: EMA50 slope on H1  (50 H1 bars  ≈ 2 trading days)
+  // BOS: 2-bar pivot high/low broken, then price retests within 0.5×ATR
+  if (label === 'XAUUSD' && n >= 60) {
+    const ema200 = calcEMA(bars, 200);
+    const d1Bull = ema200[n] > ema200[Math.max(0, n - 20)];
+    const d1Bear = ema200[n] < ema200[Math.max(0, n - 20)];
+    const h4Bull = ema50[n]  > ema50[Math.max(0, n - 4)];
+    const h4Bear = ema50[n]  < ema50[Math.max(0, n - 4)];
+    const trendOk = dir === 'long' ? (d1Bull && h4Bull) : (d1Bear && h4Bear);
+
+    if (trendOk) {
+      let bosLevel = null;
+      for (let i = Math.max(3, n - 60); i <= n - 3; i++) {
+        const isPH = bars[i].h >= bars[i-1].h && bars[i].h >= bars[i-2].h &&
+                     bars[i].h >= bars[i+1].h && bars[i].h >= bars[i+2].h;
+        const isPL = bars[i].l <= bars[i-1].l && bars[i].l <= bars[i-2].l &&
+                     bars[i].l <= bars[i+1].l && bars[i].l <= bars[i+2].l;
+        if (dir === 'long'  && isPH) bosLevel = bars[i].h;
+        if (dir === 'short' && isPL) bosLevel = bars[i].l;
+      }
+      if (bosLevel !== null) {
+        const broken    = dir === 'long'
+          ? bars.slice(Math.max(0, n - 30), n).some(b => b.c > bosLevel)
+          : bars.slice(Math.max(0, n - 30), n).some(b => b.c < bosLevel);
+        const retesting = Math.abs(last.c - bosLevel) < atr[n] * 0.5;
+        if (broken && retesting) {
+          score += 2; reasons.push(`AK v1 BOS retest @${bosLevel.toFixed(0)}`); strats.push('Q');
+        }
+      }
+    }
+  }
+
+  // ── R. Ironclad MTF Market Structure (YouTube: s9HV_jyeUDk) ──
+  // Optimal from 8,700-combination backtest: Daily trend + 15M MSS, 72% WR, 957% over 10yr
+  // D1 trend proxy : EMA200 slope on current bars (rising = D1 uptrend)
+  // MSS            : close breaks above/below last confirmed swing high/low (N=6 lookback)
+  // No order blocks, no premium/discount zones
+  if (n >= 200) {
+    const ema200 = calcEMA(bars, 200);
+    const d1Up   = ema200[n] > ema200[n - 48];  // 48 × 15M ≈ 12 hours (daily slope proxy)
+    const d1Dn   = ema200[n] < ema200[n - 48];
+    const trendOk = dir === 'long' ? d1Up : d1Dn;
+
+    if (trendOk) {
+      // Find swing highs/lows with N=6 lookback (must be highest/lowest of 13-bar window)
+      let lastSwingH = null, lastSwingL = null;
+      const ltfN = 6;
+      for (let i = ltfN; i <= n - ltfN; i++) {
+        let isPH = true, isPL = true;
+        for (let k = i - ltfN; k <= i + ltfN; k++) {
+          if (k === i) continue;
+          if (bars[k].h >= bars[i].h) isPH = false;
+          if (bars[k].l <= bars[i].l) isPL = false;
+        }
+        if (isPH) lastSwingH = bars[i].h;
+        if (isPL) lastSwingL = bars[i].l;
+      }
+      // MSS: current close breaks above last swing high (bull) or below last swing low (bear)
+      const prevClose = bars[n - 1].c;
+      const mssBull = lastSwingH !== null && prevClose <= lastSwingH && last.c > lastSwingH;
+      const mssBear = lastSwingL !== null && prevClose >= lastSwingL && last.c < lastSwingL;
+      if (dir === 'long'  && mssBull) { score += 2; reasons.push(`Ironclad MSS break @${lastSwingH.toFixed(0)}`); strats.push('R'); }
+      if (dir === 'short' && mssBear) { score += 2; reasons.push(`Ironclad MSS break @${lastSwingL.toFixed(0)}`); strats.push('R'); }
     }
   }
 
@@ -443,6 +619,70 @@ function runAllStrategies(bars, dir, utcHour, label) {
     }
   }
 
+  // ── S. Daily Trend Alignment — D1 bias proxy from current bars ──
+  // EMA lookback = 1 trading day worth of bars on current TF
+  // Long: D1 EMA rising (bulls in control for the day) | Short: D1 EMA falling
+  {
+    const bpd = tf === '60' ? 24 : tf === '30' ? 48 : tf === '15' ? 96 : tf === '5' ? 288 : 96;
+    const lookback = Math.min(Math.floor(bars.length * 0.8), bpd);
+    if (lookback >= 20) {
+      const emaD1 = calcEMA(bars, lookback);
+      const shift = Math.max(1, Math.floor(lookback / 6));
+      const d1Bull = emaD1[n] > emaD1[n - shift];
+      const d1Bear = emaD1[n] < emaD1[n - shift];
+      if ((dir === 'long' && d1Bull) || (dir === 'short' && d1Bear)) {
+        score++; reasons.push('D1 trend aligned'); strats.push('S');
+      }
+    }
+  }
+
+  // ── T. Weekly Trend Alignment — W1 bias proxy (5× daily lookback) ──
+  // Long: weekly EMA rising (macro bull) | Short: weekly EMA falling (macro bear)
+  {
+    const bpd  = tf === '60' ? 24 : tf === '30' ? 48 : tf === '15' ? 96 : tf === '5' ? 288 : 96;
+    const bpw  = bpd * 5;
+    const lookback = Math.min(Math.floor(bars.length * 0.9), bpw);
+    if (lookback >= 40) {
+      const emaW = calcEMA(bars, lookback);
+      const shift = Math.max(1, Math.floor(lookback / 10));
+      const wkBull = emaW[n] > emaW[n - shift];
+      const wkBear = emaW[n] < emaW[n - shift];
+      if ((dir === 'long' && wkBull) || (dir === 'short' && wkBear)) {
+        score++; reasons.push('W1 trend aligned'); strats.push('T');
+      }
+    }
+  }
+
+  // ── U. Daily price range context — favorable half of yesterday's range ──
+  // +1 when price is in the lower 40% of PDH-PDL for longs (near PDL support)
+  // or upper 40% for shorts (near PDH resistance). Backtest: V (ADR room) hurt
+  // BTC/NAS100 WR so removed; U kept as directional bias bonus.
+  {
+    const dc = buildDailyContext(bars);
+    if (dc) {
+      const { PDH, PDL, PDC, pricePos, bias } = dc;
+      const nearPDL = pricePos < 0.40 && dir === 'long';
+      const nearPDH = pricePos > 0.60 && dir === 'short';
+      if (nearPDL) {
+        score++;
+        reasons.push(`At PDL zone (${(pricePos*100).toFixed(0)}% of PDH-PDL, PDL=${PDL.toFixed(4)})`);
+        strats.push('U');
+      }
+      if (nearPDH) {
+        score++;
+        reasons.push(`At PDH zone (${(pricePos*100).toFixed(0)}% of PDH-PDL, PDH=${PDH.toFixed(4)})`);
+        strats.push('U');
+      }
+      // Daily bias note — informational only, no score (S/T already cover trend)
+      const biasMatch = (dir === 'long' && bias === 'bullish') || (dir === 'short' && bias === 'bearish');
+      if (biasMatch) {
+        reasons.push(`Daily bias ${bias} (vs PDC ${PDC.toFixed(4)})`);
+      } else if (bias !== 'neutral') {
+        reasons.push(`⚠ Daily bias ${bias} (counter-trend)`);
+      }
+    }
+  }
+
   // ── Named candle patterns (bonus label, no extra point) ──
   const named = detectNamedPatterns(ha);
   const matching = named.filter(p => p.direction === dir || (p.direction==='neutral' && p.reliability >= 65));
@@ -456,7 +696,7 @@ function runAllStrategies(bars, dir, utcHour, label) {
 }
 
 // ── Main scan ──
-export async function scanForSetups(minScore = 4) {
+export async function scanForSetups(minScore = 11) {
   const utcHour    = new Date().getUTCHours();
   const priority   = sessionSymbols(utcHour);
   const results    = [];
@@ -483,24 +723,35 @@ export async function scanForSetups(minScore = 4) {
         continue;
       }
 
+      // Log daily context snapshot for post-session review
+      const dcSnap = buildDailyContext(bars);
+      if (dcSnap) logDailyContext(inst.label, tf, dcSnap);
+
       const directions = ['long', ...(inst.autoShort ? ['short'] : [])];
 
       for (const dir of directions) {
-        const { score, reasons, strategies, rsi, atrVal } = runAllStrategies(bars, dir, utcHour, inst.label);
+        const { score, reasons, strategies, rsi, atrVal } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
 
         if (score >= minScore) {
-          const entry = bars[bars.length-1].c;
-          const sl    = dir === 'long'  ? entry - atrVal * 1.5 : entry + atrVal * 1.5;
-          const tp1   = dir === 'long'  ? entry + atrVal * 3.0 : entry - atrVal * 3.0;
-          const rr    = Math.abs(tp1-entry) / Math.abs(entry-sl);
+          const entry   = bars[bars.length-1].c;
+          // Day-trade structure: quick scalp + same-day main target + optional break-even runner
+          // All TPs calculated from SL distance (R-multiples) so they scale with volatility
+          const sl        = dir === 'long'  ? entry - atrVal * 1.5 : entry + atrVal * 1.5;
+          const slDist    = Math.abs(entry - sl);
+          const tpQuick   = dir === 'long'  ? entry + slDist * 0.5 : entry - slDist * 0.5;  // 0.5R — quick scalp, ~1–2 hrs
+          const tp2       = dir === 'long'  ? entry + slDist * 1.0 : entry - slDist * 1.0;  // 1.0R — main target, same session
+          const tp1       = dir === 'long'  ? entry + slDist * 2.0 : entry - slDist * 2.0;  // 2.0R — runner (break-even SL set at entry)
+          const rr        = Math.abs(tp1-entry) / Math.abs(entry-sl);
 
           results.push({
             sym: inst.sym, label: inst.label, tf, dir, score,
             reasons, strategies,
-            entry: Math.round(entry * 10000) / 10000,
-            sl:    Math.round(sl    * 10000) / 10000,
-            tp1:   Math.round(tp1   * 10000) / 10000,
-            rr:    Math.round(rr    * 100)   / 100,
+            entry:   Math.round(entry   * 10000) / 10000,
+            sl:      Math.round(sl      * 10000) / 10000,
+            tpQuick: Math.round(tpQuick * 10000) / 10000,
+            tp2:     Math.round(tp2     * 10000) / 10000,
+            tp1:     Math.round(tp1     * 10000) / 10000,
+            rr:      Math.round(rr      * 100)   / 100,
             rsi:   Math.round(rsi),
             tier:  inst.tier,
           });

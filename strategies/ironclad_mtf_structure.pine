@@ -1,0 +1,115 @@
+//@version=5
+strategy("Ironclad MTF Market Structure", shorttitle="IRONCLAD",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2)
+
+// ── Source: IRONCLAD TRADING (YouTube: s9HV_jyeUDk) ──
+// Backtested 8,700 combinations, 10yr tick data, 5 CME Forex pairs
+// Optimal: Daily HTF + 15M LTF, swing N=2 (HTF) / N=6 (LTF), trend count=2
+// Result: 957% total return, 72% WR, 26%/yr, 49.9% max DD
+
+GE = "Entry Settings"
+GR = "Risk Management"
+GF = "Filters"
+
+i_htf       = input.timeframe("D",  "Higher Timeframe (Trend)",   group=GE)
+i_htf_n     = input.int(2,          "HTF Swing Lookback (N)",      group=GE, minval=1, maxval=10)
+i_ltf_n     = input.int(6,          "LTF Swing Lookback (N)",      group=GE, minval=1, maxval=20)
+i_rr        = input.float(1.5,      "Risk : Reward",               group=GR, minval=0.5, maxval=10.0, step=0.5)
+i_direction = input.string("Both",  "Direction",                   group=GF, options=["Both","Long Only","Short Only"])
+
+_atr = ta.atr(14)
+
+// ────────────────────────────────────────────────────────────────────────────
+// HTF TREND — Daily pivot highs/lows, N=2 lookback
+// Uptrend  : most recent PH > previous PH AND most recent PL > previous PL (HH+HL)
+// Downtrend: most recent PH < previous PH AND most recent PL < previous PL (LH+LL)
+// ────────────────────────────────────────────────────────────────────────────
+// gaps_on = only fires once per HTF bar close (no carry-forward), prevents ph1=ph2 bug
+_htf_ph = request.security(syminfo.tickerid, i_htf, ta.pivothigh(high, i_htf_n, i_htf_n), gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)
+_htf_pl = request.security(syminfo.tickerid, i_htf, ta.pivotlow(low,  i_htf_n, i_htf_n), gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)
+
+var float _ph1 = na
+var float _ph2 = na
+var float _pl1 = na
+var float _pl2 = na
+
+if not na(_htf_ph)
+    _ph1 := _ph2
+    _ph2 := _htf_ph
+
+if not na(_htf_pl)
+    _pl1 := _pl2
+    _pl2 := _htf_pl
+
+_htf_valid = not na(_ph1) and not na(_ph2) and not na(_pl1) and not na(_pl2)
+_htf_up    = _htf_valid and _ph2 > _ph1 and _pl2 > _pl1
+_htf_dn    = _htf_valid and _ph2 < _ph1 and _pl2 < _pl1
+
+// ────────────────────────────────────────────────────────────────────────────
+// LTF MARKET STRUCTURE SHIFT — swing pivots N=6 lookback
+// Bull MSS: close breaks above last confirmed swing high (fires once per level)
+// Bear MSS: close breaks below last confirmed swing low (fires once per level)
+// ────────────────────────────────────────────────────────────────────────────
+_ltf_ph = ta.pivothigh(high, i_ltf_n, i_ltf_n)
+_ltf_pl = ta.pivotlow(low,  i_ltf_n, i_ltf_n)
+
+var float _sh_level = na
+var float _sl_level = na
+var bool  _sh_used  = false
+var bool  _sl_used  = false
+
+if not na(_ltf_ph)
+    _sh_level := _ltf_ph
+    _sh_used  := false
+
+if not na(_ltf_pl)
+    _sl_level := _ltf_pl
+    _sl_used  := false
+
+_mss_bull = not na(_sh_level) and not _sh_used and close > _sh_level
+_mss_bear = not na(_sl_level) and not _sl_used and close < _sl_level
+
+if _mss_bull
+    _sh_used := true
+if _mss_bear
+    _sl_used := true
+
+// ────────────────────────────────────────────────────────────────────────────
+// ENTRY SIGNALS
+// ────────────────────────────────────────────────────────────────────────────
+_bull = _htf_up and _mss_bull and i_direction != "Short Only"
+_bear = _htf_dn and _mss_bear and i_direction != "Long Only"
+
+// ────────────────────────────────────────────────────────────────────────────
+// EXECUTION — SL at recent swing low/high, TP = dist × RR
+// ────────────────────────────────────────────────────────────────────────────
+if _bull and strategy.position_size == 0
+    float _sl   = not na(_sl_level) ? _sl_level : close - _atr * 1.5
+    float _dist = math.abs(close - _sl)
+    float _tp   = close + _dist * i_rr
+    strategy.entry("Long",  strategy.long,  comment="IRONCLAD L")
+    strategy.exit("L_Exit", "Long",  stop=_sl, limit=_tp)
+
+if _bear and strategy.position_size == 0
+    float _sl   = not na(_sh_level) ? _sh_level : close + _atr * 1.5
+    float _dist = math.abs(_sl - close)
+    float _tp   = close - _dist * i_rr
+    strategy.entry("Short", strategy.short, comment="IRONCLAD S")
+    strategy.exit("S_Exit", "Short", stop=_sl, limit=_tp)
+
+// ────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ────────────────────────────────────────────────────────────────────────────
+bgcolor(_htf_up ? color.new(color.green, 93) : _htf_dn ? color.new(color.red, 93) : na, title="HTF Trend")
+
+plotshape(_bull, title="Bull MSS", style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small)
+plotshape(_bear, title="Bear MSS", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small)
+
+plot(not na(_sh_level) ? _sh_level : na, "Swing High", color=color.new(color.red,   40), style=plot.style_circles, linewidth=1)
+plot(not na(_sl_level) ? _sl_level : na, "Swing Low",  color=color.new(color.green, 40), style=plot.style_circles, linewidth=1)

@@ -17,13 +17,16 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync, spawn } from 'child_process';
+import os from 'os';
 
 const __dirname  = dirname(fileURLToPath(import.meta.url));
 const ROOT       = join(__dirname, '../..');
-const TRADES_CSV = join(ROOT, 'data/trade_log/trades.csv');
+const IS_LINUX   = os.platform() === 'linux';
+const DATA_ROOT  = IS_LINUX ? '/home/ubuntu/trading-data' : join(ROOT, 'data');
+const TRADES_CSV = join(DATA_ROOT, 'trade_log/trades.csv');
 const KB_FILE    = join(ROOT, 'data/knowledge_base/TRADING_KNOWLEDGE_BASE.md');
 const STRAT_DIR  = join(ROOT, 'strategies');
-const LOG_FILE   = join(ROOT, 'data/trade_log/research_log.txt');
+const LOG_FILE   = join(DATA_ROOT, 'trade_log/research_log.txt');
 
 // All 8 base strategies — biweekly cycle tracks all of them
 const ALL_STRATEGIES = [

@@ -1,0 +1,336 @@
+================================================================================
+  WORK STATUS — READ THIS FIRST IN ANY NEW SESSION
+  Project: Greedy Trading Algorithm (tradingview-mcp-jackson)
+  Last updated: 2026-04-20
+================================================================================
+
+This file tracks the state of work between conversation sessions.
+Read it at the start of every new session to know exactly where to resume.
+Update it as tasks progress — keep it current, not historical.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CURRENT STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ACTIVE SPRINT: Strategy Integration + Optimization (Monday 2026-04-20) — SPRINT COMPLETE
+Goal: Strategies Q (Alpha Kill v1) and R (Ironclad MTF) live in setup_finder.mjs.
+      Pending: session_runner upgrades, OTE filter rewrite, trades CSV recovery.
+
+  A. [DONE]   Last week trade audit
+  B. [DONE]   Market research (high WR approaches, upcoming week)
+  C. [DONE]   Design Alpha Kill Strategy spec
+  D. [DONE]   Write Alpha Kill Pine Script (alpha_kill_v1.pine)
+  E. [DONE]   Backtest + optimize Alpha Kill v1
+              - Best config: H1, SL=2.0×ATR, 4R single exit → PF=1.209
+              - Backtested Jan 2024–Apr 2026 on XAUUSD
+              - Strategy Q integrated into setup_finder.mjs (BOS+Retest on H1 XAUUSD)
+              - SL/TP override: 2.0×ATR SL, 8.0×ATR TP for H1 XAUUSD Q signals
+  I. [DONE]   Implement Ironclad MTF Structure strategy (YouTube s9HV_jyeUDk)
+              - Pine script: strategies/ironclad_mtf_structure.pine (116 lines)
+              - Key fix: gaps=barmerge.gaps_on on request.security (prevents ph1=ph2 bug)
+              - Strategy R integrated into setup_finder.mjs (MSS break on all pairs)
+              - Backtest results: XAUUSD 15M PF=1.267 ✓ | all 5 Forex pairs PF<1 ✗
+              - H1 Forex: EUR/USD PF=?, GBP/USD, AUD/USD, USD/CHF, USD/JPY — all ✗
+              - RR variations (2.0, 3.0) on EUR/USD: still ✗
+              - Conclusion: short window (Nov 2025–Apr 2026) is losing regime for Forex.
+                Not deploying Ironclad on Forex. XAUUSD only if window extends.
+  F. [DONE]   Update session_runner.mjs — raise threshold to ≥10, multi-TP,
+              Friday cutoff, session filter
+              - Friday 15:30 UTC cutoff added
+              - Session gate: London-NY overlap (13:00-17:00 UTC) only;
+                Asian allowed for BTCUSD score≥13 only
+              - Score threshold: 10 (setup_finder default raised from 4)
+              - Multi-TP: two half-lot orders at 0.5R (tpQuick) + 1.5R (tp2)
+              - position_monitor: BE trigger logged when partial close detected
+              - setup_finder: tpQuick + tp2 fields added to setup object
+  G. [DONE]   Push updated session_runner + setup_finder + position_monitor to VM, verify
+              - All 3 files SCP'd to /home/ubuntu/tradingview-mcp-jackson/scripts/trading/
+              - Verified: minScore=10, tpQuick/tp2, Friday cutoff, session gate, BE trigger
+  H. [DONE]   Update knowledge base with Alpha Kill v1 findings and Ironclad results
+              - Sections 4, 5, 11, 12 updated; Section 14 (new research 2026-04-20) added
+              - Threshold 4→10, strategies Q+R documented, decision tree updated
+              - Ironclad gaps_on finding documented; AK v1 optimisation results recorded
+  J. [DONE]   OTE filter rewrite — two-stage logic (2026-04-20)
+              Stage 1: any bar in last 15 touched the 61.8–79% zone (depth confirmed)
+              Stage 2: current close at zone boundary + body/range < 0.45 (rejection)
+              Also: reason string now prints the actual price levels
+  K. [DONE]   Recover W/L for Apr 16-17 trades marked "?" in trades.csv
+              All results were already in CSV from previous session audit.
+              Apr16 XAUUSD=L, ETHUSD=W | Apr17 BTCUSD=L, AUDUSD=VOID, GBPUSD=L, XAGUSD=L
+
+  M. [DONE]   Open position guard added to session_runner.mjs (2026-04-20)
+              Skips session if equity ≠ balance by >£5 (position already open)
+              Prevents 13:00 + 15:00 cron fires from stacking two trades
+              Pushed to VM.
+
+  N. [DONE]   position_monitor + execute_trade DOM selector fix (2026-04-20)
+              TradingView broker panel no longer exposes Balance/Equity in body.textContent.
+              Fix: switched to DIV[class*="value-"] siblings of SPAN[class*="title-"] rows.
+              Probe confirmed: Account Balance=14675.98, Equity=13418.58 in "value-tWnxJF90".
+              Both position_monitor.mjs and execute_trade.mjs getEquity() updated + pushed.
+              Monitor PID 843229 running clean (--entry=0 --numOrders=4).
+              Open position guard now reads equity correctly → will block trade stacking.
+              getEquity() verified: {"equity":13353.65,"balance":14675.98,"unrealisedPnl":-1322.33}
+
+  L. [OPEN]   4 open positions from Apr 20 sessions — monitor watching
+              Positions: GBPUSD short 2.93L (00:01), GBPJPY long 2.71L (08:01),
+                         NAS100 long 8.94L (13:01), GBPUSD long 1.54L (15:01)
+              Floating PnL: -£1,322 as of ~22:00 UTC Apr 20 (equity £13,354 vs balance £14,676)
+              Monitor PID 843229 (--entry=0 --numOrders=4) — will update trades.csv on close
+              ACTION: Manually move SLs to BE if any partial closes occur overnight
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK A — Last Week Trade Audit (DONE 2026-04-19)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  6 trades, week of Apr 14-18 2026:
+    Apr16 13:01 XAUUSD 5M long  score=9  → L  (-6.06 pts)
+    Apr16 15:01 ETHUSD 1M long  score=9  → W  (+10.50 pts)
+    Apr17 00:01 BTCUSD 5M long  score=8  → L  (-151.86 USD)
+    Apr17 08:01 AUDUSD 15M long score=10 → VOID (order rejected)
+    Apr17 13:01 GBPUSD 15M long score=8  → L  (-0.0015)
+    Apr17 15:01 XAGUSD 5M long  score=8  → L  (-0.43)
+
+  FINDINGS:
+  - Win rate: 1/5 (20%) — all losses, no draws
+  - All 4 losses scored 8-9/16. Minimum threshold too low (currently 4).
+  - BTCUSD Asian session loss: Asian session is low probability — avoid BTC
+    at 00:00 UTC, score 8 should not qualify for Asian
+  - XAUUSD loss Apr16: SL was only 6pts from entry on a 5M gold chart —
+    SL was too tight; gold needs 15-20pt breathing room on 5M
+  - User closed some trades manually (TP too far, risking Friday close)
+  - Bias was LONG across all 4 losing instruments — could be HTF bearish week
+  - CRITICAL: Score threshold too low. 8-9 score entries are losing.
+    Need to raise to ≥ 10 for live trading.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK B — Market Research (DONE 2026-04-19)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  HIGH WIN RATE RESEARCH FINDINGS:
+  ─────────────────────────────────
+  1. TRUE 90%+ WR is achieved via multi-TP + breakeven architecture:
+     - Enter at high-confluence level (score ≥ 10)
+     - TP1 at 0.5R (very quick — take 30% of position)
+     - Move SL to entry immediately after TP1 hit → trade is now "free"
+     - TP2 at 1.5R (take another 40% of position)
+     - TP3 trail remainder with Smart Trail (let winners run)
+     - Result: 70-80% of clean entries hit TP1 → all become "wins" or BE
+     - Only full losses are the ~10-20% that immediately reverse
+
+  2. Riley Coleman approach (validated by research):
+     - Change of Character (CHoCH): first BOS in opposite direction of trend
+     - Break of Structure (BOS): confirms new trend direction
+     - Retest of broken level: enter at the retest (support → resistance flip)
+     - Confirmation: rejection candle (pin bar / engulfing) at retest
+     - WR: 65-80% with 1:2 R:R minimum
+     - Best instruments: XAUUSD, GBPUSD, EURUSD, BTC (large moves, clean S/R)
+     - Best timeframes: 15M entry, 1H/4H structure
+
+  3. NY Open (13:00-14:00 UTC) is the single highest-probability window:
+     - NY futures open at 13:30 UTC
+     - 13:00-14:30 UTC: London+NY overlap at peak volume
+     - 14:30 UTC: US economic data releases (when no news: pure price action)
+     - User note: 2:30-2:45 PM London time = 13:30-13:45 UTC = NY open peak
+
+  4. High WR entry conditions (what separates 90% WR from 35% WR):
+     - Price AT a MAJOR level (weekly/daily S/R, not just 5M level)
+     - Rejection candle WITH volume spike (institutional participation)
+     - HTF trend aligned (D1 trend = entry direction)
+     - Clean structure (no chop, clear swing high/low visible)
+     - News-free window (no events ±30 min)
+     - Score ≥ 10/16 (not 4/16 — current threshold is far too low)
+
+  UPCOMING WEEK (Apr 21-25 2026) KEY EVENTS:
+  - Mon Apr 21: Low impact (market likely quiet open)
+  - Tue Apr 22: Flash PMIs (EU + US) at 13:45 UTC — AVOID ±30 min
+  - Wed Apr 23: US New Home Sales 14:00 UTC — minor
+  - Thu Apr 24: US GDP Q1 advance 12:30 UTC — HIGH IMPACT, avoid XAU/USD pairs
+  - Fri Apr 25: US PCE Inflation 12:30 UTC — HIGH IMPACT (Fed's preferred measure)
+                US Michigan Consumer Sentiment (final) 14:00 UTC
+  BIAS NOTE: Apr week is pre-FOMC season. Markets likely choppy/ranging.
+  GOLD: Safe-haven demand likely to remain elevated (geopolitical + USD weakness).
+  CRYPTO: BTC consolidating — directional break expected mid-week.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK C — Alpha Kill Strategy Design (DONE 2026-04-19)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ARCHITECTURE:
+  ─────────────
+  Entry: Score ≥ 10/16 (raised from 4) — only elite setups
+  Position split:
+    - 30% closed at TP1 (0.5R) — guaranteed quick profit
+    - 40% closed at TP2 (1.5R) — main profit target
+    - 30% trailed with Smart Trail — lets winners run to 3R+
+  Breakeven: SL moves to entry after TP1 hit
+  Result: 70-80% of entries hit TP1 → those are all wins or BE
+
+  ENTRY RULES (Riley Coleman + ICT hybrid):
+    1. D1/H4 trend confirmed (EMA alignment)
+    2. Price at major S/R level (daily/weekly pivot or swing high/low)
+    3. BOS or CHoCH on 15M/1H (structural shift toward entry direction)
+    4. Retest of broken level (entry on the retest)
+    5. Rejection candle at retest (pin bar or engulfing)
+    6. Volume spike on rejection candle
+    7. ICT OTE zone (61.8-79% fib retracement aligns with S/R level)
+    8. Session: London-NY overlap (13:00-16:00 UTC) ONLY for best WR
+    9. NO trades after 15:30 UTC on Fridays
+
+  RISK MANAGEMENT:
+    - 1% risk on TP1 target (0.5R)
+    - SL = ATR(14) × 1.5 from entry (dynamic — never too tight)
+    - Friday rule: No new entries after 15:30 UTC; close all by 19:00 UTC
+    - BE rule: SL → entry + 1 tick after TP1 hit
+    - Daily loss limit: 2% (2 full losses) → STOP for day
+    - Only 1 trade open at a time on each instrument
+
+  SCORING UPDATES FOR v2 (Alpha Kill):
+    - Minimum score raised: 10/16 for entry (was 4/16)
+    - BOS/CHoCH added as new factor (Q) — replaces Okala P (indices only)
+    - Volume spike added as mandatory gate (not just a scoring point)
+    - D1 trend alignment mandatory (not optional)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK D/E — Alpha Kill Pine Script + Backtest (DONE 2026-04-20)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  File: strategies/alpha_kill_v1.pine (521 lines)
+  Compiled clean 0 errors on TradingView.
+
+  BACKTEST RESULTS (XAUUSD, Jan 2024–Apr 2026):
+  Best config found: H1 timeframe, SL=2.0×ATR, TP=4R single exit
+    → PF = 1.209
+  Other configs tested: various SL multiples (1.0–3.0×ATR), TP (1R–6R),
+    15M/H1/H4 timeframes — H1 with 2.0×ATR/4R was the clear winner.
+
+  INTEGRATION INTO setup_finder.mjs:
+  - Strategy Q: Alpha Kill v1 BOS+Retest, XAUUSD H1 only
+    Condition: D1 EMA200 + H4 EMA50 aligned, swing BOS on H1 within 60 bars,
+               price retesting broken level within 0.5×ATR
+    SL override: 2.0×ATR (vs 1.5 default)
+    TP override: 8.0×ATR (4R equivalent with 2.0×ATR SL)
+  - Score contribution: +2 when triggered
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK I — Ironclad MTF Structure Strategy (DONE 2026-04-20)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Source: YouTube https://www.youtube.com/watch?v=s9HV_jyeUDk
+  "Backtested Trading Guru's Strategy: Here's the Truth" by IRONCLAD TRADING
+  Claims: 957% return, 72% WR, 26%/yr, 49.9% max DD over 10yr tick data,
+          5 CME Forex pairs, Daily HTF + 15M LTF, swing N=2 (HTF) / N=6 (LTF)
+
+  Pine script: strategies/ironclad_mtf_structure.pine (116 lines)
+  Key technical detail: MUST use gaps=barmerge.gaps_on on request.security
+    — gaps_off (default) carries forward last pivot to every bar causing
+      ph1=ph2 always → _htf_up always false → 0 trades generated.
+
+  BACKTEST RESULTS (Nov 2025–Apr 2026 window):
+
+  XAUUSD 15M: PF=1.267 ✓ (profitable — deployed as strategy R)
+
+  5 Forex Pairs on 15M (RR=1.5):
+    EUR/USD: PF<1 ✗
+    GBP/USD: PF<1 ✗
+    AUD/USD: PF<1 ✗
+    USD/CHF: PF<1 ✗
+    USD/JPY: PF<1 ✗
+
+  H1 Timeframe (RR=1.5):
+    EUR/USD, GBP/USD, AUD/USD, USD/CHF, USD/JPY: all PF<1 ✗
+
+  RR Variations on EUR/USD (15M + H1):
+    RR=2.0: still ✗
+    RR=3.0: still ✗
+
+  CONCLUSION: Nov 2025–Apr 2026 is a losing regime for Ironclad on Forex.
+  10yr results cannot be validated with 5.5 months of TradingView history.
+  Ironclad NOT deployed on Forex pairs. Strategy R (Ironclad MSS) remains
+  in setup_finder.mjs as a score contributor but not the primary signal.
+  Revisit with longer data window when available.
+
+  INTEGRATION INTO setup_finder.mjs:
+  - Strategy R: Ironclad MSS break, all pairs
+    Condition: D1 EMA200 trend (48-bar slope), LTF swing N=6, close breaks
+               above/below last confirmed swing high/low
+    Score contribution: +2 when triggered
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK F — Update session_runner.mjs (TODO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Changes needed:
+  1. Raise entry threshold from score ≥ 4 to score ≥ 10
+  2. Add Friday cutoff: no trades after 15:30 UTC
+  3. Add multi-TP order placement (TP1 at 0.5R, TP2 at 1.5R, trail rest)
+  4. Add BE logic: after TP1 fills → modify SL to entry
+  5. Session filter: London-NY overlap ONLY for live trades
+     (Asian allowed only for score ≥ 13 and BTCUSD only)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK J — OTE Filter Rewrite (TODO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Current problem: OTE check conflates retracement depth with retest candle.
+  Fix needed: two-stage logic —
+    Stage 1: confirm price has retraced to 61.8–79% fib zone (historical bars)
+    Stage 2: confirm current candle is retesting (close near zone, rejection body)
+  These must be evaluated independently, not in one combined condition.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TASK K — Recover Missing Trade Results (TODO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Some Apr 16-17 trades in /home/ubuntu/trading-data/trades.csv have result="?"
+  Need to recover actual W/L by cross-referencing BlackBull trade history.
+  Method: SSH to VM, read trades.csv, identify "?" rows, check via CDP or
+          BlackBull account history for those specific timestamps.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  COMPLETED TASKS (ARCHIVE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Task 1 — Okala NQ backtest: DONE 2026-04-19
+    Cannot backtest NQ in BlackBull TradingView. No Pine data for NAS100/US30.
+
+  Task 2 — Recover missing trade results: DONE 2026-04-19
+    XAUUSD Apr16=L, ETHUSD Apr16=W, GBPUSD Apr17=L, XAGUSD Apr17=L
+
+  Task 3 — Fix Twitter feed spam: DONE 2026-04-19
+    Single summary line. VPS IP blocked by all scrapers — expected.
+
+  Task 4 — Live equity for lot sizing: DONE 2026-04-19
+    getEquity() wired into session_runner.mjs. Falls back to 10000.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SYSTEM CONTEXT (so a new session knows what exists)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  VM:           ubuntu@132.145.44.68
+  SSH key:      C:\Users\Tda-d\.ssh\id_rsa_oracle
+  Project:      C:\Users\Tda-d\tradingview-mcp-jackson\ (local)
+                /home/ubuntu/tradingview-mcp-jackson/ (VM)
+  Trade data:   /home/ubuntu/trading-data/ (VM only — authoritative)
+  Strategies:   /home/ubuntu/trading-data/strategies/ (VM authoritative copies)
+                C:\Users\Tda-d\tradingview-mcp-jackson\strategies\ (local, push via SCP)
+  IMPORTANT:    Always SCP strategies to /home/ubuntu/trading-data/strategies/ NOT
+                to tradingview-mcp-jackson/strategies/ — script reads from trading-data!
+  Account bal:  £14,687.02 as of 2026-04-19 (verified via CDP)
+  Knowledge base: C:\Users\Tda-d\tradingview-mcp-jackson\data\knowledge_base\
+  All strategies compiled: YES (10 original + alpha_kill_v1 + ironclad_mtf_structure)
+  Position monitor: FIXED 2026-04-18 (logs to position_monitor.log)
+  Session runner: FIXED 2026-04-18 (cross-platform paths, correct lot sizing)
+  setup_finder.mjs: Strategies A–R active; Q (AK v1) and R (Ironclad MSS) added 2026-04-20
+
+  BACKTESTING NOTE:
+    BLACKBULL:NAS100 and BLACKBULL:US30 do NOT have Pine strategy backtest data.
+    BLACKBULL:BTCUSD/ETHUSD/XAUUSD/GBPUSD DO support backtesting.
+
+  IRONCLAD PINE NOTE:
+    When using request.security() to detect HTF pivot highs/lows in Pine v5,
+    ALWAYS use gaps=barmerge.gaps_on. The default gaps_off carries the last
+    pivot value forward to every bar, causing the two tracked pivots to always
+    be equal → trend condition never fires → 0 trades. This is non-obvious and
+    took significant debugging to find.
+================================================================================
