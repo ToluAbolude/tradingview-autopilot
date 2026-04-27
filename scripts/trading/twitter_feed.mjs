@@ -8,23 +8,12 @@
 
 const ACCOUNTS = ['muroCrypto', 'i_am_jackis', 'eliz883', 'CryptoBullet'];
 
-// Nitter instances (public, no auth) — try a few, short timeout to avoid slow failures
+// Nitter instances — try top 4 in parallel, 2s timeout each
 const NITTER_HOSTS = [
   'https://nitter.poast.org',
   'https://nitter.privacydev.net',
   'https://nitter.cz',
   'https://nitter.1d4.us',
-  'https://nitter.unixfox.eu',
-  'https://nitter.nl',
-  'https://nitter.d420.de',
-  'https://nitter.moomoo.me',
-  'https://nitter.it',
-  'https://nitter.fdn.fr',
-  'https://nitter.42l.fr',
-  'https://nitter.space',
-  'https://nitter.tiekoetter.com',
-  'https://nitter.weiler.rocks',
-  'https://nitter.lunar.icu',
 ];
 
 // Keywords that signal a trade call
@@ -74,7 +63,7 @@ async function fetchNitter(account, host) {
   try {
     const resp = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(2000),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const html = await resp.text();
@@ -109,7 +98,7 @@ async function fetchViaSearch(account) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(2000),
     });
     if (!resp.ok) return null;
     const html = await resp.text();
@@ -134,11 +123,13 @@ export async function fetchTwitterSignals() {
   for (const account of ACCOUNTS) {
     let tweets = null;
 
-    // Try each nitter host (short timeout to fail fast)
-    for (const host of NITTER_HOSTS) {
-      tweets = await fetchNitter(account, host);
-      if (tweets && tweets.length > 0) break;
-    }
+    // Try all nitter hosts in parallel — first success wins, ~2s max wait
+    tweets = await Promise.any(
+      NITTER_HOSTS.map(host => fetchNitter(account, host).then(t => {
+        if (!t || t.length === 0) throw new Error('empty');
+        return t;
+      }))
+    ).catch(() => null);
 
     // Fallback: search engine snippets
     if (!tweets || tweets.length === 0) {
