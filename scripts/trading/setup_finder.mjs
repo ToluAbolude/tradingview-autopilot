@@ -110,7 +110,7 @@ function sessionSymbols(utcHour) {
 }
 
 // ── OHLCV reader (correct API: valueAt) ──
-async function setChart(sym, tf) {
+export async function setChart(sym, tf) {
   await evaluate(`(function(){
     var a = window.TradingViewApi._activeChartWidgetWV.value();
     a.setSymbol('${sym}', null, true);
@@ -119,7 +119,7 @@ async function setChart(sym, tf) {
   await sleep(1800);
 }
 
-async function getBars(count = 200) {
+export async function getBars(count = 200) {
   return evaluate(`(function() {
     try {
       var bars = window.TradingViewApi._activeChartWidgetWV.value()
@@ -287,7 +287,7 @@ function buildDailyContext(bars) {
   //  T  Weekly Trend Alignment         (W1 EMA proxy — macro direction confirmation)
   //  U  Daily Extreme Zone             (price in favorable half of PDH-PDL — +1 bonus)
 // ────────────────────────────────────────────────────────────────
-function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
+export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
   const atr    = calcATR(bars);
   const ema8   = calcEMA(bars, 8);
