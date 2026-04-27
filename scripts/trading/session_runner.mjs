@@ -190,16 +190,16 @@ async function main() {
     }
   }
 
-  // 1c. Twitter sentiment check
-  log('Checking X/Twitter signals...');
+  // 1c. Market sentiment check (F&G indices + Reddit)
+  log('Checking market sentiment...');
   let twitterBias = {};
   try {
     const twitterSignals = await fetchTwitterSignals();
     twitterBias = aggregateSignals(twitterSignals);
     if (Object.keys(twitterBias).length) {
-      log(`Twitter bias: ${JSON.stringify(twitterBias)}`);
+      log(`Sentiment bias: ${JSON.stringify(twitterBias)}`);
     }
-  } catch(e) { log(`Twitter check skipped: ${e.message}`); }
+  } catch(e) { log(`Sentiment check skipped: ${e.message}`); }
 
   // Log today's news for awareness
   const today = new Date().toDateString();

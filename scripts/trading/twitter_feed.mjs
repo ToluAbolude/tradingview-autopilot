@@ -1,33 +1,28 @@
 /**
- * twitter_feed.mjs
- * Scrape recent posts from key trading accounts via Nitter (X/Twitter proxy).
- * Accounts: @muroCrypto, @i_am_jackis, @eliz883, @CryptoBullet
+ * market_sentiment.mjs (exported as twitter_feed.mjs for compatibility)
  *
- * Returns sentiment signals and any mentioned symbols/price levels.
+ * Sources (all free, no auth):
+ *   1. Crypto Fear & Greed Index  — api.alternative.me/fng
+ *   2. CNN Fear & Greed Index     — production.dataviz.cnn.io
+ *   3. Reddit r/Forex             — hot posts (forex pairs)
+ *   4. Reddit r/wallstreetbets    — hot posts (equities/indices)
+ *   5. Reddit r/investing         — hot posts (general bias)
  */
 
-const ACCOUNTS = ['muroCrypto', 'i_am_jackis', 'eliz883', 'CryptoBullet'];
+const BULLISH_WORDS = ['long', 'buy', 'bull', 'breakout', 'support', 'bounce', 'pump', 'upside', 'targets', 'load', 'calls', 'green', 'rally', 'ath'];
+const BEARISH_WORDS = ['short', 'sell', 'bear', 'breakdown', 'resistance', 'dump', 'downside', 'drop', 'reject', 'puts', 'red', 'crash', 'correction'];
+const CAUTION_WORDS = ['careful', 'wait', 'neutral', 'chop', 'range', 'unclear', 'avoid', 'news', 'fomc', 'cpi', 'nfp', 'gdp', 'inflation', 'fed', 'tariff', 'war', 'uncertainty'];
 
-// Nitter instances — try top 4 in parallel, 2s timeout each
-const NITTER_HOSTS = [
-  'https://nitter.poast.org',
-  'https://nitter.privacydev.net',
-  'https://nitter.cz',
-  'https://nitter.1d4.us',
-];
-
-// Keywords that signal a trade call
-const BULLISH_WORDS = ['long', 'buy', 'bull', 'breakout', 'support', 'bounce', 'pump', 'upside', 'targets', 'load'];
-const BEARISH_WORDS = ['short', 'sell', 'bear', 'breakdown', 'resistance', 'dump', 'downside', 'drop', 'reject'];
-const CAUTION_WORDS = ['careful', 'wait', 'neutral', 'chop', 'range', 'unclear', 'avoid', 'news', 'fomc', 'cpi', 'nfp'];
-
-// Symbols mentioned in tweets
 const SYMBOL_MAP = {
   'btc': 'BTCUSD', 'bitcoin': 'BTCUSD',
   'eth': 'ETHUSD', 'ethereum': 'ETHUSD',
   'gold': 'XAUUSD', 'xau': 'XAUUSD',
   'eur': 'EURUSD', 'gbp': 'GBPUSD',
-  'spy': 'SPY', 'qqq': 'NAS100', 'nas': 'NAS100',
+  'spy': 'SPX500', 'qqq': 'NAS100', 'nas': 'NAS100', 'nasdaq': 'NAS100',
+  'dow': 'US30', 'dji': 'US30',
+  'sol': 'SOLUSD', 'solana': 'SOLUSD',
+  'xrp': 'XRPUSD', 'bnb': 'BNBUSD',
+  'oil': 'WTI', 'crude': 'WTI',
 };
 
 function parseSentiment(text) {
@@ -42,7 +37,6 @@ function parseSentiment(text) {
     if (lower.includes(kw) && !symbols.includes(sym)) symbols.push(sym);
   }
 
-  // Extract price levels e.g. "$2,300" or "2300"
   const prices = [];
   const priceMatches = text.matchAll(/\$?([\d,]+(?:\.\d+)?)[kK]?(?:\s*(?:target|support|resistance|tp|sl|stop))?/g);
   for (const m of priceMatches) {
@@ -58,117 +52,158 @@ function parseSentiment(text) {
   return { sentiment, bull, bear, caution, symbols, prices };
 }
 
-async function fetchNitter(account, host) {
-  const url = `${host}/${account}`;
-  try {
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const html = await resp.text();
+// ── Source 1: Crypto Fear & Greed Index ──────────────────────────────────────
 
-    // Extract tweet texts from Nitter HTML
-    const tweets = [];
-    const tweetRegex = /<div class="tweet-content[^"]*"[^>]*>([\s\S]*?)<\/div>/g;
-    let match;
-    while ((match = tweetRegex.exec(html)) !== null && tweets.length < 5) {
-      const text = match[1]
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (text.length > 20) tweets.push(text);
-    }
-    return tweets;
-  } catch(e) {
-    return null; // try next host
-  }
-}
-
-// Fallback: scrape Google search snippets for recent tweets
-async function fetchViaSearch(account) {
+async function fetchCryptoFG() {
   try {
-    const url = `https://www.google.com/search?q=site:x.com+%40${account}&tbs=qdr:d&num=5`;
-    const resp = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      signal: AbortSignal.timeout(2000),
+    const resp = await fetch('https://api.alternative.me/fng/?limit=1', {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) return null;
-    const html = await resp.text();
-    // Extract text from search result snippets
-    const snippets = [];
-    const spanRx = /<span[^>]*>([^<]{30,300})<\/span>/g;
-    let m;
-    while ((m = spanRx.exec(html)) !== null && snippets.length < 5) {
-      const t = m[1].replace(/&#\d+;/g, ' ').replace(/&[a-z]+;/g, ' ').trim();
-      if (t.length > 30 && !t.includes('cached') && !t.includes('translate')) snippets.push(t);
-    }
-    return snippets.length > 0 ? snippets : null;
+    const json = await resp.json();
+    const entry = json?.data?.[0];
+    if (!entry) return null;
+
+    const score = parseInt(entry.value, 10);
+    const label = entry.value_classification; // e.g. "Greed", "Fear"
+    const text  = `Crypto Fear & Greed: ${score} (${label})`;
+
+    // Map score → bull/bear counts
+    let bull = 0, bear = 0, caution = 0;
+    if      (score <= 25) { bear    = 3; }
+    else if (score <= 44) { bear    = 2; }
+    else if (score <= 55) { bull = 1; bear = 1; }
+    else if (score <= 74) { bull    = 2; }
+    else                  { bull = 2; caution = 1; } // extreme greed = overbought
+
+    const sentiment = caution > 0 ? 'caution' : bull > bear ? 'bullish' : bear > bull ? 'bearish' : 'neutral';
+    console.log(`  Crypto F&G: ${score} ${label} → ${sentiment}`);
+    return { account: 'crypto_fg', tweet: text, sentiment, bull, bear, caution, symbols: ['BTCUSD', 'ETHUSD'], prices: [] };
   } catch(e) {
     return null;
   }
 }
 
-export async function fetchTwitterSignals() {
-  const signals = [];
-  let unreachableCount = 0;
+// ── Source 2: CNN Fear & Greed Index ─────────────────────────────────────────
 
-  for (const account of ACCOUNTS) {
-    let tweets = null;
+async function fetchCNNFG() {
+  try {
+    const resp = await fetch('https://production.dataviz.cnn.io/index/fearandgreed/graphdata', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://edition.cnn.com/',
+      },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const score = json?.fear_and_greed?.score;
+    const rating = json?.fear_and_greed?.rating;
+    if (score == null) return null;
 
-    // Try all nitter hosts in parallel — first success wins, ~2s max wait
-    tweets = await Promise.any(
-      NITTER_HOSTS.map(host => fetchNitter(account, host).then(t => {
-        if (!t || t.length === 0) throw new Error('empty');
-        return t;
-      }))
-    ).catch(() => null);
+    const s = Math.round(score);
+    const text = `CNN Fear & Greed: ${s} (${rating})`;
 
-    // Fallback: search engine snippets
-    if (!tweets || tweets.length === 0) {
-      tweets = await fetchViaSearch(account);
-      if (tweets && tweets.length > 0) {
-        console.log(`  @${account}: ${tweets.length} results via search fallback`);
-      }
-    }
+    let bull = 0, bear = 0, caution = 0;
+    if      (s <= 25) { bear    = 3; }
+    else if (s <= 44) { bear    = 2; }
+    else if (s <= 55) { bull = 1; bear = 1; }
+    else if (s <= 74) { bull    = 2; }
+    else              { bull = 2; caution = 1; }
 
-    if (!tweets || tweets.length === 0) {
-      unreachableCount++;
-      continue; // silent — logged in summary below
-    }
+    const sentiment = caution > 0 ? 'caution' : bull > bear ? 'bullish' : bear > bull ? 'bearish' : 'neutral';
+    console.log(`  CNN F&G: ${s} ${rating} → ${sentiment}`);
+    return { account: 'cnn_fg', tweet: text, sentiment, bull, bear, caution, symbols: ['NAS100', 'SPX500', 'US30'], prices: [] };
+  } catch(e) {
+    return null;
+  }
+}
 
-    for (const tweet of tweets.slice(0, 3)) {
-      const parsed = parseSentiment(tweet);
-      if (parsed.sentiment !== 'neutral' || parsed.symbols.length > 0) {
-        signals.push({
-          account,
-          tweet: tweet.substring(0, 200),
-          ...parsed,
-        });
-      }
-    }
-    console.log(`  @${account}: ${tweets.length} tweets, sentiment=${parseSentiment(tweets[0] || '').sentiment}`);
+// ── Source 3: Reddit ──────────────────────────────────────────────────────────
+
+async function fetchReddit(subreddit, limit = 10) {
+  try {
+    const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=${limit}&t=day`;
+    const resp = await fetch(url, {
+      headers: {
+        'User-Agent': 'trading-sentiment-bot/1.0',
+        'Accept': 'application/json',
+      },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!resp.ok) return [];
+    const json = await resp.json();
+    return (json?.data?.children || [])
+      .map(c => c?.data?.title || '')
+      .filter(t => t.length > 10);
+  } catch(e) {
+    return [];
+  }
+}
+
+async function fetchRedditSignals(subreddit, defaultSymbols = []) {
+  const posts = await fetchReddit(subreddit);
+  if (posts.length === 0) return null;
+
+  let totalBull = 0, totalBear = 0, totalCaution = 0;
+  const symbolCounts = {};
+
+  for (const post of posts) {
+    const p = parseSentiment(post);
+    totalBull    += p.bull;
+    totalBear    += p.bear;
+    totalCaution += p.caution;
+    for (const sym of p.symbols) symbolCounts[sym] = (symbolCounts[sym] || 0) + 1;
   }
 
-  if (unreachableCount > 0) {
-    if (unreachableCount === ACCOUNTS.length) {
-      console.log(`  Twitter sentiment: all sources down (nitter network unavailable) — skipping`);
-    } else {
-      console.log(`  Twitter sentiment: ${unreachableCount}/${ACCOUNTS.length} accounts unreachable`);
-    }
+  // Top mentioned symbols + defaults
+  const topSymbols = [
+    ...Object.entries(symbolCounts).sort((a,b) => b[1]-a[1]).slice(0,3).map(e => e[0]),
+    ...defaultSymbols,
+  ].filter((v, i, a) => a.indexOf(v) === i);
+
+  const sentiment = totalCaution > 2 ? 'caution'
+    : totalBull > totalBear + 2  ? 'bullish'
+    : totalBear > totalBull + 2  ? 'bearish'
+    : 'neutral';
+
+  const summary = `r/${subreddit} (${posts.length} posts): bull=${totalBull} bear=${totalBear} caution=${totalCaution}`;
+  console.log(`  ${summary} → ${sentiment}`);
+
+  return {
+    account: `r/${subreddit}`,
+    tweet: summary,
+    sentiment,
+    bull: totalBull,
+    bear: totalBear,
+    caution: totalCaution,
+    symbols: topSymbols,
+    prices: [],
+  };
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+
+export async function fetchTwitterSignals() {
+  const [cryptoFG, cnnFG, redditForex, redditWSB, redditInvesting] = await Promise.all([
+    fetchCryptoFG(),
+    fetchCNNFG(),
+    fetchRedditSignals('Forex',           ['EURUSD', 'GBPUSD']),
+    fetchRedditSignals('wallstreetbets',  ['NAS100', 'SPX500']),
+    fetchRedditSignals('investing',       []),
+  ]);
+
+  const signals = [cryptoFG, cnnFG, redditForex, redditWSB, redditInvesting].filter(Boolean);
+
+  if (signals.length === 0) {
+    console.log('  Sentiment: all sources down — skipping');
   }
 
   return signals;
 }
 
-// Aggregate to a single market bias
+// aggregateSignals unchanged — same interface for session_runner.mjs
 export function aggregateSignals(signals) {
   const bySymbol = {};
 
@@ -196,13 +231,13 @@ export function aggregateSignals(signals) {
 
 // ── CLI usage ──
 if (process.argv[1].endsWith('twitter_feed.mjs')) {
-  console.log('\nFetching X/Twitter signals...\n');
+  console.log('\nFetching market sentiment signals...\n');
   const signals = await fetchTwitterSignals();
   const agg = aggregateSignals(signals);
 
   console.log('\nRaw signals:', signals.length);
   for (const s of signals) {
-    console.log(`  @${s.account} [${s.sentiment}] ${s.symbols.join(',')} — "${s.tweet.substring(0,80)}"`);
+    console.log(`  [${s.account}] ${s.sentiment} ${s.symbols.join(',')} — "${s.tweet.substring(0, 80)}"`);
   }
 
   console.log('\nAggregated bias:');
