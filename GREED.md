@@ -391,4 +391,200 @@ tail -f /tmp/backtest_uv.log
 
 ---
 
+## 14. BlackBull Broker Reconnection Guide
+
+**Last fixed: 2026-04-27** — broker was not connected on VM even though local PC could trade. Fixed by running `bash refresh_cookies.sh` from the project root on the local PC — copies local Chrome session (cookies + localStorage) to the VM and restarts TradingView.
+
+### How to detect a disconnection
+
+Signs the broker is disconnected:
+
+- Bid/ask prices in the order ticket are frozen or missing
+- Bottom panel shows "Disconnected", "Reconnect", or "Session expired" text
+- `session_runner.mjs` fails on `waitForTicket()` → logs "Order ticket not found after 10s"
+- The `Trade` button at top right shows a red/orange indicator dot
+- Account balance shows as "—" or "0.00" in the BlackBull Markets panel
+
+Signs the broker IS connected (what to look for after reconnecting):
+
+- Live bid/ask prices updating every second in the order ticket
+- Account Balance (87.45 GBP), Equity, and Free Margin all showing real numbers
+- Account number "Live-8004229" visible in the panel
+- "Start creating order" button is active and clickable
+
+---
+
+### Step-by-step reconnection (do in order — stop when it works)
+
+#### Step 1 — Interact with the broker panel (usually enough)
+
+SSH in and run this quick CDP script to click the broker panel:
+```bash
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
+cat > /tmp/reconnect_broker.mjs << 'EOF'
+import CDP from "/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js";
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function main() {
+  const targets = await CDP.List({ host: "localhost", port: 9222 });
+  const chart = targets.find(t => t.url && t.url.includes("tradingview.com"));
+  const client = await CDP({ host: "localhost", port: 9222, target: chart.id });
+  const { Runtime } = client;
+
+  // Click BlackBull Markets tab to trigger session refresh
+  const r = await Runtime.evaluate({
+    expression: `(function() {
+      var btns = Array.from(document.querySelectorAll("button"));
+      var bb = btns.find(b => (b.textContent||"").trim() === "BlackBull Markets");
+      if (bb) { bb.click(); return "clicked BlackBull Markets tab"; }
+      // Try Trade button at top right
+      var trade = btns.find(b => (b.textContent||"").trim() === "Trade");
+      if (trade) { trade.click(); return "clicked Trade button"; }
+      return "no broker buttons found";
+    })()`,
+    returnByValue: true
+  });
+  console.log(r.result.value);
+  await sleep(2000);
+
+  // Check if now connected
+  const check = await Runtime.evaluate({
+    expression: `(function() {
+      var t = document.body.innerText;
+      return {
+        connected: !/disconnect|not connected|session expired/i.test(t),
+        hasPrices: /[0-9]{4,6}\.[0-9]/.test(t),
+        disconnectWarnings: t.match(/disconnect|reconnect|session expired|not connected/gi) || []
+      };
+    })()`,
+    returnByValue: true
+  });
+  console.log("Status:", JSON.stringify(check.result.value));
+  await client.close();
+}
+main().catch(console.error);
+EOF
+node /tmp/reconnect_broker.mjs
+```
+
+#### Step 2 — Click "Reconnect" button if visible
+
+If Step 1 didn't work and the panel shows a "Reconnect" or "Connect to Broker" button, run:
+```bash
+cat > /tmp/click_reconnect.mjs << 'EOF'
+import CDP from "/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js";
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function main() {
+  const targets = await CDP.List({ host: "localhost", port: 9222 });
+  const chart = targets.find(t => t.url && t.url.includes("tradingview.com"));
+  const client = await CDP({ host: "localhost", port: 9222, target: chart.id });
+  const { Runtime } = client;
+  const r = await Runtime.evaluate({
+    expression: `(function() {
+      var btns = Array.from(document.querySelectorAll("button"));
+      var reconnect = btns.find(b => /reconnect|connect to broker|connect broker/i.test((b.textContent||"")));
+      if (reconnect) { reconnect.click(); return "clicked: " + reconnect.textContent.trim(); }
+      return "no reconnect button found (may already be connected)";
+    })()`,
+    returnByValue: true
+  });
+  console.log(r.result.value);
+  await client.close();
+}
+main().catch(console.error);
+EOF
+node /tmp/click_reconnect.mjs
+```
+
+#### Step 3 — Reload TradingView page
+
+If Steps 1-2 didn't work, reload the TradingView page via CDP (no need to restart Chrome):
+```bash
+cat > /tmp/reload_tv.mjs << 'EOF'
+import CDP from "/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js";
+async function main() {
+  const targets = await CDP.List({ host: "localhost", port: 9222 });
+  const chart = targets.find(t => t.url && t.url.includes("tradingview.com"));
+  const client = await CDP({ host: "localhost", port: 9222, target: chart.id });
+  await client.Page.enable();
+  await client.Page.reload({ ignoreCache: true });
+  console.log("Page reloaded — wait ~30 seconds for TradingView to fully load");
+  await client.close();
+}
+main().catch(console.error);
+EOF
+node /tmp/reload_tv.mjs
+# Wait 30 seconds, then run Step 1 to confirm connection
+sleep 30
+node /tmp/reconnect_broker.mjs
+```
+
+> After a page reload, TradingView auto-logs into BlackBull because the session cookie is saved in `/home/ubuntu/chrome-profile`. You should not need to re-enter your BlackBull password.
+
+#### Step 4 — Restart Chrome entirely (last resort)
+
+Only do this if the page reload fails. This restarts TradingView from scratch:
+```bash
+# Kill Chrome
+pkill -f "google-chrome.*tradingview" || true
+sleep 3
+
+# Relaunch with same flags
+DISPLAY=:1 nohup google-chrome \
+  --remote-debugging-port=9222 \
+  --remote-debugging-address=127.0.0.1 \
+  --user-data-dir=/home/ubuntu/chrome-profile \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --no-sandbox \
+  --window-size=1920,1080 \
+  https://www.tradingview.com/chart/ \
+  >> /tmp/chrome.log 2>&1 &
+
+echo "Chrome restarting — wait 60 seconds before verifying"
+sleep 60
+
+# Then verify broker connection
+node /tmp/reconnect_broker.mjs
+```
+
+> Chrome restores the last session automatically from profile. BlackBull broker panel reconnects on its own once the page loads. You may need to click the BlackBull Markets tab once.
+
+#### Step 5 — Verify cron jobs are still running
+
+After any restart, confirm the cron jobs are active:
+
+```bash
+crontab -l | grep session_runner   # should show 4 entries (00:00, 08:00, 13:00, 17:00)
+```
+
+---
+
+### Why disconnections happen
+
+| Cause | Frequency | Fix |
+| ------- | ----------- | --- |
+| Long idle period (>12h no chart interaction) | Common | Step 1 — click broker panel tab |
+| TradingView session token expired | ~Weekly | Step 2 — click Reconnect button |
+| Chrome memory OOM (VM low on RAM) | Rare | Step 4 — restart Chrome |
+| BlackBull server maintenance window | Rare | Wait 15 min, retry Step 1 |
+| VM reboot / power cycle | If manually rebooted | Step 4 — restart Chrome |
+
+---
+
+### Quick visual check (VNC)
+
+Connect via VNC to see the TradingView screen directly:
+
+```bash
+# Local terminal (keep open):
+ssh -i ~/.ssh/id_rsa_oracle -L 5901:localhost:5901 -N ubuntu@132.145.44.68
+# Then open RealVNC Viewer → connect to localhost:5901
+```
+
+When connected: look at the bottom panel. If you see **"BlackBull Markets"** tab with a green dot and live bid/ask prices ticking — you are connected. If you see a **red dot** or "Disconnected" text — run Step 1 above.
+
+---
+
 *GREED is a living system. After each week, run the weekly review and update instrument tiers. The goal is always the same: highest win rate, highest P&L, minimum overnight risk.*

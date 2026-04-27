@@ -41,24 +41,24 @@ async function extractJobCards(client) {
   return await evaluate(client, `
     (function() {
       const cards = document.querySelectorAll(
-        '.job-card-container, .jobs-search-results__list-item, [data-job-id], .base-card'
+        '[data-occludable-job-id], [data-job-id], .job-card-container, .base-card'
       );
       const results = [];
       cards.forEach(card => {
         try {
-          const titleEl  = card.querySelector('.job-card-list__title, .base-search-card__title, h3, h4');
-          const compEl   = card.querySelector('.job-card-container__company-name, .base-search-card__subtitle, h4');
-          const locEl    = card.querySelector('.job-card-container__metadata-item, .job-search-card__location');
-          const salEl    = card.querySelector('.job-card-container__salary-info, .job-search-card__salary-info');
-          const linkEl   = card.querySelector('a[href*="/jobs/view/"], a[href*="linkedin.com/jobs"]');
-          const jobId    = card.getAttribute('data-job-id') || card.getAttribute('data-entity-urn') || '';
+          const titleEl  = card.querySelector('.job-card-list__title--link, .job-card-list__title, .base-search-card__title');
+          const compEl   = card.querySelector('.artdeco-entity-lockup__subtitle, .job-card-container__primary-description, .job-card-container__company-name, .base-search-card__subtitle');
+          const locEl    = card.querySelector('.artdeco-entity-lockup__caption, .job-card-container__metadata-item, .job-search-card__location');
+          const salEl    = card.querySelector('.job-card-container__salary-info, .job-search-card__salary-info, [class*="salary"]');
+          const linkEl   = card.querySelector('a[href*="/jobs/view/"]');
+          const jobId    = card.getAttribute('data-occludable-job-id') || card.getAttribute('data-job-id') || card.getAttribute('data-entity-urn') || '';
 
           if (titleEl && compEl) {
             results.push({
               job_id:      jobId,
-              title:       titleEl.innerText.trim(),
-              company:     compEl.innerText.trim(),
-              location:    locEl ? locEl.innerText.trim() : '',
+              title:       titleEl.innerText.trim().split('\\n')[0].trim(),
+              company:     compEl.innerText.trim().split('\\n')[0].trim(),
+              location:    locEl ? locEl.innerText.trim().split('\\n')[0].trim() : '',
               salary_text: salEl ? salEl.innerText.trim() : '',
               url:         linkEl ? (linkEl.href.startsWith('http') ? linkEl.href : 'https://www.linkedin.com' + linkEl.getAttribute('href')) : '',
             });
