@@ -188,6 +188,20 @@ export async function confirmIfNeeded() {
   })()`);
 }
 
+// ── Confirm the "Close position" dialog if it appears ──
+async function confirmCloseDialog() {
+  await sleep(600);
+  return evaluate(`(function() {
+    var btns = Array.from(document.querySelectorAll('button'));
+    // Find the confirmation button inside the modal — matches "Close position" exactly
+    var confirm = btns.find(function(b) {
+      return b.offsetParent !== null && (b.textContent || '').trim() === 'Close position';
+    });
+    if (confirm) { confirm.click(); return 'dialog confirmed'; }
+    return 'no dialog';
+  })()`);
+}
+
 // ── Close all open positions ──
 export async function closeAllPositions() {
   // Click Positions tab first
@@ -202,24 +216,26 @@ export async function closeAllPositions() {
   // Look for close buttons on each position row
   const result = await evaluate(`(function() {
     var closed = 0;
-    // Close buttons in position rows
     var closeBtns = document.querySelectorAll('[class*="closeButton"], [aria-label*="Close"], [title*="Close position"]');
     for (var i = 0; i < closeBtns.length; i++) {
       if (closeBtns[i].offsetParent) { closeBtns[i].click(); closed++; }
     }
-    if (closed > 0) return 'closed ' + closed + ' position(s)';
+    if (closed > 0) return 'clicked ' + closed + ' close button(s)';
 
-    // Fallback: right-click row or find "Close" button text
+    // Fallback: find "Close" button text
     var btns = document.querySelectorAll('button');
     for (var i = 0; i < btns.length; i++) {
       if (!btns[i].offsetParent) continue;
       var t = (btns[i].textContent || '').trim().toLowerCase();
       if (t === 'close' || t === 'close all') { btns[i].click(); closed++; }
     }
-    return closed > 0 ? 'closed ' + closed : 'no close buttons found';
+    return closed > 0 ? 'clicked ' + closed : 'no close buttons found';
   })()`);
-  await sleep(800);
-  return result;
+
+  // Confirm the modal dialog that TradingView shows after clicking close
+  const confirmed = await confirmCloseDialog();
+  await sleep(500);
+  return `${result} → ${confirmed}`;
 }
 
 // ── Get account equity ──
