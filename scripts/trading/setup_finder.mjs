@@ -80,10 +80,7 @@ export const FULL_SCAN_LIST = [
   // EMA flatness gate still blocks ranging entries regardless of tier
   { sym: 'BLACKBULL:BTCUSD',  label: 'BTCUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
   { sym: 'BLACKBULL:ETHUSD',  label: 'ETHUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:BNBUSD',  label: 'BNBUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
   { sym: 'BLACKBULL:LTCUSD',  label: 'LTCUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:SOLUSD',  label: 'SOLUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:ADAUSD',  label: 'ADAUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
   { sym: 'BLACKBULL:XRPUSD',  label: 'XRPUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
   { sym: 'BLACKBULL:AUDUSD',  label: 'AUDUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
   { sym: 'BLACKBULL:USDCAD',  label: 'USDCAD',  tfs: ['60'],      autoShort: true,  tier: 3 },
@@ -696,7 +693,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 }
 
 // ── Main scan ──
-export async function scanForSetups(minScore = 11) {
+export async function scanForSetups(minScore = 9) {
   const utcHour    = new Date().getUTCHours();
   const priority   = sessionSymbols(utcHour);
   const results    = [];
@@ -732,7 +729,9 @@ export async function scanForSetups(minScore = 11) {
       for (const dir of directions) {
         const { score, reasons, strategies, rsi, atrVal } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
 
-        if (score >= minScore) {
+        // T+U gate: require weekly trend alignment AND price in favorable range half
+        const hasTU = strategies.includes('T') && strategies.includes('U');
+        if (score >= minScore && hasTU) {
           const entry   = bars[bars.length-1].c;
           // Day-trade structure: quick scalp + same-day main target + optional break-even runner
           // All TPs calculated from SL distance (R-multiples) so they scale with volatility
