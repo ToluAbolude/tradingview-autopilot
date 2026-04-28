@@ -208,6 +208,92 @@ function toHA(bars) {
   });
 }
 
+// ── Adaptive S/R Zones — faithful JS port of BigBeluga's Pine algorithm ──────
+// Params match BigBeluga defaults: pivotLen=5, minStrength=0.1, mergeThresh=0.5,
+// maxLevels=5 per type, maxAgeBars=300, breakSens=0.1
+function buildSRZones(bars, atr, {
+  pivotLen    = 5,
+  minStrength = 0.1,
+  maxAgeBars  = 300,
+  maxLevels   = 5,
+  mergeThresh = 0.5,
+  breakSens   = 0.1,
+} = {}) {
+  const n = bars.length - 1;
+  const currentATR = atr[n] || 1;
+  const breakBuf   = breakSens * currentATR;
+
+  // f_pivotStrong: BigBeluga checks only the two bars immediately adjacent to the
+  // pivot (high[pivotLen-1] and high[pivotLen+1] in Pine), not the full window.
+  function isStrong(price, type, idx) {
+    if (idx <= 0 || idx >= n) return false;
+    const localATR = atr[idx] || currentATR;
+    if (type === 'resistance') {
+      const nearHigh = Math.max(bars[idx - 1].h, bars[idx + 1].h);
+      return (price - nearHigh) >= minStrength * localATR;
+    }
+    const nearLow = Math.min(bars[idx - 1].l, bars[idx + 1].l);
+    return (nearLow - price) >= minStrength * localATR;
+  }
+
+  // ta.pivothigh / ta.pivotlow: strictly highest/lowest in the full [i-L .. i+L] window
+  const pivotHighs = [], pivotLows = [];
+  for (let i = pivotLen; i <= n - pivotLen; i++) {
+    const ph = bars[i].h;
+    let hi = true;
+    for (let j = i - pivotLen; j <= i + pivotLen; j++) {
+      if (j !== i && bars[j].h >= ph) { hi = false; break; }
+    }
+    if (hi && isStrong(ph, 'resistance', i)) pivotHighs.push({ price: ph, idx: i });
+
+    const pl = bars[i].l;
+    let lo = true;
+    for (let j = i - pivotLen; j <= i + pivotLen; j++) {
+      if (j !== i && bars[j].l <= pl) { lo = false; break; }
+    }
+    if (lo && isStrong(pl, 'support', i)) pivotLows.push({ price: pl, idx: i });
+  }
+
+  // f_isTooClose / f_addLevel: reject new pivot if within mergeThresh×ATR of any
+  // active level of the same type; otherwise add (respecting maxLevels cap).
+  // When rejected, increment the nearby level's touch count — that's multi-test strength.
+  function buildLevels(pivots, type) {
+    const levels = [];
+
+    for (const piv of pivots) {
+      const active = levels.filter(z => !z.broken);
+      const nearby = active.find(z => Math.abs(z.price - piv.price) < mergeThresh * currentATR);
+      if (nearby) {
+        nearby.touches++;
+        if (piv.idx > nearby.idx) nearby.idx = piv.idx;
+      } else if (active.length < maxLevels) {
+        levels.push({ price: piv.price, idx: piv.idx, type, touches: 1, broken: false });
+      }
+    }
+
+    // Breakout + age pruning (BigBeluga: close crosses price by breakSens×ATR)
+    for (const lvl of levels) {
+      if (n - lvl.idx > maxAgeBars) { lvl.broken = true; continue; }
+      for (let i = lvl.idx + 1; i <= n; i++) {
+        if (type === 'resistance' && bars[i].c > lvl.price + breakBuf) { lvl.broken = true; break; }
+        if (type === 'support'    && bars[i].c < lvl.price - breakBuf) { lvl.broken = true; break; }
+      }
+    }
+
+    return levels;
+  }
+
+  const allRes = buildLevels(pivotHighs, 'resistance');
+  const allSup = buildLevels(pivotLows,  'support');
+  const all    = [...allRes, ...allSup];
+
+  return {
+    active: all.filter(z => !z.broken),
+    broken: all.filter(z =>  z.broken),
+    currentATR,
+  };
+}
+
 // ── Session quality ──
 function sessionQuality(utcHour) {
   if (utcHour >= 13 && utcHour < 17) return 1; // London-NY overlap
@@ -294,9 +380,12 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const rsi    = calcRSI(bars);
   const st     = calcSmartTrail(bars);
   const bb     = calcBollinger(bars);
-  const ha     = toHA(bars);
-  const avgV   = avgVol(bars);
-  const last   = bars[n];
+  const ha      = toHA(bars);
+  const avgV    = avgVol(bars);
+  // T1 commodities/indices have wider ATR — shorter pivotLen finds more structure
+  const isT1 = ['WTI','NAS100','US30','XAUUSD','XAGUSD','SPX500'].includes(label);
+  const srZones = buildSRZones(bars, atr, isT1 ? { pivotLen: 3, minStrength: 0.05 } : {});
+  const last    = bars[n];
   const lastHA = ha[n];
   const range  = last.h - last.l;
   const body   = Math.abs(last.c - last.o);
@@ -327,15 +416,19 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     score++; reasons.push('EMA stack aligned'); strats.push('B');
   }
 
-  // ── C. S/R proximity — near 50-bar swing high/low ──
-  const highs50 = bars.slice(-50).map(b=>b.h);
-  const lows50  = bars.slice(-50).map(b=>b.l);
-  const swingH  = Math.max(...highs50.slice(0,-3));
-  const swingL  = Math.min(...lows50.slice(0,-3));
-  const nearR   = Math.abs(last.c - swingH) / last.c < 0.004;
-  const nearS   = Math.abs(last.c - swingL) / last.c < 0.004;
-  if ((dir === 'short' && nearR) || (dir === 'long' && nearS)) {
-    score++; reasons.push(`At S/R (swing ${dir==='long'?'low':'high'})`); strats.push('C');
+  // ── C. Adaptive S/R Zone proximity (BigBeluga algorithm) ──
+  // Uses ATR-filtered pivot levels merged into zones — far more precise than raw swing H/L.
+  // Touch distance = 0.5×ATR; multi-touch zones (touches≥2) scored as stronger levels.
+  {
+    const touchDist = srZones.currentATR * 0.5;
+    const activeZone = srZones.active.find(z =>
+      Math.abs(last.c - z.price) < touchDist &&
+      ((z.type === 'support' && dir === 'long') || (z.type === 'resistance' && dir === 'short'))
+    );
+    if (activeZone) {
+      const strength = activeZone.touches >= 2 ? 'tested' : 'fresh';
+      score++; reasons.push(`At adaptive S/R zone @${activeZone.price.toFixed(4)} (${activeZone.touches}T ${strength})`); strats.push('C');
+    }
   }
 
   // ── D. Rejection candle (pin bar / engulfing / doji) ──
@@ -381,10 +474,9 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     score++; reasons.push(`Volume spike ${(last.v/avgV).toFixed(1)}×`); strats.push('G');
   }
 
-  // ── H. Session quality ──
-  if (sessionQuality(utcHour)) {
-    score++; reasons.push('Prime session'); strats.push('H');
-  }
+  // ── H. Session quality — informational only, no score.
+  // Backtest: -65% lift even as conditional amplifier. Removed from scoring entirely.
+  if (sessionQuality(utcHour)) { reasons.push('Prime session'); }
 
   // ── I. Statistical pattern match ──
   try {
@@ -462,22 +554,36 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     }
   }
 
-  // ── M. WOR Break & Retest (Vincent Desiano) ──
-  // Detect: major swing level was broken 5-20 bars ago, price is now retesting it.
+  // ── M. WOR Break & Retest + Broken Zone Flip (BigBeluga mechanism) ──
+  // Two signals:
+  //   1. Classic swing B&R: major level broken 5-20 bars ago, now retesting it
+  //   2. Broken zone flip: broken support → new resistance (short); broken resistance → new support (long)
   {
+    const tolerance = atr[n] * 0.5;
+    // Classic swing B&R
     const lookH = bars.slice(n-30, n-8).map(b=>b.h);
     const lookL = bars.slice(n-30, n-8).map(b=>b.l);
     const majorH = Math.max(...lookH);
     const majorL = Math.min(...lookL);
-    const tolerance = atr[n] * 0.5;
-    // Long retest: broke above majorH in recent bars, now pulling back to it
     const brokeMajorH = bars.slice(n-8, n-1).some(b => b.c > majorH);
     const retestingH  = Math.abs(last.c - majorH) < tolerance && dir === 'long';
-    // Short retest: broke below majorL in recent bars, now pulling back to it
     const brokeMajorL = bars.slice(n-8, n-1).some(b => b.c < majorL);
     const retestingL  = Math.abs(last.c - majorL) < tolerance && dir === 'short';
     if (brokeMajorH && retestingH) { score++; reasons.push('B&R retest (support)'); strats.push('M'); }
     if (brokeMajorL && retestingL) { score++; reasons.push('B&R retest (resistance)'); strats.push('M'); }
+
+    // Broken zone flip (BigBeluga: broken levels become opposite S/R)
+    if (!strats.includes('M')) {
+      const flipZone = srZones.broken.find(z =>
+        Math.abs(last.c - z.price) < tolerance &&
+        ((z.type === 'resistance' && dir === 'long') ||   // broken resistance → now support
+         (z.type === 'support'    && dir === 'short'))     // broken support → now resistance
+      );
+      if (flipZone) {
+        const role = flipZone.type === 'resistance' ? 'flipped support' : 'flipped resistance';
+        score++; reasons.push(`Broken zone flip: ${role} @${flipZone.price.toFixed(4)}`); strats.push('M');
+      }
+    }
   }
 
   // ── N. WOR Marci Silfrain HTF Mean Reversion ──
@@ -689,11 +795,17 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const uniqueStrats = [...new Set(strats.map(s=>s[0]))].length;
   if (uniqueStrats >= 5) { score++; reasons.push(`${uniqueStrats} strategies converge`); }
 
+  // NAS100 gate — Run 3: 0% WR on 8 trades without guard. Run 4: E+M/G fallback still let
+  // 1 losing trade through. P (Okala over-extension fade) is built for indices — require it alone.
+  if (label === 'NAS100' && !strats.includes('P')) {
+    return { score: Math.min(score, 8), reasons, strategies: [...new Set(strats)], rsi: rsi[n], atrVal: atr[n] };
+  }
+
   return { score, reasons, strategies: [...new Set(strats)], rsi: rsi[n], atrVal: atr[n] };
 }
 
 // ── Main scan ──
-export async function scanForSetups(minScore = 9) {
+export async function scanForSetups(minScore = 8) {
   const utcHour    = new Date().getUTCHours();
   const priority   = sessionSymbols(utcHour);
   const results    = [];
@@ -733,14 +845,13 @@ export async function scanForSetups(minScore = 9) {
         const hasTU = strategies.includes('T') && strategies.includes('U');
         if (score >= minScore && hasTU) {
           const entry   = bars[bars.length-1].c;
-          // Day-trade structure: quick scalp + same-day main target + optional break-even runner
-          // All TPs calculated from SL distance (R-multiples) so they scale with volatility
-          const sl        = dir === 'long'  ? entry - atrVal * 1.5 : entry + atrVal * 1.5;
-          const slDist    = Math.abs(entry - sl);
-          const tpQuick   = dir === 'long'  ? entry + slDist * 0.5 : entry - slDist * 0.5;  // 0.5R — quick scalp, ~1–2 hrs
-          const tp2       = dir === 'long'  ? entry + slDist * 1.0 : entry - slDist * 1.0;  // 1.0R — main target, same session
-          const tp1       = dir === 'long'  ? entry + slDist * 2.0 : entry - slDist * 2.0;  // 2.0R — runner (break-even SL set at entry)
-          const rr        = Math.abs(tp1-entry) / Math.abs(entry-sl);
+          // Day-trade structure: quick scalp + main same-day target (no overnight runner)
+          const sl      = dir === 'long'  ? entry - atrVal * 1.5 : entry + atrVal * 1.5;
+          const slDist  = Math.abs(entry - sl);
+          const tpQuick = dir === 'long'  ? entry + slDist * 0.5 : entry - slDist * 0.5;  // 0.5R quick scalp
+          const tp2     = dir === 'long'  ? entry + slDist * 1.0 : entry - slDist * 1.0;  // 1.0R main target
+          const tp3     = dir === 'long'  ? entry + slDist * 2.0 : entry - slDist * 2.0;  // 2.0R runner (EOD close backstop)
+          const rr      = 2.0;
 
           results.push({
             sym: inst.sym, label: inst.label, tf, dir, score,
@@ -749,8 +860,8 @@ export async function scanForSetups(minScore = 9) {
             sl:      Math.round(sl      * 10000) / 10000,
             tpQuick: Math.round(tpQuick * 10000) / 10000,
             tp2:     Math.round(tp2     * 10000) / 10000,
-            tp1:     Math.round(tp1     * 10000) / 10000,
-            rr:      Math.round(rr      * 100)   / 100,
+            tp3:     Math.round(tp3     * 10000) / 10000,
+            rr,
             rsi:   Math.round(rsi),
             tier:  inst.tier,
           });
@@ -773,6 +884,6 @@ export async function scanForSetups(minScore = 9) {
 if (process.argv[1].endsWith('setup_finder.mjs')) {
   const setups = await scanForSetups();
   for (const s of setups) {
-    console.log(`  [${s.score}/16][T${s.tier}] ${s.label} ${s.tf}M ${s.dir.toUpperCase()} | Entry:${s.entry} SL:${s.sl} TP:${s.tp1} R:R ${s.rr} | ${s.strategies.join(',')} | ${s.reasons.slice(0,4).join(', ')}`);
+    console.log(`  [${s.score}/9][T${s.tier}] ${s.label} ${s.tf}M ${s.dir.toUpperCase()} | Entry:${s.entry} SL:${s.sl} TP1:${s.tpQuick}/TP2:${s.tp2}/TP3:${s.tp3} RR:${s.rr} | ${s.strategies.join(',')} | ${s.reasons.slice(0,4).join(', ')}`);
   }
 }

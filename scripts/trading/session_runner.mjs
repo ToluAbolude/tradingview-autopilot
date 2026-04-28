@@ -10,7 +10,7 @@
  */
 import { fetchHighImpactNews, isSafeToTrade, filterForSymbol } from './news_checker.mjs';
 import { scanForSetups } from './setup_finder.mjs';
-import { placeOrder, getEquity } from './execute_trade.mjs';
+import { placeOrder, getEquity, closeAllPositions } from './execute_trade.mjs';
 import { fetchTwitterSignals, aggregateSignals } from './twitter_feed.mjs';
 import { analyzePerformance } from './performance_tracker.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync } from 'fs';
@@ -138,24 +138,31 @@ async function main() {
   const session = currentSession();
   log(`=== SESSION START: ${session} ===`);
 
-  // 0a. Friday cutoff — no new entries after 15:30 UTC on Fridays
   const now     = new Date();
   const isFri   = now.getUTCDay() === 5;
   const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  if (isFri && utcMins >= 15 * 60 + 30) {
-    log('Friday 15:30 UTC cutoff reached — no new trades today.');
+  const h       = now.getUTCHours();
+
+  // 0a. EOD close — 20:00 UTC: close any open positions and stop scanning for the day
+  if (h >= 20) {
+    log('20:00 UTC EOD close — closing any open positions.');
+    try { await closeAllPositions(); log('  All positions closed.'); }
+    catch(e) { log(`  closeAllPositions: ${e.message}`); }
     return;
   }
 
-  // 0b. Session gate — day trading hours: 00:00–22:00 UTC (no dead zone 22:00-00:00)
-  // Priority:  London-NY overlap (BEST) > London open > NY continuation > Asian
-  const h         = now.getUTCHours();
-  const isOverlap = utcMins >= 13 * 60 && utcMins < 17 * 60;  // 13:00–17:00 (BEST)
-  const isAsian   = h < 7;                                      // 00:00–06:59
-  const isLondon  = h >= 8  && h < 13;                          // 08:00–12:59 (score ≥ 12)
-  const isNYCont  = h >= 17 && h < 22;                          // 17:00–21:59 (score ≥ 12, crypto/indices only)
-  if (!isOverlap && !isAsian && !isLondon && !isNYCont) {
-    log(`Session gate: ${session} — dead zone (UTC ${h}:xx). Skipping.`);
+  // 0b. Day-trading entry window: London (08:00) through London-NY overlap (16:00)
+  // No Asian session entries (low liquidity). Hard cutoff at 16:00 so trades can close same day.
+  const isLondon  = h >= 8  && h < 13;   // 08:00–12:59
+  const isOverlap = h >= 13 && h < 16;   // 13:00–15:59 (best session)
+  if (!isLondon && !isOverlap) {
+    log(`Entry window closed (UTC ${h}:xx) — day trading hours are 08:00–16:00 UTC.`);
+    return;
+  }
+
+  // 0c. Friday cutoff — no new entries after 15:30 UTC on Fridays
+  if (isFri && utcMins >= 15 * 60 + 30) {
+    log('Friday 15:30 UTC cutoff reached — no new trades today.');
     return;
   }
 
@@ -219,23 +226,15 @@ async function main() {
   }
 
   if (setups.length === 0) {
-    log('No qualifying setups found (score < 11). Skipping session — no token waste.');
+    log('No qualifying setups found (score < 9 or T+U gate not met). Skipping.');
     logTrade({ session, symbol: 'NONE', tf: '-', direction: '-', score: 0, entry: 0, sl: 0, tp: 0, rr: 0, notes: 'no setup' });
     return;
   }
 
   log(`Found ${setups.length} qualifying setup(s).`);
 
-  // 3. Session filter — quality gates per session
-  const NY_CONT_SYMBOLS = ['BTCUSD','ETHUSD','NAS100','US30','SPX500','XAUUSD','SOLUSD','BNBUSD'];
-  const sessionFiltered = setups.filter(s => {
-    if (isOverlap) return true;                                                        // London-NY: all symbols
-    if (isAsian   && /BTC/i.test(s.label) && s.score >= 13) return true;              // Asian: BTC only ≥13
-    if (isLondon  && s.score >= 12) return true;                                       // London: all tier 1/2 ≥12
-    if (isNYCont  && NY_CONT_SYMBOLS.includes(s.label) && s.score >= 12) return true; // NY cont: crypto/indices ≥12
-    log(`  Skipping ${s.label}: session gate (${session}, score=${s.score})`);
-    return false;
-  });
+  // 3. Session filter — London and London-NY overlap both accepted (already gated above)
+  const sessionFiltered = setups;
 
   if (sessionFiltered.length === 0) {
     log('All setups filtered by session gate. Skipping.');
@@ -292,34 +291,38 @@ async function main() {
   const baseRisk = selected.length === 1 ? 1.0 : selected.length === 2 ? 0.75 : 0.5;
   const LOT_STEP = 0.01;
 
-  // 6. Place 3 orders per selected instrument
+  // 6. Place 3 orders per selected instrument (day-trade — EOD close at 20:00 UTC is the backstop)
+  //    O1: 1/3 risk at 0.5R quick scalp
+  //    O2: 1/3 risk at 1.0R main target
+  //    O3: 1/3 risk at 2.0R runner (closed at EOD if not hit — never overnight)
   let totalPlaced = 0;
   for (const best of selected) {
-    const riskPct   = best.score >= 14 ? baseRisk + 0.5 : best.score >= 12 ? baseRisk + 0.25 : baseRisk;
+    const riskPct   = best.score >= 12 ? baseRisk + 0.25 : baseRisk;
     const totalLots = calcLots(best.label, riskPct, equity, best.entry, best.sl);
     const thirdLots = Math.max(0.01, Math.floor((totalLots / 3) / LOT_STEP) * LOT_STEP);
     const sym       = best.sym.replace('BLACKBULL:', '');
 
     log(`\n── ${best.label} ${best.dir.toUpperCase()} | Risk:${riskPct}% | ${thirdLots}×3 lots ──`);
-    log(`   TP1(0.5R):${best.tpQuick} | TP2(1.0R):${best.tp2} | TP3(2.0R):${best.tp1} | SL:${best.sl}`);
+    log(`   O1(0.5R):${best.tpQuick} | O2(1.0R):${best.tp2} | O3(2.0R):${best.tp3} | SL:${best.sl}`);
 
     let placed = 0;
     try {
       await placeOrder({ symbol: sym, direction: best.dir, units: thirdLots,
         tpPrice: best.tpQuick, slPrice: best.sl, screenshot: false });
-      log(`  ✓ O1 (0.5R, SL=${best.sl})`); placed++;
+      log(`  ✓ O1 (0.5R quick scalp, SL=${best.sl})`); placed++;
     } catch(e) { log(`  ✗ O1 error: ${e.message}`); }
 
     try {
       await placeOrder({ symbol: sym, direction: best.dir, units: thirdLots,
-        tpPrice: best.tp2, slPrice: best.entry, screenshot: false });
-      log(`  ✓ O2 (1.0R, BE stop=${best.entry})`); placed++;
+        tpPrice: best.tp2, slPrice: best.sl, screenshot: false });
+      log(`  ✓ O2 (1.0R main target, SL=${best.sl})`); placed++;
     } catch(e) { log(`  ✗ O2 error: ${e.message}`); }
 
     try {
       await placeOrder({ symbol: sym, direction: best.dir, units: thirdLots,
-        tpPrice: best.tp1, slPrice: best.entry, screenshot: selected.indexOf(best) === selected.length - 1 });
-      log(`  ✓ O3 (2.0R, BE stop=${best.entry})`); placed++;
+        tpPrice: best.tp3, slPrice: best.sl,
+        screenshot: selected.indexOf(best) === selected.length - 1 });
+      log(`  ✓ O3 (2.0R runner, EOD close backstop, SL=${best.sl})`); placed++;
     } catch(e) { log(`  ✗ O3 error: ${e.message}`); }
 
     if (placed > 0) {
@@ -327,24 +330,24 @@ async function main() {
       logTrade({
         session, symbol: best.label, tf: best.tf, direction: best.dir,
         score: best.score, entry: best.entry, sl: best.sl,
-        tp: `${best.tpQuick}/${best.tp2}/${best.tp1}`, rr: best.rr,
+        tp: `${best.tpQuick}/${best.tp2}/${best.tp3}`, rr: best.rr,
         notes: best.reasons.join(';') + ` lots=${thirdLots}x3 placed=${placed}`,
       });
 
-      // Launch a position monitor per instrument
+      // Launch position monitor per instrument
       const monitorPath = join(__dirname, 'position_monitor.mjs');
       const monitorLog  = join(DATA_ROOT, `monitor_${best.label}.log`);
       const logFd = openSync(monitorLog, 'a');
       const monitor = spawn(process.execPath, [
         monitorPath,
-        `--entry=${best.entry}`, `--tp1=${best.tpQuick}`, `--tp2=${best.tp2}`,
+        `--entry=${best.entry}`, `--tp1=${best.tpQuick}`, `--tp2=${best.tp2}`, `--tp3=${best.tp3}`,
         `--symbol=${best.label}`, `--numOrders=${placed}`,
       ], { detached: true, stdio: ['ignore', logFd, logFd] });
       monitor.unref();
       log(`  Monitor launched (pid ${monitor.pid}) → ${monitorLog}`);
     }
 
-    await new Promise(r => setTimeout(r, 1500)); // brief pause between instruments
+    await new Promise(r => setTimeout(r, 1500));
   }
 
   log(`\n=== SESSION END — ${totalPlaced} orders placed across ${selected.length} instrument(s) ===\n`);
