@@ -56,39 +56,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // All instruments kept — none permanently removed. Low-WR ones sit at the bottom
 // and only win if they post a genuinely high score (which requires EMA trend alignment).
 // The EMA flatness gate blocks ranging-market entries regardless of tier.
+
+// All instruments scan all 6 timeframes: 1M, 5M, 15M, H1, H4, D
+// 27 instruments × 6 TFs = 162 chart switches per cycle (~7 min), fits within 15-min interval.
+const ALL_TFS = ['1', '5', '15', '60', '240', 'D'];
+
 export const FULL_SCAN_LIST = [
   // ── TIER 1: Proven high WR — ranked by 2-week audit (Apr 13-25) ──
   // WTI 58%H1 | NAS100 48%H1 | US30 42%H1 | XAUUSD 34%H1 | EURUSD 40%H1 (rising)
-  { sym: 'BLACKBULL:WTI',     label: 'WTI',     tfs: ['60','15'],           autoShort: true,  tier: 1 },
-  { sym: 'BLACKBULL:NAS100',  label: 'NAS100',  tfs: ['60','15'],           autoShort: false, tier: 1 },
-  { sym: 'BLACKBULL:US30',    label: 'US30',    tfs: ['60','15'],           autoShort: false, tier: 1 },
-  { sym: 'BLACKBULL:XAUUSD',  label: 'XAUUSD',  tfs: ['60','15'],          autoShort: true,  tier: 1 },
-  { sym: 'BLACKBULL:SPX500',  label: 'SPX500',  tfs: ['60','15'],           autoShort: false, tier: 1 },
-  { sym: 'BLACKBULL:XAGUSD',  label: 'XAGUSD',  tfs: ['60','15'],          autoShort: true,  tier: 1 },
+  { sym: 'BLACKBULL:WTI',     label: 'WTI',     tfs: ALL_TFS, autoShort: true,  tier: 1 },
+  { sym: 'BLACKBULL:NAS100',  label: 'NAS100',  tfs: ALL_TFS, autoShort: false, tier: 1 },
+  { sym: 'BLACKBULL:US30',    label: 'US30',    tfs: ALL_TFS, autoShort: false, tier: 1 },
+  { sym: 'BLACKBULL:XAUUSD',  label: 'XAUUSD',  tfs: ALL_TFS, autoShort: true,  tier: 1 },
+  { sym: 'BLACKBULL:SPX500',  label: 'SPX500',  tfs: ALL_TFS, autoShort: false, tier: 1 },
+  { sym: 'BLACKBULL:XAGUSD',  label: 'XAGUSD',  tfs: ALL_TFS, autoShort: true,  tier: 1 },
 
-  // ── TIER 2: Situational — good in trending weeks, scan on H1 only ──
+  // ── TIER 2: Situational — good in trending weeks ──
   // EURUSD improved to 40% this week | JPY pairs consistent mid-20s
-  { sym: 'BLACKBULL:EURUSD',  label: 'EURUSD',  tfs: ['60'],      autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:USDJPY',  label: 'USDJPY',  tfs: ['60'],      autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:EURJPY',  label: 'EURJPY',  tfs: ['60'],      autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:GBPJPY',  label: 'GBPJPY',  tfs: ['60'],      autoShort: true,  tier: 2 },
-  { sym: 'BLACKBULL:GBPUSD',  label: 'GBPUSD',  tfs: ['60'],      autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:EURUSD',  label: 'EURUSD',  tfs: ALL_TFS, autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:USDJPY',  label: 'USDJPY',  tfs: ALL_TFS, autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:EURJPY',  label: 'EURJPY',  tfs: ALL_TFS, autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:GBPJPY',  label: 'GBPJPY',  tfs: ALL_TFS, autoShort: true,  tier: 2 },
+  { sym: 'BLACKBULL:GBPUSD',  label: 'GBPUSD',  tfs: ALL_TFS, autoShort: true,  tier: 2 },
 
   // ── TIER 3: Deprioritised — low recent WR, kept for trending opportunities ──
-  // BTCUSD/ETHUSD demoted: 2-6% WR this week — crypto bear/choppy conditions
-  // 15M removed from BTC/ETH — catastrophic signal quality (-40k pts)
-  // EMA flatness gate still blocks ranging entries regardless of tier
-  { sym: 'BLACKBULL:BTCUSD',  label: 'BTCUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:ETHUSD',  label: 'ETHUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:LTCUSD',  label: 'LTCUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:XRPUSD',  label: 'XRPUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:AUDUSD',  label: 'AUDUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:USDCAD',  label: 'USDCAD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:NZDUSD',  label: 'NZDUSD',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:USDCHF',  label: 'USDCHF',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:AUDJPY',  label: 'AUDJPY',  tfs: ['60'],      autoShort: true,  tier: 3 },
-  { sym: 'BLACKBULL:GER40',   label: 'GER40',   tfs: ['60'],      autoShort: false, tier: 3 },
-  { sym: 'BLACKBULL:UK100',   label: 'UK100',   tfs: ['60'],      autoShort: false, tier: 3 },
+  { sym: 'BLACKBULL:BTCUSD',  label: 'BTCUSD',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:ETHUSD',  label: 'ETHUSD',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:LTCUSD',  label: 'LTCUSD',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:XRPUSD',  label: 'XRPUSD',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:AUDUSD',  label: 'AUDUSD',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:USDCAD',  label: 'USDCAD',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:NZDUSD',  label: 'NZDUSD',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:USDCHF',  label: 'USDCHF',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:AUDJPY',  label: 'AUDJPY',  tfs: ALL_TFS, autoShort: true,  tier: 3 },
+  { sym: 'BLACKBULL:GER40',   label: 'GER40',   tfs: ALL_TFS, autoShort: false, tier: 3 },
+  { sym: 'BLACKBULL:UK100',   label: 'UK100',   tfs: ALL_TFS, autoShort: false, tier: 3 },
 ];
 
 // Session-aware: which symbols to prioritise per session
