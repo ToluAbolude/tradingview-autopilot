@@ -807,78 +807,133 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 }
 
 // ── Main scan ──
+//
+// Two-pass MTF approach:
+//  Pass 1 — scan all TFs (1M, 5M, 15M, 60M, 240M, D) for direction confluence
+//  Pass 2 — once confluence is found, switch to 15M and calculate entry/SL/TP from
+//            the 15M chart (tighter, more precise levels regardless of which TF triggered)
+//
+// One setup is emitted per instrument+direction, not per TF.
+// MTF bonus: +1 if 2 TFs agree, +2 if 3+ TFs agree.
 export async function scanForSetups(minScore = 8) {
-  const utcHour    = new Date().getUTCHours();
-  const priority   = sessionSymbols(utcHour);
-  const results    = [];
-  const skipped    = [];
+  const utcHour  = new Date().getUTCHours();
+  const priority = sessionSymbols(utcHour);
+  const results  = [];
+  const skipped  = [];
 
-  // Build ordered list: session-priority symbols first, then rest
   const ordered = [
     ...FULL_SCAN_LIST.filter(i => priority.includes(i.label)),
     ...FULL_SCAN_LIST.filter(i => !priority.includes(i.label)),
   ];
 
   console.log(`\n  UTC ${utcHour}:xx — Priority symbols: ${priority.join(', ')}`);
-  console.log(`  Scanning ${ordered.length} instruments across all strategies...\n`);
+  console.log(`  Scanning ${ordered.length} instruments (MTF confluence → 15M entry)\n`);
 
   for (const inst of ordered) {
+    const candidates = [];   // { tf, dir, score, strategies, reasons, rsi }
+
+    // ── Pass 1: scan every TF, collect any that pass threshold ──────────────
+    process.stdout.write(`  [T${inst.tier}] ${inst.label} `);
+
     for (const tf of inst.tfs) {
-      process.stdout.write(`  [T${inst.tier}] ${inst.label} ${tf}M... `);
+      process.stdout.write(`${tf}M:`);
       await setChart(inst.sym, tf);
       const bars = await getBars(300);
 
       if (!bars || bars.length < 50) {
-        process.stdout.write(`skip (no data)\n`);
+        process.stdout.write(`? `);
         skipped.push(`${inst.label}/${tf}`);
         continue;
       }
 
-      // Log daily context snapshot for post-session review
       const dcSnap = buildDailyContext(bars);
       if (dcSnap) logDailyContext(inst.label, tf, dcSnap);
 
       const directions = ['long', ...(inst.autoShort ? ['short'] : [])];
-
       for (const dir of directions) {
-        const { score, reasons, strategies, rsi, atrVal } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
-
-        // T+U gate: require weekly trend alignment AND price in favorable range half
+        const { score, reasons, strategies, rsi } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
         const hasTU = strategies.includes('T') && strategies.includes('U');
         if (score >= minScore && hasTU) {
-          const entry   = bars[bars.length-1].c;
-          // Day-trade structure: quick scalp + main same-day target (no overnight runner)
-          const sl      = dir === 'long'  ? entry - atrVal * 1.5 : entry + atrVal * 1.5;
-          const slDist  = Math.abs(entry - sl);
-          const tpQuick = dir === 'long'  ? entry + slDist * 0.5 : entry - slDist * 0.5;  // 0.5R quick scalp
-          const tp2     = dir === 'long'  ? entry + slDist * 1.0 : entry - slDist * 1.0;  // 1.0R main target
-          const tp3     = dir === 'long'  ? entry + slDist * 2.0 : entry - slDist * 2.0;  // 2.0R runner (EOD close backstop)
-          const rr      = 2.0;
-
-          results.push({
-            sym: inst.sym, label: inst.label, tf, dir, score,
-            reasons, strategies,
-            entry:   Math.round(entry   * 10000) / 10000,
-            sl:      Math.round(sl      * 10000) / 10000,
-            tpQuick: Math.round(tpQuick * 10000) / 10000,
-            tp2:     Math.round(tp2     * 10000) / 10000,
-            tp3:     Math.round(tp3     * 10000) / 10000,
-            rr,
-            rsi:   Math.round(rsi),
-            tier:  inst.tier,
-          });
-          process.stdout.write(`✅ SETUP! [${score}] ${dir.toUpperCase()} — ${reasons.slice(0,3).join(', ')}\n`);
+          candidates.push({ tf, dir, score, reasons, strategies, rsi });
+          process.stdout.write(`✓ `);
         } else {
-          process.stdout.write(`${score}pt `);
+          process.stdout.write(`${score} `);
         }
       }
-      process.stdout.write('\n');
+    }
+
+    if (candidates.length === 0) {
+      process.stdout.write(`→ no setup\n`);
+      continue;
+    }
+
+    // ── Pass 2: group by direction, fetch 15M once, emit one setup per dir ──
+    const byDir = {};
+    for (const c of candidates) {
+      if (!byDir[c.dir]) byDir[c.dir] = [];
+      byDir[c.dir].push(c);
+    }
+
+    await setChart(inst.sym, '15');
+    const bars15 = await getBars(200);
+
+    for (const [dir, cands] of Object.entries(byDir)) {
+      if (!bars15 || bars15.length < 50) {
+        process.stdout.write(`\n  → 15M fetch failed for ${inst.label}\n`);
+        continue;
+      }
+
+      // ── 15M alignment gate ──────────────────────────────────────────────────
+      // Higher TFs confirmed the trend — now verify the 15M chart is also trending
+      // in the SAME direction before entering. If the 15M is ranging or pointing
+      // the other way, the trade is counter-trend on the entry TF — skip it.
+      // Require: SmartTrail (A) OR EMA stack (B) aligned on 15M.
+      const check15 = runAllStrategies(bars15, dir, utcHour, inst.label, '15');
+      const is15mAligned = check15.strategies.includes('A') || check15.strategies.includes('B');
+      if (!is15mAligned) {
+        process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — 15M not aligned (score=${check15.score}), waiting\n`);
+        continue;
+      }
+
+      const tfList    = [...new Set(cands.map(c => c.tf + 'M'))].join('+');
+      const maxScore  = Math.max(...cands.map(c => c.score));
+      const mtfBonus  = cands.length >= 3 ? 2 : cands.length >= 2 ? 1 : 0;
+      const finalScore = maxScore + mtfBonus;
+
+      const allStrats  = [...new Set([...cands.flatMap(c => c.strategies), ...check15.strategies])];
+      const allReasons = [`MTF(${tfList}) + 15M aligned`, ...[...new Set(cands.flatMap(c => c.reasons))]].slice(0, 8);
+      const avgRsi     = Math.round(cands.reduce((s, c) => s + c.rsi, 0) / cands.length);
+
+      const atr15  = calcATR(bars15);
+      const entry  = bars15[bars15.length - 1].c;
+      const atrVal = atr15[atr15.length - 1];
+      const sl     = dir === 'long' ? entry - atrVal * 1.5 : entry + atrVal * 1.5;
+      const slDist = Math.abs(entry - sl);
+
+      const setup = {
+        sym:        inst.sym,
+        label:      inst.label,
+        tf:         '15',
+        dir,
+        score:      finalScore,
+        reasons:    allReasons,
+        strategies: allStrats,
+        entry:      Math.round(entry   * 10000) / 10000,
+        sl:         Math.round(sl      * 10000) / 10000,
+        tpQuick:    Math.round((dir === 'long' ? entry + slDist * 0.5 : entry - slDist * 0.5) * 10000) / 10000,
+        tp2:        Math.round((dir === 'long' ? entry + slDist * 1.0 : entry - slDist * 1.0) * 10000) / 10000,
+        tp3:        Math.round((dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0) * 10000) / 10000,
+        rr:         2.0,
+        rsi:        avgRsi,
+        tier:       inst.tier,
+      };
+
+      results.push(setup);
+      process.stdout.write(`\n  ✅ ${inst.label} 15M ${dir.toUpperCase()} [${finalScore}] | MTF:${tfList} | Entry:${setup.entry} SL:${setup.sl} TP:${setup.tp2}\n`);
     }
   }
 
-  // Sort: score desc, then tier asc (Tier 1 preferred at same score)
-  results.sort((a,b) => b.score - a.score || a.tier - b.tier);
-
+  results.sort((a, b) => b.score - a.score || a.tier - b.tier);
   console.log(`\n  Found ${results.length} setups. Skipped: ${skipped.length}`);
   return results;
 }

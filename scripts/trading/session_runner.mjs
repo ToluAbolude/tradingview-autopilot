@@ -283,55 +283,48 @@ async function main() {
   selected.forEach((s, i) => log(`  ${i+1}. [${s.score}/16] ${s.label} ${s.tf}M ${s.dir.toUpperCase()} | Entry:${s.entry} SL:${s.sl} | ${s.reasons.slice(0,2).join(', ')}`));
 
   // 5. Risk scaling — reduce per-trade risk as more instruments trade simultaneously
-  // 1 trade=1.0% | 2 trades=0.75% each | 3+=0.5% each  (total exposure capped ~2%)
+  // 1 trade=2.0% | 2 trades=1.5% each | 3+=1.0% each  (total exposure capped ~4%)
   const equityData = await getEquity().catch(() => ({}));
   const equity = equityData.equity || equityData.balance || 10000;
   log(`  Account equity: £${equity}`);
 
-  const baseRisk = selected.length === 1 ? 1.0 : selected.length === 2 ? 0.75 : 0.5;
+  const baseRisk = selected.length === 1 ? 2.0 : selected.length === 2 ? 1.5 : 1.0;
   const LOT_STEP = 0.01;
 
-  // 6. Place 3 orders per selected instrument (day-trade — EOD close at 20:00 UTC is the backstop)
-  //    O1: 1/3 risk at 0.5R quick scalp
-  //    O2: 1/3 risk at 1.0R main target
-  //    O3: 1/3 risk at 2.0R runner (closed at EOD if not hit — never overnight)
+  // 6. Place 2 orders per selected instrument (day-trade — EOD close at 20:00 UTC is the backstop)
+  //    O1: 1/2 risk at 1.0R main target
+  //    O2: 1/2 risk at 2.0R runner (closed at EOD if not hit — never overnight)
   let totalPlaced = 0;
   for (const best of selected) {
-    const riskPct   = best.score >= 12 ? baseRisk + 0.25 : baseRisk;
+    const riskPct  = best.score >= 12 ? baseRisk + 0.5 : baseRisk;
     const totalLots = calcLots(best.label, riskPct, equity, best.entry, best.sl);
-    const thirdLots = Math.max(0.01, Math.floor((totalLots / 3) / LOT_STEP) * LOT_STEP);
+    const halfLots  = Math.max(0.01, Math.floor((totalLots / 2) / LOT_STEP) * LOT_STEP);
     const sym       = best.sym.replace('BLACKBULL:', '');
 
-    log(`\n── ${best.label} ${best.dir.toUpperCase()} | Risk:${riskPct}% | ${thirdLots}×3 lots ──`);
-    log(`   O1(0.5R):${best.tpQuick} | O2(1.0R):${best.tp2} | O3(2.0R):${best.tp3} | SL:${best.sl}`);
+    log(`\n── ${best.label} ${best.dir.toUpperCase()} | Risk:${riskPct}% | ${halfLots}×2 lots ──`);
+    log(`   O1(1.0R):${best.tp2} | O2(2.0R):${best.tp3} | SL:${best.sl}`);
 
     let placed = 0;
     try {
-      await placeOrder({ symbol: sym, direction: best.dir, units: thirdLots,
-        tpPrice: best.tpQuick, slPrice: best.sl, screenshot: false });
-      log(`  ✓ O1 (0.5R quick scalp, SL=${best.sl})`); placed++;
+      await placeOrder({ symbol: sym, direction: best.dir, units: halfLots,
+        tpPrice: best.tp2, slPrice: best.sl, screenshot: false });
+      log(`  ✓ O1 (1.0R main target, SL=${best.sl})`); placed++;
     } catch(e) { log(`  ✗ O1 error: ${e.message}`); }
 
     try {
-      await placeOrder({ symbol: sym, direction: best.dir, units: thirdLots,
-        tpPrice: best.tp2, slPrice: best.sl, screenshot: false });
-      log(`  ✓ O2 (1.0R main target, SL=${best.sl})`); placed++;
-    } catch(e) { log(`  ✗ O2 error: ${e.message}`); }
-
-    try {
-      await placeOrder({ symbol: sym, direction: best.dir, units: thirdLots,
+      await placeOrder({ symbol: sym, direction: best.dir, units: halfLots,
         tpPrice: best.tp3, slPrice: best.sl,
         screenshot: selected.indexOf(best) === selected.length - 1 });
-      log(`  ✓ O3 (2.0R runner, EOD close backstop, SL=${best.sl})`); placed++;
-    } catch(e) { log(`  ✗ O3 error: ${e.message}`); }
+      log(`  ✓ O2 (2.0R runner, EOD close backstop, SL=${best.sl})`); placed++;
+    } catch(e) { log(`  ✗ O2 error: ${e.message}`); }
 
     if (placed > 0) {
       totalPlaced += placed;
       logTrade({
         session, symbol: best.label, tf: best.tf, direction: best.dir,
         score: best.score, entry: best.entry, sl: best.sl,
-        tp: `${best.tpQuick}/${best.tp2}/${best.tp3}`, rr: best.rr,
-        notes: best.reasons.join(';') + ` lots=${thirdLots}x3 placed=${placed}`,
+        tp: `${best.tp2}/${best.tp3}`, rr: best.rr,
+        notes: best.reasons.join(';') + ` lots=${halfLots}x2 placed=${placed}`,
       });
 
       // Launch position monitor per instrument
@@ -340,7 +333,7 @@ async function main() {
       const logFd = openSync(monitorLog, 'a');
       const monitor = spawn(process.execPath, [
         monitorPath,
-        `--entry=${best.entry}`, `--tp1=${best.tpQuick}`, `--tp2=${best.tp2}`, `--tp3=${best.tp3}`,
+        `--entry=${best.entry}`, `--tp1=${best.tp2}`, `--tp2=${best.tp3}`, `--tp3=${best.tp3}`,
         `--symbol=${best.label}`, `--numOrders=${placed}`,
       ], { detached: true, stdio: ['ignore', logFd, logFd] });
       monitor.unref();
