@@ -14,3 +14,10 @@ data/trade_log/scheduler_logs/
 # Local session state files
 data/trade_log/session_last.txt
 data/trade_log/verify_last.txt
+
+# Claude Code local settings (contains sensitive tokens/configs)
+.claude/settings.local.json
+
+# Environment variables (secrets)
+.env
+.env.local
