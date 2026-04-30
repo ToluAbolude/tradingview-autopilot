@@ -1,6 +1,13 @@
 import { writeFileSync } from 'fs';
+import dotenv from 'dotenv';
 
-const APIFY_API_KEY = 'process.env.APIFY_API_KEY';
+dotenv.config();
+
+const APIFY_API_KEY = process.env.APIFY_API_KEY;
+
+if (!APIFY_API_KEY) {
+  throw new Error('APIFY_API_KEY not found in .env file');
+}
 
 // Already-started runs (started manually before this script)
 const RUNS = [
