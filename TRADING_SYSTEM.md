@@ -159,7 +159,8 @@ One setup is emitted per instrument+direction (not per TF). MTF bonus is applied
 | EMA flatness | If EMA8/21/50 are within 0.4% of each other → score hard-capped at 2 (ranging market, no edge) |
 | T+U requirement | Both weekly trend (T) and daily zone (U) must fire for the setup to qualify |
 | 15M alignment | SmartTrail or EMA stack must be aligned on the 15M entry chart |
-| NAS100 gate | Okala over-extension strategy (P) must be present |
+| NAS100 gate | Okala (P) **or** Trend Catcher Switch (V) must be present |
+| SPX500 gate | Contrarian FVG (W) **or** Okala (P) must be present |
 | Min score | ≥ 8 points after MTF bonus |
 
 ### Strategies (A–U)
@@ -189,6 +190,8 @@ Each strategy scores 1 point unless noted. Max possible score: ~16+ (with MTF bo
 | S | Daily Trend | D1 EMA rising/falling (proxy from current TF bars) |
 | T | Weekly Trend | W1 EMA rising/falling (5× daily lookback) — **required** |
 | U | Daily Zone | Price in lower 40% of PDH-PDL for longs / upper 40% for shorts — **required** |
+| V | Trend Catcher Switch | NAS100/SPX500 only — SmartTrail direction flip (-1→+1) in last 5 bars + EMA stack aligned + RSI < 55 (long). Replicates LuxAlgo `{switch_bullish_catcher}` + `{confirmation_uptrend}` + `{hyperwave_below_50}`. 75% WR on NAS100 15M backtest |
+| W | SPX500 Contrarian FVG | SPX500 only — recent bearish FVG + MFI(14) < 50 + RSI < 35 for longs (contrarian: gap-down reversal). 70.51% WR on SPX500 15M backtest |
 | — | Convergence bonus | 5+ distinct strategies agree → +1 |
 | — | MTF bonus | 2 TFs agree → +1; 3+ TFs agree → +2 |
 
