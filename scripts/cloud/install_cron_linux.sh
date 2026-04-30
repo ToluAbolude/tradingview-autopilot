@@ -43,8 +43,8 @@ CRON_CMD="cd $PROJECT_DIR && $NODE_BIN $SESSION_SCRIPT >> $LOG_DIR/session_\$(da
 #   04:03 - Research     (Sundays)
 
 EOD_SCRIPT="$PROJECT_DIR/scripts/trading/eod_close.mjs"
-EOD_LOG_DIR="$PROJECT_DIR/data/trade_log"
-EOD_CMD="cd $PROJECT_DIR && $NODE_BIN $EOD_SCRIPT >> $EOD_LOG_DIR/eod_close.log 2>&1"
+EOD_LOG="/home/ubuntu/trading-data/eod_close.log"
+EOD_CMD="cd $PROJECT_DIR && DISPLAY=:1 $NODE_BIN $EOD_SCRIPT >> $EOD_LOG 2>&1"
 
 CRON_BLOCK="# TradingMCP — automated trading sessions (Europe/London time)
 SHELL=/bin/bash
@@ -66,7 +66,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # END TradingMCP"
 
 # Remove any existing TradingMCP cron block, then add fresh
-CURRENT_CRON=$(crontab -l 2>/dev/null | grep -v "TradingMCP" | grep -v "session_runner" || true)
+CURRENT_CRON=$(crontab -l 2>/dev/null | grep -v "TradingMCP" | grep -v "session_runner" | grep -v "eod_close" | grep -v "job_runner\|run_jobs\|run_session\|watchdog" || true)
 echo "$CURRENT_CRON" > /tmp/tradingmcp_cron_tmp
 echo "" >> /tmp/tradingmcp_cron_tmp
 echo "$CRON_BLOCK" >> /tmp/tradingmcp_cron_tmp
