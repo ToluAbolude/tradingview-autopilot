@@ -905,10 +905,70 @@ export async function scanForSetups(minScore = 8) {
       const avgRsi     = Math.round(cands.reduce((s, c) => s + c.rsi, 0) / cands.length);
 
       const atr15  = calcATR(bars15);
-      const entry  = bars15[bars15.length - 1].c;
-      const atrVal = atr15[atr15.length - 1];
-      const sl     = dir === 'long' ? entry - atrVal * 1.5 : entry + atrVal * 1.5;
+      const n15    = bars15.length - 1;
+      const entry  = bars15[n15].c;
+      const atrVal = atr15[n15];
+
+      // Build 15M S/R zones so SL and TP can snap to real structure
+      const sr15 = buildSRZones(bars15, atr15);
+      const slBuf = atrVal * 0.10;   // 10% ATR buffer outside the zone
+
+      // SL: prefer nearest active S/R level beyond entry (0.5–2.5×ATR away); fall back to 1.5×ATR
+      let sl;
+      if (dir === 'long') {
+        const supportsBelow = sr15.active
+          .filter(z => z.type === 'support' && z.price < entry
+                    && (entry - z.price) >= atrVal * 0.5
+                    && (entry - z.price) <= atrVal * 2.5)
+          .sort((a, b) => b.price - a.price);
+        sl = supportsBelow.length > 0
+          ? supportsBelow[0].price - slBuf
+          : entry - atrVal * 1.5;
+      } else {
+        const resistsAbove = sr15.active
+          .filter(z => z.type === 'resistance' && z.price > entry
+                    && (z.price - entry) >= atrVal * 0.5
+                    && (z.price - entry) <= atrVal * 2.5)
+          .sort((a, b) => a.price - b.price);
+        sl = resistsAbove.length > 0
+          ? resistsAbove[0].price + slBuf
+          : entry + atrVal * 1.5;
+      }
       const slDist = Math.abs(entry - sl);
+
+      // TP1 (tp2): nearest opposing S/R level ahead of entry (0.5–4×slDist away); fall back to 1R
+      let tp2;
+      if (dir === 'long') {
+        const resistsAhead = sr15.active
+          .filter(z => z.type === 'resistance' && z.price > entry
+                    && (z.price - entry) >= slDist * 0.5
+                    && (z.price - entry) <= slDist * 4.0)
+          .sort((a, b) => a.price - b.price);
+        tp2 = resistsAhead.length > 0 ? resistsAhead[0].price : entry + slDist;
+      } else {
+        const supportsAhead = sr15.active
+          .filter(z => z.type === 'support' && z.price < entry
+                    && (entry - z.price) >= slDist * 0.5
+                    && (entry - z.price) <= slDist * 4.0)
+          .sort((a, b) => b.price - a.price);
+        tp2 = supportsAhead.length > 0 ? supportsAhead[0].price : entry - slDist;
+      }
+
+      // TP2 (tp3): next S/R level beyond tp2 (runner); fall back to 2R
+      let tp3;
+      if (dir === 'long') {
+        const resistsBeyond = sr15.active
+          .filter(z => z.type === 'resistance' && z.price > tp2 + slDist * 0.3)
+          .sort((a, b) => a.price - b.price);
+        tp3 = resistsBeyond.length > 0 ? resistsBeyond[0].price : entry + slDist * 2.0;
+      } else {
+        const supportsBeyond = sr15.active
+          .filter(z => z.type === 'support' && z.price < tp2 - slDist * 0.3)
+          .sort((a, b) => b.price - a.price);
+        tp3 = supportsBeyond.length > 0 ? supportsBeyond[0].price : entry - slDist * 2.0;
+      }
+
+      const actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
 
       const setup = {
         sym:        inst.sym,
@@ -921,9 +981,9 @@ export async function scanForSetups(minScore = 8) {
         entry:      Math.round(entry   * 10000) / 10000,
         sl:         Math.round(sl      * 10000) / 10000,
         tpQuick:    Math.round((dir === 'long' ? entry + slDist * 0.5 : entry - slDist * 0.5) * 10000) / 10000,
-        tp2:        Math.round((dir === 'long' ? entry + slDist * 1.0 : entry - slDist * 1.0) * 10000) / 10000,
-        tp3:        Math.round((dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0) * 10000) / 10000,
-        rr:         2.0,
+        tp2:        Math.round(tp2     * 10000) / 10000,
+        tp3:        Math.round(tp3     * 10000) / 10000,
+        rr:         actualRR,
         rsi:        avgRsi,
         tier:       inst.tier,
       };

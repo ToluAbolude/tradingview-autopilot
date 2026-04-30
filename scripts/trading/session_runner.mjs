@@ -298,13 +298,21 @@ async function main() {
   log(`\nSelected ${selected.length} trade(s) (max ${MAX_CONCURRENT}, one per correlated group):`);
   selected.forEach((s, i) => log(`  ${i+1}. [${s.score}/16] ${s.label} ${s.tf}M ${s.dir.toUpperCase()} | Entry:${s.entry} SL:${s.sl} | ${s.reasons.slice(0,2).join(', ')}`));
 
-  // 5. Deduplication — skip any instrument already open in trades.csv
+  // 5. Deduplication — skip if same symbol OR a correlated-group member is already open
   const openSymbols = getOpenSymbols();
   if (openSymbols.size > 0) log(`  Already open: ${[...openSymbols].join(', ')}`);
   const dedupedSelected = selected.filter(s => {
     if (openSymbols.has(s.label)) {
       log(`  ⏭ ${s.label} — position already open, skipping`);
       return false;
+    }
+    const groupIdx = CORRELATED_GROUPS.findIndex(g => g.includes(s.label));
+    if (groupIdx !== -1) {
+      const correlatedOpen = [...openSymbols].find(sym => CORRELATED_GROUPS[groupIdx].includes(sym));
+      if (correlatedOpen) {
+        log(`  ⏭ ${s.label} — correlated position already open (${correlatedOpen}), skipping`);
+        return false;
+      }
     }
     return true;
   });
