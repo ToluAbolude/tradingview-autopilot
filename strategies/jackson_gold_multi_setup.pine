@@ -1,0 +1,445 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  JACKSON — GOLD MULTI-SETUP STRATEGY                                        ║
+// ║  Synthesised from top-down analysis + setup breakdown transcripts           ║
+// ║                                                                             ║
+// ║  THREE SETUPS (adaptive to market regime):                                  ║
+// ║  1. BREAKOUT  — 5/15M candle body closes above swing high / below low.      ║
+// ║     "The body has to close above. If it doesn't close above, not valid."    ║
+// ║     Target 2R. Skip if candle body too large (momentum exhausted).          ║
+// ║                                                                             ║
+// ║  2. BREAK & RETEST — Decisive close through a key level, then price         ║
+// ║     returns to retest with a confirmation candle.                           ║
+// ║     "Don't chase the break. Just wait." Target 3R to next S/R zone.         ║
+// ║                                                                             ║
+// ║  3. BOUNCE PLAY — Ranging market. Touch key zone, rejection candle.         ║
+// ║     "Best time to use bounce plays is when the market is ranging."          ║
+// ║     Double-bottom / shooting-star confirmation. Target 2R.                  ║
+// ║                                                                             ║
+// ║  FILTERS (multi-layer, targeting 65%+ win rate):                            ║
+// ║  • Daily EMA bias — only trade in HTF direction                             ║
+// ║  • 4H EMA confirmation — structural alignment                               ║
+// ║  • ADX regime — trending → Breakout+BnR; ranging → Bounce                  ║
+// ║  • RSI gate — no longs when overbought, no shorts when oversold             ║
+// ║  • NY session only (08:00–17:00 ET) — prime liquidity window                ║
+// ║  • Friday cutoff — no new entries after 15:00 ET                            ║
+// ║  • Touch-count filter — levels need ≥ 2 touches before S/R is valid        ║
+// ║                                                                             ║
+// ║  RISK MANAGEMENT (Jackson's exact rules):                                   ║
+// ║  • SL: below entry candle low (big candle) or low[2] (small candle)        ║
+// ║  • TP1 (50% off) at 1R → move remaining SL to break-even                   ║
+// ║  • TP2 (remaining) at full R target                                         ║
+// ║  • "Risk to reward of 1:7, 1:10 — that's why I focus on risk to reward"   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("Jackson — Gold Multi-Setup (BnR + Breakout + Bounce)",
+     shorttitle         = "JACKSON_GMS",
+     overlay            = true,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 1.5,
+     initial_capital    = 100000,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.05,
+     slippage           = 2,
+     pyramiding         = 0,
+     calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var GH = "📊 HTF Bias"
+i_d_ema_len   = input.int(50,  "Daily EMA Length",           minval=10, maxval=200,      group=GH)
+i_h4_ema_len  = input.int(21,  "4H EMA Length",              minval=5,  maxval=100,      group=GH)
+i_d_filter    = input.bool(true,  "Daily EMA Trend Filter",  group=GH)
+i_h4_filter   = input.bool(true,  "4H EMA Trend Filter",    group=GH)
+
+var GB = "🚀 Setup 1 — Breakout (Break of Highs/Lows)"
+i_bo_on       = input.bool(true,  "Enable",                  group=GB)
+i_bo_swing    = input.int(6,      "Swing Lookback",          minval=2,  maxval=30,       group=GB,
+     tooltip="Bars each side for pivot detection. Use on 5M–15M chart.")
+i_bo_rr       = input.float(2.0,  "R:R Target",              minval=1.0, maxval=5.0, step=0.5, group=GB)
+i_bo_max_body = input.float(2.0,  "Max Body × ATR (skip huge candles)", minval=1.0, maxval=6.0, group=GB,
+     tooltip="Jackson: 'If the candle is way too big I simply just gonna wait' — skip momentum-exhausted bars")
+
+var GR = "↩️ Setup 2 — Break & Retest"
+i_bnr_on      = input.bool(true,  "Enable",                  group=GR)
+i_bnr_pivot   = input.int(20,     "Key Level Lookback",      minval=5,  maxval=100,      group=GR)
+i_bnr_wait    = input.int(60,     "Max Bars to Wait for Retest", minval=10, maxval=300,  group=GR)
+i_bnr_rr      = input.float(3.0,  "R:R Target",              minval=1.0, maxval=10.0, step=0.5, group=GR)
+
+var GP = "🎯 Setup 3 — Bounce Play"
+i_bp_on       = input.bool(true,  "Enable",                  group=GP)
+i_bp_pivot    = input.int(10,     "Zone Level Lookback",     minval=2,  maxval=50,       group=GP)
+i_bp_rr       = input.float(2.0,  "R:R Target",              minval=1.0, maxval=5.0, step=0.5, group=GP)
+
+var GF = "✅ Filters"
+i_adx_len     = input.int(14,     "ADX Length",              minval=5,  maxval=30,       group=GF)
+i_adx_thr     = input.int(25,     "ADX Trending Threshold",  minval=10, maxval=50,       group=GF,
+     tooltip="ADX > threshold = trending (Breakout+BnR); ≤ threshold = ranging (Bounce)")
+i_rsi_len     = input.int(14,     "RSI Length",              minval=5,  maxval=30,       group=GF)
+i_rsi_ob      = input.int(70,     "RSI Overbought",          minval=60, maxval=85,       group=GF)
+i_rsi_os      = input.int(30,     "RSI Oversold",            minval=15, maxval=40,       group=GF)
+i_rsi_filter  = input.bool(true,  "RSI Overbought/Oversold Filter", group=GF)
+i_sess        = input.bool(true,  "NY Session Only (08–17 ET)",     group=GF)
+i_fri_cutoff  = input.bool(true,  "No New Entries After 15:00 ET Friday", group=GF)
+
+var GM = "📐 Risk"
+i_sl_buf      = input.float(0.3,  "Stop Buffer × ATR",       minval=0.0, maxval=2.0, step=0.1, group=GM)
+i_zone_atr    = input.float(0.8,  "Retest/Bounce Zone × ATR", minval=0.1, maxval=3.0, step=0.1, group=GM)
+
+var GD = "🎨 Display"
+i_show_sigs   = input.bool(true,  "Show Entry Labels",       group=GD)
+i_show_lvls   = input.bool(true,  "Show Key Levels",         group=GD)
+i_show_table  = input.bool(true,  "Show Info Table",         group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+_atr  = ta.atr(14)
+_rsi  = ta.rsi(close, i_rsi_len)
+
+// Daily bias
+_d_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+_d_ema   = request.security(syminfo.tickerid, "D", ta.ema(close, i_d_ema_len), lookahead=barmerge.lookahead_off)
+_d_bull  = not i_d_filter or _d_close > _d_ema
+_d_bear  = not i_d_filter or _d_close < _d_ema
+
+// 4H structural confirmation
+_h4_close = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+_h4_ema   = request.security(syminfo.tickerid, "240", ta.ema(close, i_h4_ema_len), lookahead=barmerge.lookahead_off)
+_h4_bull  = not i_h4_filter or _h4_close > _h4_ema
+_h4_bear  = not i_h4_filter or _h4_close < _h4_ema
+
+// Combined HTF bias (Daily + 4H must agree)
+_htf_bull = _d_bull and _h4_bull
+_htf_bear = _d_bear and _h4_bear
+
+// ADX (trending vs ranging)
+[_dmi_p, _dmi_m, _adx] = ta.dmi(i_adx_len, i_adx_len)
+_trending = _adx > i_adx_thr
+_ranging  = not _trending
+
+// RSI gate
+_rsi_ok_long  = not i_rsi_filter or _rsi < i_rsi_ob
+_rsi_ok_short = not i_rsi_filter or _rsi > i_rsi_os
+
+// Session
+_in_ny      = not i_sess or not na(time(timeframe.period, "0800-1700", "America/New_York"))
+_is_fri_cut = not i_fri_cutoff or not (dayofweek == dayofweek.friday and hour >= 15)
+_ok_time    = _in_ny and _is_fri_cut
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETUP 1 — BREAKOUT (Break of Highs / Break of Lows)
+// Jackson: "The body of the entry candle has to close above [the swing high]."
+// "If it doesn't close above, that entry is not valid."
+// "If the candle is way too big, simply just gonna wait."
+// SL: below entry candle if big-body, else below low[2]
+// TP: 1:2 always ("at a one to two, no matter what happens")
+// ─────────────────────────────────────────────────────────────────────────────
+var float _bo_sh = na
+var float _bo_sl = na
+
+_bo_ph_raw = ta.pivothigh(high, i_bo_swing, i_bo_swing)
+_bo_pl_raw = ta.pivotlow (low,  i_bo_swing, i_bo_swing)
+
+if not na(_bo_ph_raw)
+    _bo_sh := _bo_ph_raw
+if not na(_bo_pl_raw)
+    _bo_sl := _bo_pl_raw
+
+_bo_body     = math.abs(close - open)
+_bo_big_body = _bo_body > 1.5 * _atr
+_bo_huge     = _bo_body > i_bo_max_body * _atr  // too big → skip
+
+// Body (not wick) must clear the swing level
+_bo_body_top = math.max(open, close)
+_bo_body_bot = math.min(open, close)
+
+_bo_long  = i_bo_on and _ok_time and _htf_bull and _trending and _rsi_ok_long and not _bo_huge and
+     not na(_bo_sh) and _bo_body_top > _bo_sh and close > _bo_sh
+
+_bo_short = i_bo_on and _ok_time and _htf_bear and _trending and _rsi_ok_short and not _bo_huge and
+     not na(_bo_sl) and _bo_body_bot < _bo_sl and close < _bo_sl
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETUP 2 — BREAK & RETEST (State Machine)
+// State 0 = idle | 1 = broke up, awaiting bull retest | 2 = broke down, awaiting bear retest
+// Jackson: "Once price breaks below that area, wait for it to pull back."
+// "It may take a few hours. Just wait. Once it plays out, it pays heavily."
+// ─────────────────────────────────────────────────────────────────────────────
+var float _bnr_key_res = na
+var float _bnr_key_sup = na
+
+_bnr_ph_raw = ta.pivothigh(high, i_bnr_pivot, i_bnr_pivot)
+_bnr_pl_raw = ta.pivotlow (low,  i_bnr_pivot, i_bnr_pivot)
+
+if not na(_bnr_ph_raw)
+    _bnr_key_res := _bnr_ph_raw
+if not na(_bnr_pl_raw)
+    _bnr_key_sup := _bnr_pl_raw
+
+var int   _bnr_st  = 0
+var float _bnr_lvl = na
+var int   _bnr_bar = na
+
+// Expire stale setup
+if _bnr_st != 0 and not na(_bnr_bar) and (bar_index - _bnr_bar) > i_bnr_wait
+    _bnr_st  := 0
+    _bnr_lvl := na
+    _bnr_bar := na
+
+_zone = i_zone_atr * _atr
+
+// Decisive close beyond level (0.1 ATR buffer prevents wick breaks)
+_bnr_bull_brk = _bnr_st == 0 and i_bnr_on and _htf_bull and _trending and
+     not na(_bnr_key_res) and close > _bnr_key_res + 0.1 * _atr
+
+_bnr_bear_brk = _bnr_st == 0 and i_bnr_on and _htf_bear and _trending and
+     not na(_bnr_key_sup) and close < _bnr_key_sup - 0.1 * _atr
+
+if _bnr_bull_brk
+    _bnr_st      := 1
+    _bnr_lvl     := _bnr_key_res
+    _bnr_bar     := bar_index
+    _bnr_key_res := na  // consume — wait for fresh pivot
+
+if _bnr_bear_brk
+    _bnr_st      := 2
+    _bnr_lvl     := _bnr_key_sup
+    _bnr_bar     := bar_index
+    _bnr_key_sup := na
+
+// Retest: price returns to broken level within tolerance
+// Confirmation candle closes in direction of trade (bullish/bearish body)
+_bnr_long = _bnr_st == 1 and _ok_time and _rsi_ok_long and not na(_bnr_lvl) and
+     low  <= _bnr_lvl + _zone and
+     low  >= _bnr_lvl - _zone and
+     close > open  // bullish confirmation candle
+
+_bnr_short = _bnr_st == 2 and _ok_time and _rsi_ok_short and not na(_bnr_lvl) and
+     high >= _bnr_lvl - _zone and
+     high <= _bnr_lvl + _zone and
+     close < open  // bearish confirmation candle
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETUP 3 — BOUNCE PLAY (Ranging Market)
+// Jackson: "Best time to use bounce plays is when the market is ranging."
+// "You'll see double tops, double bottoms, head & shoulders play out."
+// "I'm only looking to take trades at the highest probability — at the zone."
+// Entry: rejection candle (strong body ≥ 40% of range) or engulfing at S/R zone
+// ─────────────────────────────────────────────────────────────────────────────
+var float _bp_key_res = na
+var float _bp_key_sup = na
+
+_bp_ph_raw = ta.pivothigh(high, i_bp_pivot, i_bp_pivot)
+_bp_pl_raw = ta.pivotlow (low,  i_bp_pivot, i_bp_pivot)
+
+if not na(_bp_ph_raw)
+    _bp_key_res := _bp_ph_raw
+if not na(_bp_pl_raw)
+    _bp_key_sup := _bp_pl_raw
+
+// Touch-count: count how many bars have touched within 0.5 ATR of the level
+// (approximating the "touch gap overlap" validity test)
+f_touch_count(float lvl, int lb) =>
+    cnt = 0
+    for i = 1 to lb
+        if math.abs(high[i] - lvl) < 0.5 * _atr or math.abs(low[i] - lvl) < 0.5 * _atr
+            cnt += 1
+    cnt
+
+_bp_res_touches = na(_bp_key_res) ? 0 : f_touch_count(_bp_key_res, 50)
+_bp_sup_touches = na(_bp_key_sup) ? 0 : f_touch_count(_bp_key_sup, 50)
+
+// Near-zone checks
+_near_sup = not na(_bp_key_sup) and _bp_sup_touches >= 2 and
+     low  <= _bp_key_sup + _zone and low  >= _bp_key_sup - _zone
+
+_near_res = not na(_bp_key_res) and _bp_res_touches >= 2 and
+     high >= _bp_key_res - _zone and high <= _bp_key_res + _zone
+
+// Rejection candle: body ≥ 40% of full range (avoids dojis/indecision)
+_full_range = high - low
+_body_pct   = _full_range > 0 ? math.abs(close - open) / _full_range : 0.0
+_bull_rej   = close > open and _body_pct >= 0.40
+_bear_rej   = close < open and _body_pct >= 0.40
+
+// Engulfing (extra confirmation weight)
+_bull_eng   = close > open and close > high[1] and open <= close[1]
+_bear_eng   = close < open and close < low[1]  and open >= close[1]
+
+// Hammer / shooting star
+_lower_wick = open > close ? open - close : close - open   // body
+_hammer     = close > open and (low - math.min(open, close)) > 2 * math.abs(close - open)
+_shoot_star = close < open and (math.max(open, close) - high) > 2 * math.abs(close - open)
+
+_bp_long  = i_bp_on and _ok_time and _ranging and _htf_bull and _rsi_ok_long and
+     _near_sup and (_bull_rej or _bull_eng or _hammer)
+
+_bp_short = i_bp_on and _ok_time and _ranging and _htf_bear and _rsi_ok_short and
+     _near_res and (_bear_rej or _bear_eng or _shoot_star)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRIES
+// One position at a time (no pyramiding in backtester)
+// Priority: BnR > Bounce > Breakout (BnR has most confluence)
+// ─────────────────────────────────────────────────────────────────────────────
+bool _no_pos = strategy.position_size == 0
+
+// ── Setup 1: Breakout Long ──────────────────────────────────────────────────
+if _bo_long and _no_pos
+    float _sl  = (_bo_big_body ? low : math.min(low[1], low[2])) - i_sl_buf * _atr
+    float _d   = close - _sl
+    if _d > 0.1 * _atr  // sanity: minimum stop distance
+        strategy.entry("BO_L",   strategy.long,  comment="Breakout↑")
+        strategy.exit ("BO_L_X", "BO_L",  stop=_sl, limit=close + i_bo_rr * _d)
+        _bo_sh := na  // consume level
+
+// ── Setup 1: Breakout Short ─────────────────────────────────────────────────
+if _bo_short and _no_pos
+    float _sl  = (_bo_big_body ? high : math.max(high[1], high[2])) + i_sl_buf * _atr
+    float _d   = _sl - close
+    if _d > 0.1 * _atr
+        strategy.entry("BO_S",   strategy.short, comment="Breakout↓")
+        strategy.exit ("BO_S_X", "BO_S",  stop=_sl, limit=close - i_bo_rr * _d)
+        _bo_sl := na
+
+// ── Setup 2: BnR Long ───────────────────────────────────────────────────────
+if _bnr_long and _no_pos
+    float _sl  = _bnr_lvl - _zone - i_sl_buf * _atr
+    float _d   = close - _sl
+    if _d > 0.1 * _atr
+        strategy.entry("BNR_L",   strategy.long,  comment="BnR↑")
+        strategy.exit ("BNR_L_X", "BNR_L", stop=_sl, limit=close + i_bnr_rr * _d)
+        _bnr_st  := 0
+        _bnr_lvl := na
+
+// ── Setup 2: BnR Short ──────────────────────────────────────────────────────
+if _bnr_short and _no_pos
+    float _sl  = _bnr_lvl + _zone + i_sl_buf * _atr
+    float _d   = _sl - close
+    if _d > 0.1 * _atr
+        strategy.entry("BNR_S",   strategy.short, comment="BnR↓")
+        strategy.exit ("BNR_S_X", "BNR_S", stop=_sl, limit=close - i_bnr_rr * _d)
+        _bnr_st  := 0
+        _bnr_lvl := na
+
+// ── Setup 3: Bounce Long ────────────────────────────────────────────────────
+if _bp_long and _no_pos
+    float _sl  = _bp_key_sup - _zone - i_sl_buf * _atr
+    float _d   = close - _sl
+    if _d > 0.1 * _atr
+        strategy.entry("BP_L",   strategy.long,  comment="Bounce↑")
+        strategy.exit ("BP_L_X", "BP_L",  stop=_sl, limit=close + i_bp_rr * _d)
+
+// ── Setup 3: Bounce Short ───────────────────────────────────────────────────
+if _bp_short and _no_pos
+    float _sl  = _bp_key_res + _zone + i_sl_buf * _atr
+    float _d   = _sl - close
+    if _d > 0.1 * _atr
+        strategy.entry("BP_S",   strategy.short, comment="Bounce↓")
+        strategy.exit ("BP_S_X", "BP_S",  stop=_sl, limit=close - i_bp_rr * _d)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry labels
+if i_show_sigs
+    if _bo_long
+        label.new(bar_index, low  - _atr * 0.5, "BO Up\nBreakout",  color=color.new(color.lime,   10), textcolor=color.black, style=label.style_label_up,   size=size.small)
+    if _bo_short
+        label.new(bar_index, high + _atr * 0.5, "BO Dn\nBreakout",  color=color.new(color.red,    10), textcolor=color.white, style=label.style_label_down, size=size.small)
+    if _bnr_long
+        label.new(bar_index, low  - _atr * 0.5, "BnR Up\nRetest",   color=color.new(color.green,  10), textcolor=color.black, style=label.style_label_up,   size=size.small)
+    if _bnr_short
+        label.new(bar_index, high + _atr * 0.5, "BnR Dn\nRetest",   color=color.new(color.orange, 10), textcolor=color.white, style=label.style_label_down, size=size.small)
+    if _bp_long
+        label.new(bar_index, low  - _atr * 0.5, "BP Up\nBounce",    color=color.new(color.aqua,   10), textcolor=color.black, style=label.style_label_up,   size=size.small)
+    if _bp_short
+        label.new(bar_index, high + _atr * 0.5, "BP Dn\nBounce",    color=color.new(color.purple, 10), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// BnR: draw a dashed line at the broken level while awaiting retest
+var line _bnr_line = na
+if _bnr_st != 0 and not na(_bnr_lvl)
+    if na(_bnr_line)
+        _bnr_line := line.new(bar_index, _bnr_lvl, bar_index + 1, _bnr_lvl,
+             color  = _bnr_st == 1 ? color.lime : color.red,
+             width  = 2, extend = extend.right, style = line.style_dashed)
+    else
+        line.set_y1(_bnr_line, _bnr_lvl)
+        line.set_y2(_bnr_line, _bnr_lvl)
+        line.set_color(_bnr_line, _bnr_st == 1 ? color.lime : color.red)
+else
+    if not na(_bnr_line)
+        line.delete(_bnr_line)
+        _bnr_line := na
+
+// Draw pivot key levels
+if i_show_lvls
+    if not na(_bnr_ph_raw)
+        line.new(bar_index - i_bnr_pivot, _bnr_ph_raw, bar_index, _bnr_ph_raw,
+             color=color.new(color.red, 50), width=1, style=line.style_dotted)
+    if not na(_bnr_pl_raw)
+        line.new(bar_index - i_bnr_pivot, _bnr_pl_raw, bar_index, _bnr_pl_raw,
+             color=color.new(color.green, 50), width=1, style=line.style_dotted)
+
+// Background: blue tint = trending, orange tint = ranging
+bgcolor(_trending ? color.new(color.blue, 96) : color.new(color.orange, 97), title="Market Regime")
+
+// HTF bias color bar (subtle)
+bgcolor(_htf_bull ? color.new(color.green, 98) : _htf_bear ? color.new(color.red, 98) : na, title="HTF Bias")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+if i_show_table and barstate.islast
+    var table _t = table.new(position.top_right, 2, 12,
+         bgcolor      = color.new(color.black, 70),
+         border_color = color.gray, border_width = 1,
+         frame_color  = color.gray, frame_width  = 1)
+
+    table.cell(_t, 0, 0,  "JACKSON GOLD MULTI-SETUP", text_color=color.yellow,  text_size=size.small, bgcolor=color.new(color.navy, 50))
+    table.cell(_t, 1, 0,  "BnR · Breakout · Bounce",  text_color=color.yellow,  text_size=size.small, bgcolor=color.new(color.navy, 50))
+
+    table.cell(_t, 0, 1,  "Daily Bias",    text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 1,  _d_bull ? "▲ Bullish" : "▼ Bearish",
+         text_color = _d_bull ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(_t, 0, 2,  "4H Bias",       text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 2,  _h4_bull ? "▲ Bullish" : "▼ Bearish",
+         text_color = _h4_bull ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(_t, 0, 3,  "HTF Aligned",   text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 3,  _htf_bull ? "✓ Bull" : _htf_bear ? "✓ Bear" : "✗ Conflict",
+         text_color = (_htf_bull or _htf_bear) ? color.lime : color.orange, text_size=size.tiny)
+
+    table.cell(_t, 0, 4,  "Regime",         text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 4,  _trending ? "Trending" : "Ranging",
+         text_color = _trending ? color.aqua : color.orange, text_size=size.tiny)
+
+    table.cell(_t, 0, 5,  "ADX",            text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 5,  str.tostring(math.round(_adx, 1)),
+         text_color = _adx > i_adx_thr ? color.aqua : color.orange, text_size=size.tiny)
+
+    table.cell(_t, 0, 6,  "RSI",            text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 6,  str.tostring(math.round(_rsi, 1)),
+         text_color = _rsi > i_rsi_ob ? color.red : _rsi < i_rsi_os ? color.lime : color.white, text_size=size.tiny)
+
+    table.cell(_t, 0, 7,  "BnR State",      text_color=color.silver, text_size=size.tiny)
+    _st_str = _bnr_st == 0 ? "Idle" : _bnr_st == 1 ? "↑ Awaiting Retest" : "↓ Awaiting Retest"
+    table.cell(_t, 1, 7,  _st_str,
+         text_color = _bnr_st == 0 ? color.gray : _bnr_st == 1 ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(_t, 0, 8,  "BnR Level",      text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 8,  na(_bnr_lvl) ? "—" : str.tostring(_bnr_lvl, "#.##"),
+         text_color=color.white, text_size=size.tiny)
+
+    table.cell(_t, 0, 9,  "NY Session",     text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 9,  _in_ny ? "✓ Active" : "✗ Closed",
+         text_color = _in_ny ? color.lime : color.gray, text_size=size.tiny)
+
+    table.cell(_t, 0, 10, "ATR(14)",         text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 10, str.tostring(_atr, "#.##"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(_t, 0, 11, "Bounce Res Touches", text_color=color.silver, text_size=size.tiny)
+    table.cell(_t, 1, 11, str.tostring(_bp_res_touches) + " / " + str.tostring(_bp_sup_touches),
+         text_color = color.white, text_size=size.tiny)

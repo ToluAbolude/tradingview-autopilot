@@ -134,6 +134,21 @@ function calcUnits(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   return calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice);
 }
 
+// Returns symbols that have an unresolved (no result recorded) trade in the CSV
+function getOpenSymbols() {
+  if (!existsSync(LOG_FILE)) return new Set();
+  const lines = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1);
+  const open = new Set();
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const cols = line.split(',');
+    const symbol = (cols[2] || '').trim();
+    const result = (cols[10] || '').trim();
+    if (symbol && symbol !== 'NONE' && !result) open.add(symbol);
+  }
+  return open;
+}
+
 async function main() {
   const session = currentSession();
   log(`=== SESSION START: ${session} ===`);
@@ -187,10 +202,11 @@ async function main() {
   log(`✓ News clear. Safe to trade.`);
 
   // 1b. Check performance — stop if 2+ consecutive losses
+  // CSV cols: date(0),session(1),symbol(2),tf(3),direction(4),score(5),entry(6),sl(7),tp(8),rr(9),result(10),pnl(11),notes(12)
   if (existsSync(LOG_FILE)) {
     const trades = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1)
-      .map(l => { const p = l.split(','); return { pnl: parseFloat(p[10] || 0) }; });
-    const perf = analyzePerformance(trades.map((t,i) => ({ ...t, result: t.pnl > 0 ? 'W' : t.pnl < 0 ? 'L' : '' })));
+      .map(l => { const p = l.split(','); return { result: (p[10]||'').trim(), pnl: parseFloat(p[11]||0)||0, score: p[5], session: p[1], symbol: p[2] }; });
+    const perf = analyzePerformance(trades);
     if (perf.currentConsecLoss >= 2) {
       log(`⚠ STOP RULE: ${perf.currentConsecLoss} consecutive losses. Skipping session.`);
       return;
@@ -282,20 +298,36 @@ async function main() {
   log(`\nSelected ${selected.length} trade(s) (max ${MAX_CONCURRENT}, one per correlated group):`);
   selected.forEach((s, i) => log(`  ${i+1}. [${s.score}/16] ${s.label} ${s.tf}M ${s.dir.toUpperCase()} | Entry:${s.entry} SL:${s.sl} | ${s.reasons.slice(0,2).join(', ')}`));
 
-  // 5. Risk scaling — reduce per-trade risk as more instruments trade simultaneously
-  // 1 trade=2.0% | 2 trades=1.5% each | 3+=1.0% each  (total exposure capped ~4%)
+  // 5. Deduplication — skip any instrument already open in trades.csv
+  const openSymbols = getOpenSymbols();
+  if (openSymbols.size > 0) log(`  Already open: ${[...openSymbols].join(', ')}`);
+  const dedupedSelected = selected.filter(s => {
+    if (openSymbols.has(s.label)) {
+      log(`  ⏭ ${s.label} — position already open, skipping`);
+      return false;
+    }
+    return true;
+  });
+
+  if (dedupedSelected.length === 0) {
+    log('All selected setups already have open positions. Nothing to place.');
+    return;
+  }
+
+  // 6. Risk scaling — reduce per-trade risk as more instruments trade simultaneously
+  // 1 trade=3.5% | 2 trades=2.5% each | 3+=1.75% each
   const equityData = await getEquity().catch(() => ({}));
   const equity = equityData.equity || equityData.balance || 10000;
   log(`  Account equity: £${equity}`);
 
-  const baseRisk = selected.length === 1 ? 2.0 : selected.length === 2 ? 1.5 : 1.0;
+  const baseRisk = dedupedSelected.length === 1 ? 3.5 : dedupedSelected.length === 2 ? 2.5 : 1.75;
   const LOT_STEP = 0.01;
 
   // 6. Place 2 orders per selected instrument (day-trade — EOD close at 20:00 UTC is the backstop)
   //    O1: 1/2 risk at 1.0R main target
   //    O2: 1/2 risk at 2.0R runner (closed at EOD if not hit — never overnight)
   let totalPlaced = 0;
-  for (const best of selected) {
+  for (const best of dedupedSelected) {
     const riskPct  = best.score >= 12 ? baseRisk + 0.5 : baseRisk;
     const totalLots = calcLots(best.label, riskPct, equity, best.entry, best.sl);
     const halfLots  = Math.max(0.01, Math.floor((totalLots / 2) / LOT_STEP) * LOT_STEP);
@@ -314,7 +346,7 @@ async function main() {
     try {
       await placeOrder({ symbol: sym, direction: best.dir, units: halfLots,
         tpPrice: best.tp3, slPrice: best.sl,
-        screenshot: selected.indexOf(best) === selected.length - 1 });
+        screenshot: dedupedSelected.indexOf(best) === dedupedSelected.length - 1 });
       log(`  ✓ O2 (2.0R runner, EOD close backstop, SL=${best.sl})`); placed++;
     } catch(e) { log(`  ✗ O2 error: ${e.message}`); }
 
@@ -343,7 +375,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 1500));
   }
 
-  log(`\n=== SESSION END — ${totalPlaced} orders placed across ${selected.length} instrument(s) ===\n`);
+  log(`\n=== SESSION END — ${totalPlaced} orders placed across ${dedupedSelected.length} instrument(s) ===\n`);
 }
 
 main().catch(e => { console.error('Fatal:', e.message); process.exit(1); });
