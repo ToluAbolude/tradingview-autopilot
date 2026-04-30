@@ -27,7 +27,7 @@ const POLL_MS        = 60_000;
 const MAX_HOURS      = 12;
 const MAX_TICKS      = (MAX_HOURS * 60 * 60 * 1000) / POLL_MS;
 const FIRST_DELAY_MS = 30_000;
-const EOD_CLOSE_HOUR = 22;  // UTC — force-close any open position at 22:00 (day trading rule)
+const EOD_CLOSE_HOUR = 20;  // UTC — force-close any open position at 20:00 (mirrors eod_close.mjs cron)
 
 // Args: --entry=PRICE --numOrders=N (passed by session_runner for multi-TP BE detection)
 const args       = Object.fromEntries(process.argv.slice(2).map(a => a.replace('--','').split('=')));

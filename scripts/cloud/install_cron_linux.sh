@@ -42,6 +42,10 @@ CRON_CMD="cd $PROJECT_DIR && $NODE_BIN $SESSION_SCRIPT >> $LOG_DIR/session_\$(da
 #   18:03 - London Close (weekdays)
 #   04:03 - Research     (Sundays)
 
+EOD_SCRIPT="$PROJECT_DIR/scripts/trading/eod_close.mjs"
+EOD_LOG_DIR="$PROJECT_DIR/data/trade_log"
+EOD_CMD="cd $PROJECT_DIR && $NODE_BIN $EOD_SCRIPT >> $EOD_LOG_DIR/eod_close.log 2>&1"
+
 CRON_BLOCK="# TradingMCP — automated trading sessions (Europe/London time)
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
@@ -53,6 +57,10 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 7 14 * * 1-5 $CRON_CMD
 # London Close — weekdays 18:03
 3 18 * * 1-5 $CRON_CMD
+# EOD Close — 20:00 UTC weekdays (day-trade enforcer, first pass)
+0 20 * * 1-5 $EOD_CMD
+# EOD Close — 21:45 UTC weekdays (backup pass, catches any slip-throughs)
+45 21 * * 1-5 $EOD_CMD
 # Strategy Research — Sundays 04:03
 3 4 * * 0   $CRON_CMD
 # END TradingMCP"
