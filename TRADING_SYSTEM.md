@@ -1,7 +1,7 @@
 # Trading System — Full Reference
 
 Automated day-trading system running 24/7 on an Oracle Cloud VM. Connects to TradingView Desktop
-via Chrome DevTools Protocol (CDP), scans 22 instruments across 6 timeframes, and places
+via Chrome DevTools Protocol (CDP), scans 22 instruments across 8 timeframes, and places
 structured orders using a multi-strategy scoring engine. All positions are closed by 20:00 UTC —
 no overnight exposure.
 
@@ -70,7 +70,7 @@ Each active cron fires runs this sequence:
 5. News filter    → fetch high-impact events; exit if event within ±30 min
 6. Consec-loss    → read trades.csv; exit if 2+ consecutive losses
 7. Sentiment      → fetch F&G / Reddit signals (non-blocking — failure skipped)
-8. Scan           → scanForSetups() across all 22 instruments × 6 TFs
+8. Scan           → scanForSetups() across all 22 instruments × 8 TFs
 9. News per-sym   → filter any setup whose symbol has news <30 min
 10. Group select  → one setup per correlated group, up to 4 concurrent
 11. Deduplication → skip symbol if already open; skip if correlated group member open
@@ -84,7 +84,8 @@ Each active cron fires runs this sequence:
 ## Instrument Universe
 
 22 instruments, scanned in tier order (higher tiers scanned first within each session).
-All instruments scan all 6 timeframes: **1M, 5M, 15M, H1, H4, D**.
+All instruments scan all 8 timeframes: **1M, 5M, 15M, 30M, H1, H4, D, W**.
+Higher timeframes carry more weight in the MTF bonus — Weekly/Daily confluence scores +3 bonus vs +1 for low-TF only. This reflects the lower noise and higher reliability of higher-TF signals.
 
 ### Tier 1 — Proven High WR (ranked by Apr 13-25 audit)
 
@@ -141,7 +142,7 @@ All instruments scan all 6 timeframes: **1M, 5M, 15M, H1, H4, D**.
 
 ### Two-Pass MTF Approach
 
-**Pass 1** — Scan every TF (1M, 5M, 15M, H1, H4, D) for each instrument.
+**Pass 1** — Scan every TF (1M, 5M, 15M, 30M, H1, H4, D, W) for each instrument.
 Each TF/direction combination is scored independently. A candidate is kept if:
 - Score ≥ 8
 - Strategies T (Weekly trend) **and** U (Daily zone) are both present
@@ -163,9 +164,9 @@ One setup is emitted per instrument+direction (not per TF). MTF bonus is applied
 | SPX500 gate | Contrarian FVG (W) **or** Okala (P) must be present |
 | Min score | ≥ 8 points after MTF bonus |
 
-### Strategies (A–U)
+### Strategies (A–X)
 
-Each strategy scores 1 point unless noted. Max possible score: ~16+ (with MTF bonus and convergence bonus).
+Each strategy scores 1 point unless noted. Max possible score: ~18+ (with MTF bonus, convergence bonus, and X golden pocket).
 
 | Code | Name | Signal |
 |------|------|--------|
@@ -192,6 +193,7 @@ Each strategy scores 1 point unless noted. Max possible score: ~16+ (with MTF bo
 | U | Daily Zone | Price in lower 40% of PDH-PDL for longs / upper 40% for shorts — **required** |
 | V | Trend Catcher Switch | NAS100/SPX500 only — SmartTrail direction flip (-1→+1) in last 5 bars + EMA stack aligned + RSI < 55 (long). Replicates LuxAlgo `{switch_bullish_catcher}` + `{confirmation_uptrend}` + `{hyperwave_below_50}`. 75% WR on NAS100 15M backtest |
 | W | SPX500 Contrarian FVG | SPX500 only — recent bearish FVG + MFI(14) < 50 + RSI < 35 for longs (contrarian: gap-down reversal). 70.51% WR on SPX500 15M backtest |
+| X | Fibonacci OTE + BOS/CHoCH | **SMC/Harmonic trend continuation.** BOS-confirmed swing A→B impulse; price retracing into golden pocket (0.786-0.88 fib) or OTE zone (0.618-0.786). Scoring: in OTE zone + BOS = +1; in golden pocket (0.786-0.88) + BOS = +2; Order Block confluence = +1 extra. CHoCH tagged when present. **TP extensions: -0.27 (TP1) and -0.618 (TP2) projected beyond the swing.** Settings from Harmonic/SMC framework. |
 | — | Convergence bonus | 5+ distinct strategies agree → +1 |
 | — | MTF bonus | 2 TFs agree → +1; 3+ TFs agree → +2 |
 

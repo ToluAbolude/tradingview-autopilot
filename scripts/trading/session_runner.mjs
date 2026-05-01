@@ -201,14 +201,16 @@ async function main() {
   }
   log(`✓ News clear. Safe to trade.`);
 
-  // 1b. Check performance — stop if 2+ consecutive losses
+  // 1b. Check performance — stop if 2+ consecutive losses TODAY only (resets each new trading day)
   // CSV cols: date(0),session(1),symbol(2),tf(3),direction(4),score(5),entry(6),sl(7),tp(8),rr(9),result(10),pnl(11),notes(12)
   if (existsSync(LOG_FILE)) {
+    const todayStr = new Date().toISOString().slice(0, 10);
     const trades = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1)
+      .filter(l => l.startsWith(todayStr))
       .map(l => { const p = l.split(','); return { result: (p[10]||'').trim(), pnl: parseFloat(p[11]||0)||0, score: p[5], session: p[1], symbol: p[2] }; });
     const perf = analyzePerformance(trades);
     if (perf.currentConsecLoss >= 2) {
-      log(`⚠ STOP RULE: ${perf.currentConsecLoss} consecutive losses. Skipping session.`);
+      log(`⚠ STOP RULE: ${perf.currentConsecLoss} consecutive losses today. Skipping session.`);
       return;
     }
   }

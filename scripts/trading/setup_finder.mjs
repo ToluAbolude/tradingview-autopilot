@@ -57,9 +57,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // and only win if they post a genuinely high score (which requires EMA trend alignment).
 // The EMA flatness gate blocks ranging-market entries regardless of tier.
 
-// All instruments scan all 6 timeframes: 1M, 5M, 15M, H1, H4, D
-// 27 instruments × 6 TFs = 162 chart switches per cycle (~7 min), fits within 15-min interval.
-const ALL_TFS = ['1', '5', '15', '60', '240', 'D'];
+// All instruments scan all 8 timeframes: 1M, 5M, 15M, 30M, H1, H4, D, W
+// 22 instruments × 8 TFs = 176 chart switches per cycle (~9 min), fits within session window.
+// Higher TFs carry more weight in the MTF bonus — weekly/daily confluence is far more reliable.
+const ALL_TFS = ['1', '5', '15', '30', '60', '240', 'D', 'W'];
+
+// TF display labels and confluence weights (higher TF = more signal weight, less noise)
+const TF_LABEL  = { '1':'1M', '5':'5M', '15':'15M', '30':'30M', '60':'1H', '240':'4H', 'D':'D', 'W':'W' };
+const TF_WEIGHT = { '1': 0.25, '5': 0.5, '15': 1, '30': 1, '60': 1.5, '240': 2.5, 'D': 3, 'W': 4 };
 
 export const FULL_SCAN_LIST = [
   // ── TIER 1: Proven high WR — ranked by 2-week audit (Apr 13-25) ──
@@ -223,6 +228,102 @@ function detectRecentFVG(bars, lookback = 10) {
     if (bars[i].h < bars[i - 2].l) bearishFVG = true; // gap down (bearish imbalance)
   }
   return { bullishFVG, bearishFVG };
+}
+
+// ── Fibonacci OTE with BOS/CHoCH and Order Block (SMC/Harmonic) ──────────────
+// Identifies: swing A (low) → swing B (high) impulse, then retracement into 0.618-0.88 zone.
+// BOS: the B swing broke above the prior confirmed swing high (trend confirmation).
+// Order Block: last opposing candle before the impulse — institutional demand/supply zone.
+// CHoCH: minor structure shift inside the retracement confirming reversal timing.
+// Extension targets: ext27 = B + 0.27×range (TP1), ext618 = B + 0.618×range (TP2).
+function calcFibOTE(bars, dir) {
+  const n = bars.length - 1;
+  const pivotLen = 5;
+  const highs = [], lows = [];
+
+  // Confirmed pivots — need pivotLen bars on BOTH sides (walk-forward safe, requires n ≥ 2×pivotLen)
+  for (let i = pivotLen; i <= n - pivotLen; i++) {
+    let isH = true, isL = true;
+    for (let j = 1; j <= pivotLen; j++) {
+      if (bars[i].h <= bars[i-j].h || bars[i].h <= bars[i+j].h) isH = false;
+      if (bars[i].l >= bars[i-j].l || bars[i].l >= bars[i+j].l) isL = false;
+    }
+    if (isH) highs.push(i);
+    if (isL)  lows.push(i);
+  }
+
+  if (highs.length < 1 || lows.length < 1) return null;
+  const cur = bars[n].c;
+
+  if (dir === 'long') {
+    const hiIdx = highs[highs.length - 1];       // most recent swing high = B
+    const loIdx = [...lows].reverse().find(l => l < hiIdx); // swing low before B = A
+    if (loIdx === undefined) return null;
+
+    const A = bars[loIdx].l, B = bars[hiIdx].h;
+    if (B <= A) return null;
+    const range = B - A;
+
+    const f618 = B - 0.618 * range;
+    const f786 = B - 0.786 * range;
+    const f88  = B - 0.88  * range;
+    const ext27 = B + 0.27  * range;   // TP1: -0.27 extension
+    const ext618 = B + 0.618 * range;  // TP2: -0.618 extension
+
+    if (cur < f88 || cur > f618) return null;  // not in OTE zone
+    const inDeep = cur <= f786;                // golden pocket 0.786-0.88
+
+    // BOS: the impulse high B broke above the previous confirmed swing high
+    const prevHiIdx = highs.length >= 2 ? highs[highs.length - 2] : null;
+    const hasBOS    = prevHiIdx !== null && B > bars[prevHiIdx].h;
+
+    // Order Block: last bearish candle in the 10 bars before the impulse low (A)
+    let obHigh = null, obLow = null;
+    for (let i = loIdx - 1; i >= Math.max(0, loIdx - 10); i--) {
+      if (bars[i].c < bars[i].o) { obHigh = bars[i].h; obLow = bars[i].l; break; }
+    }
+    const atOB = obHigh !== null && cur >= obLow && cur <= obHigh;
+
+    // CHoCH (Change of Character): within the retracement, last 3 bars show a bullish shift
+    // Proxy: current close is higher than 2 bars ago (mini-structure flip confirming OTE entry)
+    const choch = n >= 2 && bars[n].c > bars[n-2].c && bars[n].c > bars[n-1].l;
+
+    return { inDeep, hasBOS, atOB, choch, f618, f786, f88, ext27, ext618, A, B };
+  }
+
+  if (dir === 'short') {
+    const loIdx = lows[lows.length - 1];         // most recent swing low = B
+    const hiIdx = [...highs].reverse().find(h => h < loIdx); // swing high before B = A
+    if (hiIdx === undefined) return null;
+
+    const A = bars[hiIdx].h, B = bars[loIdx].l;
+    if (A <= B) return null;
+    const range = A - B;
+
+    const f618 = B + 0.618 * range;
+    const f786 = B + 0.786 * range;
+    const f88  = B + 0.88  * range;
+    const ext27 = B - 0.27  * range;   // TP1: -0.27 extension
+    const ext618 = B - 0.618 * range;  // TP2: -0.618 extension
+
+    if (cur > f88 || cur < f618) return null;   // not in OTE zone
+    const inDeep = cur >= f786;                 // golden pocket 0.786-0.88
+
+    const prevLoIdx = lows.length >= 2 ? lows[lows.length - 2] : null;
+    const hasBOS    = prevLoIdx !== null && B < bars[prevLoIdx].l;
+
+    let obHigh = null, obLow = null;
+    for (let i = hiIdx - 1; i >= Math.max(0, hiIdx - 10); i--) {
+      if (bars[i].c > bars[i].o) { obHigh = bars[i].h; obLow = bars[i].l; break; }
+    }
+    const atOB = obHigh !== null && cur >= obLow && cur <= obHigh;
+
+    const choch = n >= 2 && bars[n].c < bars[n-2].c && bars[n].c < bars[n-1].h;
+
+    return { inDeep, hasBOS, atOB, choch, f618, f786, f88, ext27, ext618, A, B };
+  }
+
+  return null;
 }
 
 function toHA(bars) {
@@ -395,8 +496,9 @@ function buildDailyContext(bars) {
   //  S  Daily Trend Alignment          (D1 EMA proxy — filters counter-trend day trades)
   //  T  Weekly Trend Alignment         (W1 EMA proxy — macro direction confirmation)
   //  U  Daily Extreme Zone             (price in favorable half of PDH-PDL — +1 bonus)
-  //  V  Trend Catcher Switch           (NAS100/SPX500 — EMA crossover+stack+RSI, 75% WR)
+  //  V  Trend Catcher Switch           (NAS100/SPX500 — SmartTrail flip+stack+RSI, 75% WR)
   //  W  SPX500 Contrarian FVG          (bearish FVG + MFI + RSI extreme, 70.51% WR)
+  //  X  Fibonacci OTE + BOS/CHoCH     (SMC/Harmonic: 0.786-0.88 golden pocket + BOS + OB; ext -0.27/-0.618)
 // ────────────────────────────────────────────────────────────────
 export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
@@ -850,6 +952,33 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     }
   }
 
+  // ── X. Fibonacci OTE + BOS/CHoCH — SMC/Harmonic trend continuation ──────────
+  // Swing A→B impulse confirmed by BOS; price retracing into 0.618-0.88 OTE zone.
+  // Golden pocket (0.786-0.88) + Order Block confluence = highest-probability reversal zone.
+  // Extensions: TP1=-0.27 (1.27 target), TP2=-0.618 (1.618 target) beyond the swing.
+  // Settings from Harmonic/SMC: 0.786, 0.88 for entry; -0.27, -0.618 for profit targets.
+  const fibOTE = calcFibOTE(bars, dir);
+  if (fibOTE && fibOTE.hasBOS) {
+    let pts = 0;
+    const tags = [];
+    if (fibOTE.inDeep) {
+      pts = 2; tags.push(`Fib golden pocket 0.786-0.88`);
+    } else {
+      pts = 1; tags.push(`Fib OTE 0.618-0.786`);
+    }
+    if (fibOTE.atOB)    { pts++; tags.push(`+OB confluence`); }
+    if (fibOTE.choch)   { tags.push(`CHoCH`); }
+    tags.push(`BOS | TP1=${fibOTE.ext27.toFixed(2)} TP2=${fibOTE.ext618.toFixed(2)}`);
+    score += pts;
+    reasons.push(tags.join(' '));
+    strats.push('X');
+  } else if (fibOTE && !fibOTE.hasBOS) {
+    // In OTE zone but no BOS — weaker signal, 1 point only, no CHoCH flag
+    score += 1;
+    reasons.push(`Fib OTE ${fibOTE.inDeep ? '0.786-0.88' : '0.618-0.786'} (no BOS)`);
+    strats.push('X');
+  }
+
   // ── Named candle patterns (bonus label, no extra point) ──
   const named = detectNamedPatterns(ha);
   const matching = named.filter(p => p.direction === dir || (p.direction==='neutral' && p.reliability >= 65));
@@ -904,7 +1033,7 @@ export async function scanForSetups(minScore = 8) {
     process.stdout.write(`  [T${inst.tier}] ${inst.label} `);
 
     for (const tf of inst.tfs) {
-      process.stdout.write(`${tf}M:`);
+      process.stdout.write(`${TF_LABEL[tf]||tf}:`);
       await setChart(inst.sym, tf);
       const bars = await getBars(300);
 
@@ -963,9 +1092,11 @@ export async function scanForSetups(minScore = 8) {
         continue;
       }
 
-      const tfList    = [...new Set(cands.map(c => c.tf + 'M'))].join('+');
-      const maxScore  = Math.max(...cands.map(c => c.score));
-      const mtfBonus  = cands.length >= 3 ? 2 : cands.length >= 2 ? 1 : 0;
+      const tfList      = [...new Set(cands.map(c => TF_LABEL[c.tf] || c.tf))].join('+');
+      const maxScore    = Math.max(...cands.map(c => c.score));
+      const totalWeight = cands.reduce((s, c) => s + (TF_WEIGHT[c.tf] || 1), 0);
+      // Higher TF confluence earns bigger bonus: W+D = 7pts → +3; D+4H = 5.5pts → +3; 1H alone = +1
+      const mtfBonus  = totalWeight >= 5 ? 3 : totalWeight >= 3 ? 2 : totalWeight >= 1.5 ? 1 : 0;
       const finalScore = maxScore + mtfBonus;
 
       const allStrats  = [...new Set([...cands.flatMap(c => c.strategies), ...check15.strategies])];

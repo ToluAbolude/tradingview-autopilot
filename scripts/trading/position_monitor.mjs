@@ -114,6 +114,7 @@ function updateLastTrade(result, pnl, note) {
   for (let i = lines.length - 1; i >= 1; i--) {
     const cols = lines[i].split(',');
     if (cols.length < 10 || !cols[0].trim()) continue;
+    if ((cols[2] || '').trim() === 'NONE') continue;  // skip no-setup placeholder rows
     if (cols[10] && cols[10].trim() !== '') continue; // already recorded
 
     cols[10] = result;
