@@ -28,6 +28,12 @@ const DATA_ROOT = IS_LINUX
 const LOG_DIR  = join(DATA_ROOT, 'trade_log');
 const LOG_FILE = join(LOG_DIR, 'trades.csv');
 
+// Load tunable parameters from config file (falls back to safe defaults if missing)
+const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
+const PARAMS = existsSync(PARAMS_FILE)
+  ? JSON.parse(readFileSync(PARAMS_FILE, 'utf8'))
+  : { scoreThreshold: 8, stopRuleLosses: 2, riskPct: [3.5, 2.5, 1.75], slAtrMult: 1.5, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
+
 function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
 
 function logTrade(entry) {
@@ -35,22 +41,27 @@ function logTrade(entry) {
   if (!existsSync(LOG_FILE)) {
     appendFileSync(LOG_FILE, 'date,session,symbol,tf,direction,score,entry,sl,tp,rr,result,pnl,notes\n');
   }
+  const ts = new Date().toISOString();
   const row = [
-    new Date().toISOString(),
+    ts,
     entry.session, entry.symbol, entry.tf, entry.direction,
     entry.score, entry.entry, entry.sl, entry.tp, entry.rr,
     entry.result || '', entry.pnl || '', entry.notes || '',
   ].join(',');
   appendFileSync(LOG_FILE, row + '\n');
+  return ts;
 }
 
 // Determine current session name
 function currentSession() {
-  const h = new Date().getUTCHours();
+  const now = new Date();
+  const h   = now.getUTCHours();
+  const day = now.getUTCDay();
+  if (day === 0 && h >= 22) return 'ASIAN'; // Sunday night market open
   if (h >= 13 && h < 17) return 'LONDON-NY-OVERLAP';
   if (h >= 8  && h < 13) return 'LONDON';
-  if (h >= 13 && h < 22) return 'NY';
-  if (h >= 0  && h < 7)  return 'ASIAN';
+  if (h >= 17 && h < 20) return 'NY';
+  if (h >= 0  && h < 8)  return 'ASIAN';
   return 'DEAD-ZONE';
 }
 
@@ -154,34 +165,46 @@ async function main() {
   log(`=== SESSION START: ${session} ===`);
 
   const now     = new Date();
+  const isSun   = now.getUTCDay() === 0;
   const isFri   = now.getUTCDay() === 5;
   const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
   const h       = now.getUTCHours();
 
-  // 0a. EOD close — 20:00 UTC: close any open positions and stop scanning for the day
-  if (h >= 20) {
+  // 0a. Sunday gate — Forex opens ~22:00 UTC Sunday; skip everything before that
+  if (isSun && h < 22) {
+    log('Sunday market not yet open (opens ~22:00 UTC). Skipping.');
+    return;
+  }
+
+  // 0b. EOD close — 20:00 UTC Mon-Fri: close any open positions and stop for the day
+  // Exempt on Sunday — market just opened at 22:00, there are no positions to close.
+  if (h >= 20 && !isSun) {
     log('20:00 UTC EOD close — closing any open positions.');
     try { await closeAllPositions(); log('  All positions closed.'); }
     catch(e) { log(`  closeAllPositions: ${e.message}`); }
     return;
   }
 
-  // 0b. Day-trading entry window: London (08:00) through London-NY overlap (16:00)
-  // No Asian session entries (low liquidity). Hard cutoff at 16:00 so trades can close same day.
-  const isLondon  = h >= 8  && h < 13;   // 08:00–12:59
-  const isOverlap = h >= 13 && h < 16;   // 13:00–15:59 (best session)
-  if (!isLondon && !isOverlap) {
-    log(`Entry window closed (UTC ${h}:xx) — day trading hours are 08:00–16:00 UTC.`);
+  // 0c. Last-entry cutoff — stop opening new trades 30 min before EOD force-close
+  // Not applicable Sunday (market just opened; no same-day close at 20:00).
+  if (!isSun && h === 19 && now.getUTCMinutes() >= 30) {
+    log('19:30 UTC last-entry cutoff — no new trades before EOD close at 20:00.');
     return;
   }
 
-  // 0c. Friday cutoff — no new entries after 15:30 UTC on Fridays
-  if (isFri && utcMins >= 15 * 60 + 30) {
-    log('Friday 15:30 UTC cutoff reached — no new trades today.');
+  // 0d. Friday cutoff — markets close ~22:00 UTC Friday; no new entries after 21:00
+  if (isFri && utcMins >= 21 * 60) {
+    log('Friday 21:00 UTC cutoff reached — markets closing, no new trades.');
     return;
   }
 
-  // 0c. Equity check — informational only (multi-instrument: positions are expected to be open)
+  // 0e. Session block — skip if current session is blocked by performance review
+  if (PARAMS.blockedSessions?.includes(session)) {
+    log(`⚠ Session '${session}' is blocked by performance review. Run apply_params.mjs to unblock.`);
+    return;
+  }
+
+  // 0f. Equity check — informational only (multi-instrument: positions are expected to be open)
   try {
     const { getEquity } = await import('./execute_trade.mjs');
     const eq = await getEquity();
@@ -209,8 +232,8 @@ async function main() {
       .filter(l => l.startsWith(todayStr))
       .map(l => { const p = l.split(','); return { result: (p[10]||'').trim(), pnl: parseFloat(p[11]||0)||0, score: p[5], session: p[1], symbol: p[2] }; });
     const perf = analyzePerformance(trades);
-    if (perf.currentConsecLoss >= 2) {
-      log(`⚠ STOP RULE: ${perf.currentConsecLoss} consecutive losses today. Skipping session.`);
+    if (perf.currentConsecLoss >= PARAMS.stopRuleLosses) {
+      log(`⚠ STOP RULE: ${perf.currentConsecLoss} consecutive losses today (limit: ${PARAMS.stopRuleLosses}). Skipping session.`);
       return;
     }
   }
@@ -237,7 +260,7 @@ async function main() {
   log('Scanning instruments for setups...');
   let setups;
   try {
-    setups = await scanForSetups();
+    setups = await scanForSetups(PARAMS.scoreThreshold || 8, PARAMS.slAtrMult || 1.5);
   } catch(e) {
     log(`Scan error: ${e.message}`);
     return;
@@ -259,8 +282,12 @@ async function main() {
     return;
   }
 
-  // 3b. Filter out any instrument with news <30 min
+  // 3b. Filter: blocked symbols + news <30 min
   const viableSetups = sessionFiltered.filter(s => {
+    if (PARAMS.blockedSymbols?.includes(s.label)) {
+      log(`  Skipping ${s.label}: temporarily blocked by performance review`);
+      return false;
+    }
     const sym = s.label;
     const symNews = filterForSymbol(allNews, sym);
     const symSafe = isSafeToTrade(symNews);
@@ -284,7 +311,7 @@ async function main() {
     ['WTI', 'USOIL'],                                                  // Oil
     ['GER40', 'UK100'],                                                // EU indices
   ];
-  const MAX_CONCURRENT = 4; // max simultaneous instruments
+  const MAX_CONCURRENT = PARAMS.maxConcurrent || 4;
 
   const selected = [];
   const usedGroups = new Set();
@@ -330,7 +357,8 @@ async function main() {
   const equity = equityData.equity || equityData.balance || 10000;
   log(`  Account equity: £${equity}`);
 
-  const baseRisk = dedupedSelected.length === 1 ? 3.5 : dedupedSelected.length === 2 ? 2.5 : 1.75;
+  const [r1, r2, r3] = PARAMS.riskPct || [3.5, 2.5, 1.75];
+  const baseRisk = dedupedSelected.length === 1 ? r1 : dedupedSelected.length === 2 ? r2 : r3;
   const LOT_STEP = 0.01;
 
   // 6. Place 2 orders per selected instrument (day-trade — EOD close at 20:00 UTC is the backstop)
@@ -362,7 +390,7 @@ async function main() {
 
     if (placed > 0) {
       totalPlaced += placed;
-      logTrade({
+      const tradeTime = logTrade({
         session, symbol: best.label, tf: best.tf, direction: best.dir,
         score: best.score, entry: best.entry, sl: best.sl,
         tp: `${best.tp2}/${best.tp3}`, rr: best.rr,
@@ -377,6 +405,7 @@ async function main() {
         monitorPath,
         `--entry=${best.entry}`, `--tp1=${best.tp2}`, `--tp2=${best.tp3}`, `--tp3=${best.tp3}`,
         `--symbol=${best.label}`, `--numOrders=${placed}`,
+        `--tradeTime=${tradeTime}`,
       ], { detached: true, stdio: ['ignore', logFd, logFd] });
       monitor.unref();
       log(`  Monitor launched (pid ${monitor.pid}) → ${monitorLog}`);

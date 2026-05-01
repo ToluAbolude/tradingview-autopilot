@@ -29,10 +29,11 @@ const MAX_TICKS      = (MAX_HOURS * 60 * 60 * 1000) / POLL_MS;
 const FIRST_DELAY_MS = 30_000;
 const EOD_CLOSE_HOUR = 20;  // UTC — force-close any open position at 20:00 (mirrors eod_close.mjs cron)
 
-// Args: --entry=PRICE --numOrders=N (passed by session_runner for multi-TP BE detection)
-const args       = Object.fromEntries(process.argv.slice(2).map(a => a.replace('--','').split('=')));
+// Args passed by session_runner
+const args        = Object.fromEntries(process.argv.slice(2).map(a => a.replace('--','').split('=')));
 const ENTRY_PRICE = parseFloat(args.entry) || null;
 const NUM_ORDERS  = parseInt(args.numOrders) || 1;
+const TRADE_TIME  = args.tradeTime || null;   // ISO timestamp of the CSV row this monitor owns
 
 // Ensure log dir exists
 try { mkdirSync(join(DATA_ROOT, 'trade_log'), { recursive: true }); } catch(_) {}
@@ -106,23 +107,49 @@ async function getPositionState() {
   })()`);
 }
 
-// ── Update the last unresolved trade in CSV ──
+// ── Update the specific trade row in CSV ──
+// Primary: match by TRADE_TIME timestamp (exact row this monitor owns).
+// Fallback: last-unresolved-row scan (legacy behaviour when tradeTime not available).
 function updateLastTrade(result, pnl, note) {
   if (!existsSync(TRADES_CSV)) { log(`CSV not found: ${TRADES_CSV}`); return false; }
   const lines = readFileSync(TRADES_CSV, 'utf8').split('\n');
+  const suffix = `;monitor_${note}_${new Date().toISOString()}`;
 
+  // Primary path — find the row whose timestamp matches TRADE_TIME
+  if (TRADE_TIME) {
+    // ISO timestamps match to the second (first 19 chars); sub-second digits may differ slightly
+    const prefix = TRADE_TIME.slice(0, 19);
+    for (let i = 1; i < lines.length; i++) {
+      if (!lines[i].startsWith(prefix)) continue;
+      const cols = lines[i].split(',');
+      if (cols[10] && cols[10].trim() !== '') {
+        log(`Row ${i} already has result=${cols[10]} — skipping duplicate update`);
+        return false;
+      }
+      cols[10] = result;
+      cols[11] = pnl != null ? String(pnl) : '';
+      cols[12] = (cols[12] || '').trim() + suffix;
+      lines[i] = cols.join(',');
+      writeFileSync(TRADES_CSV, lines.join('\n'), 'utf8');
+      log(`✓ CSV row ${i} updated → result=${result} pnl=${pnl}`);
+      return true;
+    }
+    log(`Warning: row with timestamp ${prefix} not found — falling back to last-unresolved search`);
+  }
+
+  // Fallback — scan backwards for last row with no result (original behaviour)
   for (let i = lines.length - 1; i >= 1; i--) {
     const cols = lines[i].split(',');
     if (cols.length < 10 || !cols[0].trim()) continue;
-    if ((cols[2] || '').trim() === 'NONE') continue;  // skip no-setup placeholder rows
-    if (cols[10] && cols[10].trim() !== '') continue; // already recorded
+    if ((cols[2] || '').trim() === 'NONE') continue;
+    if (cols[10] && cols[10].trim() !== '') continue;
 
     cols[10] = result;
     cols[11] = pnl != null ? String(pnl) : '';
-    cols[12] = (cols[12] || '').trim() + `;monitor_${note}_${new Date().toISOString()}`;
+    cols[12] = (cols[12] || '').trim() + suffix;
     lines[i] = cols.join(',');
     writeFileSync(TRADES_CSV, lines.join('\n'), 'utf8');
-    log(`✓ CSV row ${i} updated → result=${result} pnl=${pnl}`);
+    log(`✓ CSV row ${i} updated (fallback) → result=${result} pnl=${pnl}`);
     return true;
   }
   log('No unresolved trade row found to update.');

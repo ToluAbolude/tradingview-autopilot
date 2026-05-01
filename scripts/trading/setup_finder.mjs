@@ -1006,13 +1006,13 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 // ── Main scan ──
 //
 // Two-pass MTF approach:
-//  Pass 1 — scan all TFs (1M, 5M, 15M, 60M, 240M, D) for direction confluence
+//  Pass 1 — scan all TFs (1M, 5M, 15M, 30M, 1H, 4H, D, W) for direction confluence
 //  Pass 2 — once confluence is found, switch to 15M and calculate entry/SL/TP from
 //            the 15M chart (tighter, more precise levels regardless of which TF triggered)
 //
 // One setup is emitted per instrument+direction, not per TF.
 // MTF bonus: +1 if 2 TFs agree, +2 if 3+ TFs agree.
-export async function scanForSetups(minScore = 8) {
+export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
   const utcHour  = new Date().getUTCHours();
   const priority = sessionSymbols(utcHour);
   const results  = [];
@@ -1049,7 +1049,10 @@ export async function scanForSetups(minScore = 8) {
       const directions = ['long', ...(inst.autoShort ? ['short'] : [])];
       for (const dir of directions) {
         const { score, reasons, strategies, rsi } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
-        const hasTU = strategies.includes('T') && strategies.includes('U');
+        // D and W bars: U (daily range context) is meaningless — price is always "somewhere in yesterday's range"
+        // on a daily/weekly chart. Only require T (macro trend alignment) for these higher TFs.
+        const isHigherTF = tf === 'D' || tf === 'W';
+        const hasTU = strategies.includes('T') && (isHigherTF || strategies.includes('U'));
         if (score >= minScore && hasTU) {
           candidates.push({ tf, dir, score, reasons, strategies, rsi });
           process.stdout.write(`✓ `);
@@ -1122,7 +1125,7 @@ export async function scanForSetups(minScore = 8) {
           .sort((a, b) => b.price - a.price);
         sl = supportsBelow.length > 0
           ? supportsBelow[0].price - slBuf
-          : entry - atrVal * 1.5;
+          : entry - atrVal * slAtrMult;
       } else {
         const resistsAbove = sr15.active
           .filter(z => z.type === 'resistance' && z.price > entry
@@ -1131,7 +1134,7 @@ export async function scanForSetups(minScore = 8) {
           .sort((a, b) => a.price - b.price);
         sl = resistsAbove.length > 0
           ? resistsAbove[0].price + slBuf
-          : entry + atrVal * 1.5;
+          : entry + atrVal * slAtrMult;
       }
       const slDist = Math.abs(entry - sl);
 

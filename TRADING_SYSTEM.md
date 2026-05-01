@@ -1,6 +1,6 @@
 # Trading System — Full Reference
 
-Automated day-trading system running 24/7 on an Oracle Cloud VM. Connects to TradingView Desktop
+Automated day-trading system running 24/5 on an Oracle Cloud VM. Connects to TradingView Desktop
 via Chrome DevTools Protocol (CDP), scans 22 instruments across 8 timeframes, and places
 structured orders using a multi-strategy scoring engine. All positions are closed by 20:00 UTC —
 no overnight exposure.
@@ -19,9 +19,10 @@ Oracle Cloud VM (ubuntu@132.145.44.68)
 │   └── CDP bridge → TradingView
 │
 └── Cron jobs
-    ├── session_runner.mjs   ← main orchestrator (fires at session opens)
+    ├── session_runner.mjs   ← main orchestrator (every 15 min Mon–Fri)
     ├── eod_close.mjs        ← force-close enforcer (20:00 + 21:45 UTC)
-    └── position_monitor.mjs ← per-trade watcher (spawned per order, detached)
+    ├── position_monitor.mjs ← per-trade watcher (spawned per order, detached)
+    └── review_params.mjs    ← daily performance review (20:30 UTC Mon–Fri)
 ```
 
 **Data files** (all at `/home/ubuntu/trading-data/`):
@@ -32,7 +33,10 @@ Oracle Cloud VM (ubuntu@132.145.44.68)
 | `trade_log/eod_closes.csv` | EOD close audit trail |
 | `position_monitor.log` | Real-time position poll log |
 | `daily_context/{date}.jsonl` | PDH/PDL/ADR snapshots per instrument per scan |
-| `trade_log/scheduler_logs/` | Per-run cron output logs |
+| `trading_params.json` | Tunable parameters — edited via `apply_params.mjs`, never manually |
+| `pending_params.json` | Recommended changes awaiting approval (written by `review_params.mjs`) |
+| `reviews/` | Archive of applied parameter reviews |
+| `review_params.log` | Daily review script output log |
 
 ---
 
@@ -42,41 +46,43 @@ All times UTC. Timezone set to Europe/London on the VM.
 
 | UTC Time | Days | Script | Purpose |
 |----------|------|--------|---------|
-| 01:07 | Daily | `session_runner.mjs` | Asian Open fire (exits immediately — outside entry window) |
-| 09:07 | Mon–Fri | `session_runner.mjs` | **London Open** — active entry window |
-| 14:07 | Mon–Fri | `session_runner.mjs` | **NY Open / London-NY Overlap** — highest priority |
-| 18:03 | Mon–Fri | `session_runner.mjs` | London Close fire (outside entry window after 16:00) |
+| `*/15` | Mon–Fri | `session_runner.mjs` | Scan every 15 minutes — active entry 00:00–19:30 UTC |
+| `*/15 22-23` | Sun | `session_runner.mjs` | Forex market open — Sunday night ASIAN session |
+| `*/5` | Daily | `watchdog.mjs` | Keep TradingView + BlackBull alive |
+| 09:00 | Mon–Fri | `run_jobs.sh` | Job pipeline (research tasks) |
 | 20:00 | Mon–Fri | `eod_close.mjs` | EOD close — first pass |
+| 20:30 | Mon–Fri | `review_params.mjs` | Daily performance review + parameter recommendations |
 | 21:45 | Mon–Fri | `eod_close.mjs` | EOD close — backup pass |
-| 04:03 | Sundays | `session_runner.mjs` | Strategy research scan |
 
-**Active entry window: 08:00–16:00 UTC only.**
-The 01:07 and 18:03 crons fire `session_runner.mjs` but it exits immediately when outside the
-entry window — no trades are placed. The 04:03 Sunday run is for scanning/logging context only.
+**Active entry window: Sun 22:00 UTC – Fri 21:00 UTC (true 24/5).**
+Forex opens Sunday ~22:00 UTC; the Sunday cron fires at 22:00, 22:15, 22:30, 22:45, 23:00, 23:15, 23:30, 23:45 UTC, then the Mon–Fri cron picks up seamlessly from 00:00 Monday.
+The scanner gates itself internally — entry is skipped outside valid hours, if the session is blocked by performance review, if there is news, or if the stop rule has triggered.
 
-**Friday cutoff:** No new entries after 15:30 UTC on Fridays.
+**Entry cutoffs:** Last entry at 19:30 UTC Mon–Fri (30 min before EOD force-close). No new entries after 21:00 UTC on Fridays. EOD close is skipped on Sunday night (no positions were open before the market opened).
 
 ---
 
 ## Session Flow (session_runner.mjs)
 
-Each active cron fires runs this sequence:
+Each 15-min cron tick runs this sequence:
 
 ```
-1. EOD check      → if UTC hour ≥ 20, close all positions and exit
-2. Entry window   → if outside 08:00–16:00 UTC, exit
-3. Friday cutoff  → if Friday after 15:30, exit
-4. Equity log     → fetch and log current equity/balance/float P&L (informational)
-5. News filter    → fetch high-impact events; exit if event within ±30 min
-6. Consec-loss    → read trades.csv; exit if 2+ consecutive losses
-7. Sentiment      → fetch F&G / Reddit signals (non-blocking — failure skipped)
-8. Scan           → scanForSetups() across all 22 instruments × 8 TFs
-9. News per-sym   → filter any setup whose symbol has news <30 min
-10. Group select  → one setup per correlated group, up to 4 concurrent
-11. Deduplication → skip symbol if already open; skip if correlated group member open
-12. Place orders  → 2 orders per instrument (O1 at TP1, O2 at TP2)
-13. Log trade     → append row to trades.csv
-14. Monitor       → spawn position_monitor.mjs detached per instrument
+1. Sunday gate      → if Sunday before 22:00 UTC, exit (Forex not yet open)
+2. EOD check        → if UTC hour ≥ 20 (and not Sunday), close all positions and exit
+3. Last-entry check → if UTC 19:30–19:59 (and not Sunday), exit (too close to EOD force-close)
+4. Friday cutoff    → if Friday after 21:00, exit
+5. Session block    → if current session is blocked by review, exit
+6. Equity log       → fetch and log current equity/balance/float P&L (informational)
+7. News filter      → fetch high-impact events; exit if event within ±30 min
+8. Consec-loss      → read today's trades.csv; exit if consecutive losses ≥ stopRuleLosses
+9. Sentiment        → fetch F&G / Reddit signals (non-blocking — failure skipped)
+10. Scan            → scanForSetups() across all 22 instruments × 8 TFs
+11. Symbol filter   → skip blocked symbols; skip symbols with news <30 min
+12. Group select    → one setup per correlated group, up to maxConcurrent
+13. Deduplication   → skip symbol if already open; skip if correlated group member open
+14. Place orders    → 2 orders per instrument (O1 at TP1, O2 at TP2)
+15. Log trade       → append row to trades.csv
+16. Monitor         → spawn position_monitor.mjs detached per instrument
 ```
 
 ---
@@ -273,7 +279,7 @@ No overnight positions. Three layers:
 | eod_close.mjs (backup) | 21:45 UTC cron | Catches anything that slipped through |
 
 ### 4. Friday Cutoff
-No new entries after 15:30 UTC on Fridays — ensures all positions have time to resolve before weekend gap.
+No new entries after 21:00 UTC on Fridays. The 20:00 EOD force-close is the real backstop — the 21:00 cutoff is an extra safety margin before market close (~22:00 UTC Friday).
 
 ### 5. Open Position Deduplication
 Before placing any order, `trades.csv` is scanned for rows without a result (column 10 empty).
@@ -308,6 +314,76 @@ Spawned detached per instrument after order placement. Polls every 60 seconds, m
 | Position closed (equity = balance) | Determines W/L from balance delta; updates trades.csv |
 | UTC hour ≥ 20 (EOD) | Force-closes position, records result, exits |
 | 12 hours elapsed | Records result=? (timeout), exits |
+
+---
+
+## Semi-Automatic Parameter Tuning
+
+The system adjusts its own trading parameters based on live performance results.
+Every weekday at **20:30 UTC** (after EOD close), `review_params.mjs` automatically analyzes
+the last 30 days of `trades.csv` and writes recommended changes to `pending_params.json`.
+Nothing changes until you explicitly approve.
+
+### Parameters
+
+All tunable values live in `data/trading_params.json` on the VM:
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `scoreThreshold` | `8` | Minimum setup score required to qualify (T+U gate also required) |
+| `stopRuleLosses` | `2` | Number of consecutive daily losses before session is skipped |
+| `riskPct` | `[3.5, 2.5, 1.75]` | Risk % for 1 / 2 / 3+ concurrent instruments |
+| `slAtrMult` | `1.5` | ATR multiplier for fallback SL when no S/R zone is found |
+| `tp1Mult` | `1.0` | O1 fallback TP multiplier (×slDist) |
+| `tp2Mult` | `2.0` | O2 runner TP fallback multiplier (×slDist) |
+| `maxConcurrent` | `4` | Maximum simultaneous open instruments |
+| `blockedSessions` | `[]` | Sessions currently blocked (e.g. `["ASIAN"]`) |
+| `blockedSymbols` | `[]` | Symbols currently on cooling-off (e.g. `["XRPUSD"]`) |
+| `blockedSymbolExpiry` | `{}` | ISO dates when each blocked symbol auto-unblocks |
+
+### Recommendation Rules
+
+`review_params.mjs` applies these rules against the last 30 days of completed trades:
+
+| Condition | Recommendation |
+| --------- | -------------- |
+| Overall WR < 40% (≥20 trades) | `scoreThreshold` +1 (cap: 11) — tighten entry quality |
+| Overall WR > 70% (≥20 trades) | `scoreThreshold` -1 (floor: 7) — loosen entry slightly |
+| Profit factor < 1.2 (≥20 trades) | `slAtrMult` +0.1 (cap: 2.5) — stops too tight, widen fallback |
+| Symbol WR < 30% (≥5 trades) | Add to `blockedSymbols` for 30 days |
+| Session WR < 35% AND negative PnL (≥10 trades) | Add to `blockedSessions` |
+| Blocked symbol past expiry date | Remove from `blockedSymbols` + `blockedSymbolExpiry` |
+
+### Workflow
+
+```text
+1. 20:30 UTC (auto)  → review_params.mjs runs, writes data/pending_params.json
+2. You review        → node scripts/trading/apply_params.mjs --preview
+3. You approve       → node scripts/trading/apply_params.mjs --apply
+4. Changes active    → next scan cycle reads updated trading_params.json
+5. Old review file   → archived to data/reviews/review_YYYY-MM-DD_<ts>.json
+```
+
+**Preview output** shows a full diff: current value → proposed value, with the data-driven reason.
+**Apply** writes `trading_params.json` and archives the pending file — no manual file editing needed.
+
+If no changes are warranted, `pending_params.json` is still written with `"noChanges": true`
+so you have a daily audit trail of what was evaluated.
+
+### Checking Today's Review
+
+```bash
+# On VM — read the latest recommendations:
+cat /home/ubuntu/trading-data/pending_params.json
+
+# Or preview what would change without applying:
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \
+  "cd /home/ubuntu/tradingview-mcp-jackson && node scripts/trading/apply_params.mjs --preview"
+
+# To apply approved changes:
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \
+  "cd /home/ubuntu/tradingview-mcp-jackson && node scripts/trading/apply_params.mjs --apply"
+```
 
 ---
 

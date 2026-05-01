@@ -71,32 +71,33 @@ export async function setQty(units) {
 
 // ── Set TP and SL prices in the order ticket ──
 // tpPrice and slPrice are absolute price levels
+// Split into two evaluate() calls: first enable checkboxes, then (after React re-renders)
+// re-query inputs and set values. Querying inputs before clicking checkboxes returns a
+// stale NodeList that misses fields TradingView conditionally renders on checkbox enable.
 export async function setTPSL(tpPrice, slPrice) {
+  // Pass 1 — enable TP and SL checkboxes if not already checked
+  await evaluate(`(function() {
+    var ticket = document.querySelector('[class*="orderTicket"]');
+    if (!ticket) return;
+    var checkboxes = ticket.querySelectorAll('input[type="checkbox"]');
+    if (checkboxes[0] && !checkboxes[0].checked) checkboxes[0].click();
+    if (checkboxes[1] && !checkboxes[1].checked) checkboxes[1].click();
+  })()`);
+
+  // Wait for React to re-render the TP/SL input fields
+  await sleep(600);
+
+  // Pass 2 — re-query inputs now that TP/SL fields exist in the DOM, then set values
   const result = await evaluate(`(function() {
     var ticket = document.querySelector('[class*="orderTicket"]');
     if (!ticket) return { error: 'no ticket' };
 
-    var checkboxes = ticket.querySelectorAll('input[type="checkbox"]');
-    var textInputs  = ticket.querySelectorAll('input[type="text"]');
-
-    // Structure: textInputs[0]=qty, textInputs[1]=TP price, textInputs[2]=SL price
-    // checkboxes[0]=TP toggle, checkboxes[1]=SL toggle
-
     var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    var textInputs = ticket.querySelectorAll('input[type="text"]');
+    // textInputs[0]=qty, textInputs[1]=TP price, textInputs[2]=SL price
+    var tpInput = textInputs[1] || null;
+    var slInput = textInputs[2] || null;
     var results = {};
-
-    // Enable & set TP
-    if (checkboxes[0] && !checkboxes[0].checked) {
-      checkboxes[0].click();
-      results.tpChecked = true;
-    }
-    // Find TP input (first text input after qty)
-    var tpInput = null, slInput = null;
-    for (var i = 1; i < textInputs.length; i++) {
-      var parent = textInputs[i].closest('[class*="exit"], [class*="Exit"], [class*="tp"], [class*="sl"], [class*="profit"], [class*="loss"]');
-      if (!tpInput) { tpInput = textInputs[i]; }
-      else if (!slInput) { slInput = textInputs[i]; break; }
-    }
 
     if (tpInput && ${tpPrice} > 0) {
       setter.call(tpInput, '${tpPrice}');
@@ -104,19 +105,18 @@ export async function setTPSL(tpPrice, slPrice) {
       tpInput.dispatchEvent(new Event('change', { bubbles: true }));
       tpInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       results.tpSet = tpInput.value;
+    } else {
+      results.tpError = 'input not found (index 1 of ' + textInputs.length + ')';
     }
 
-    // Enable & set SL
-    if (checkboxes[1] && !checkboxes[1].checked) {
-      checkboxes[1].click();
-      results.slChecked = true;
-    }
     if (slInput && ${slPrice} > 0) {
       setter.call(slInput, '${slPrice}');
       slInput.dispatchEvent(new Event('input',  { bubbles: true }));
       slInput.dispatchEvent(new Event('change', { bubbles: true }));
       slInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       results.slSet = slInput.value;
+    } else {
+      results.slError = 'input not found (index 2 of ' + textInputs.length + ')';
     }
 
     return results;

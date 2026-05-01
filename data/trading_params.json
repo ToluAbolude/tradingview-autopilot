@@ -1,0 +1,15 @@
+{
+  "_note": "Tunable trading parameters. Apply changes via: node scripts/trading/apply_params.mjs --apply",
+  "_lastUpdated": "2026-05-01",
+  "_updatedBy": "manual",
+  "scoreThreshold": 8,
+  "stopRuleLosses": 2,
+  "riskPct": [3.5, 2.5, 1.75],
+  "slAtrMult": 1.5,
+  "tp1Mult": 1.0,
+  "tp2Mult": 2.0,
+  "maxConcurrent": 4,
+  "blockedSessions": [],
+  "blockedSymbols": [],
+  "blockedSymbolExpiry": {}
+}
