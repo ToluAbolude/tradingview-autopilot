@@ -109,10 +109,7 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   } else if (/US30|DOW|YM/.test(sym)) {
     contractSize = 1;
     pipSize      = 1.0;
-  } else if (/BTC/.test(sym)) {
-    contractSize = 1;
-    pipSize      = 1.0;
-  } else if (/ETH/.test(sym)) {
+  } else if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC/.test(sym)) {
     contractSize = 1;
     pipSize      = 1.0;
   } else if (/JPY/.test(sym)) {
@@ -137,6 +134,20 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   // For non-forex instruments: lots = riskAmt / (contractSize × pipSize × slDist)
   let lots = riskAmt / (contractSize * pipSize * slDist);
   lots = Math.floor(lots / LOT_STEP) * LOT_STEP;
+
+  // Per-instrument risk caps — volatile assets get a lower effective risk ceiling
+  // regardless of the session-level riskPct setting, to prevent outsized dollar losses
+  const INSTRUMENT_RISK_CAP_PCT = { BTC: 1.0, ETH: 1.0, SOL: 1.0, ADA: 1.0, XRP: 1.0 };
+  const capKey = Object.keys(INSTRUMENT_RISK_CAP_PCT).find(k => sym.includes(k));
+  if (capKey) {
+    const maxRiskAmt = accountEquity * (INSTRUMENT_RISK_CAP_PCT[capKey] / 100);
+    const maxLots = Math.floor((maxRiskAmt / (contractSize * pipSize * slDist)) / LOT_STEP) * LOT_STEP;
+    if (lots > maxLots) {
+      log(`  [risk cap] ${sym}: ${lots} → ${maxLots} lots (capped at ${INSTRUMENT_RISK_CAP_PCT[capKey]}%)`);
+      lots = maxLots;
+    }
+  }
+
   return Math.min(Math.max(lots, MIN_LOT), MAX_LOTS);
 }
 
@@ -282,10 +293,17 @@ async function main() {
     return;
   }
 
-  // 3b. Filter: blocked symbols + news <30 min
+  // 3b. Filter: blocked symbols + news <30 min + session-specific score gates
+  const CRYPTO_SYMBOLS = ['BTCUSD', 'ETHUSD', 'SOLUSD', 'ADAUSD', 'XRPUSD', 'BNBUSD', 'LTCUSD'];
+  const CRYPTO_ASIAN_MIN_SCORE = 10; // Asian session is thin/noisy — require higher conviction for crypto
+
   const viableSetups = sessionFiltered.filter(s => {
     if (PARAMS.blockedSymbols?.includes(s.label)) {
       log(`  Skipping ${s.label}: temporarily blocked by performance review`);
+      return false;
+    }
+    if (session === 'ASIAN' && CRYPTO_SYMBOLS.includes(s.label) && s.score < CRYPTO_ASIAN_MIN_SCORE) {
+      log(`  Skipping ${s.label}: score ${s.score} < ${CRYPTO_ASIAN_MIN_SCORE} required for crypto in Asian session`);
       return false;
     }
     const sym = s.label;
