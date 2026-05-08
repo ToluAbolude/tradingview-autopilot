@@ -586,7 +586,7 @@ export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
         // D and W bars: U (daily range context) is meaningless — price is always "somewhere in yesterday's range"
         // on a daily/weekly chart. Only require T (macro trend alignment) for these higher TFs.
         const isHigherTF = tf === 'D' || tf === 'W';
-        const hasTU = strategies.includes('T') && (isHigherTF || strategies.includes('U'));
+        const hasTU = strategies.includes('T');
         if (score >= minScore && hasTU) {
           candidates.push({ tf, dir, score, reasons, strategies, rsi });
           process.stdout.write(`✓ `);

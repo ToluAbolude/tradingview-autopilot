@@ -7,7 +7,7 @@
 //   S&R    — C Pivot zone · U PDH/PDL zone
 //   FVG    — F Fair Value Gap zone
 //
-// Signal fires when: T (required) + U (required) + score ≥ 6
+// Signal fires when: T (required) + score ≥ 6  [U is +1 optional]
 // Max score = 8  (A=1, T=1, U=1, C=+2/+3, F=+2)
 // ════════════════════════════════════════════════════════════════════════════
 //@version=6
@@ -290,8 +290,8 @@ score_l = (A_long  ? 1 : 0) + (T_long  ? 1 : 0) + (U_long  ? 1 : 0) +
 score_s = (A_short ? 1 : 0) + (T_short ? 1 : 0) + (U_short ? 1 : 0) +
           C_pts_s + (F_short ? 2 : 0)
 
-valid_l  = T_long  and U_long  and not emaFlat
-valid_s  = T_short and U_short and not emaFlat
+valid_l  = T_long  and not emaFlat
+valid_s  = T_short and not emaFlat
 sig_l    = valid_l and score_l >= 6
 sig_s    = valid_s and score_s >= 6
 
@@ -538,10 +538,10 @@ if show_table and barstate.islast
     table.cell(t, 2, 3, C_long  ? "✓ +" + str.tostring(C_pts_l) : "✗", bgcolor=C_long  ? metL : none, text_color=color.white, text_size=size.small)
     table.cell(t, 3, 3, C_short ? "✓ +" + str.tostring(C_pts_s) : "✗", bgcolor=C_short ? metS : none, text_color=color.white, text_size=size.small)
 
-    table.cell(t, 0, 4, "U  PDH/PDL [REQ]", bgcolor=row0, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 4, "U  PDH/PDL",        bgcolor=row0, text_color=color.white, text_size=size.small)
     table.cell(t, 1, 4, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)
-    table.cell(t, 2, 4, U_long  ? "✓ +1" : "✗ REQ", bgcolor=U_long  ? metL : reqFail, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 4, U_short ? "✓ +1" : "✗ REQ", bgcolor=U_short ? metS : reqFail, text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 4, U_long  ? "✓ +1" : "✗", bgcolor=U_long  ? metL : none, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 4, U_short ? "✓ +1" : "✗", bgcolor=U_short ? metS : none, text_color=color.white, text_size=size.small)
 
     // ── FVG ──
     table.cell(t, 0, 5, "F  FVG Zone",      bgcolor=row0, text_color=color.white,  text_size=size.small)
@@ -569,7 +569,7 @@ if show_table and barstate.islast
     sigBgL = sig_l ? color.new(#2ea043, 0) : none
     sigBgS = sig_s ? color.new(#da3633, 0) : none
     table.cell(t, 0, 8, "SIGNAL",           bgcolor=hBg, text_color=color.white, text_size=size.small)
-    table.cell(t, 1, 8, "T + U + score ≥ 6",bgcolor=hBg, text_color=#8b949e,    text_size=size.tiny)
+    table.cell(t, 1, 8, "T [req] + score ≥ 6",bgcolor=hBg, text_color=#8b949e,    text_size=size.tiny)
     table.cell(t, 2, 8, sig_l ? "▲  TRADE" : "—", bgcolor=sigBgL, text_color=color.white, text_size=size.small)
     table.cell(t, 3, 8, sig_s ? "▼  TRADE" : "—", bgcolor=sigBgS, text_color=color.white, text_size=size.small)
 
