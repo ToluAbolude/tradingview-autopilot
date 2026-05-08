@@ -2,15 +2,15 @@
  * setup_finder.mjs — Three-Family Strategy Scanner
  *
  * Scans the FULL BlackBull symbol universe across 8 timeframes.
- * Three focused strategy families vote on direction — only high-conviction
- * setups where all three families agree are emitted.
+ * Five focused strategies vote on direction — only high-conviction setups
+ * where T (weekly trend) + U (PDH/PDL) are met and score ≥ 6 are emitted.
  *
  * STRATEGY FAMILIES:
- *  TREND     A(SmartTrail) B(EMA stack) S(Daily trend) T(Weekly trend — REQUIRED)
- *  S&R ZONES C(ATR-width S/R region) M(Break & Retest / Zone Flip) U(PDH/PDL — REQUIRED)
- *  FVG       F(3-candle imbalance zone, +2 fresh/+1 old) G(Order Block bonus)
+ *  TREND     A(SmartTrail +1) T(Weekly trend +1 — REQUIRED)
+ *  S&R ZONES C(S/R zone +2 fresh / +3 retested) U(PDH/PDL +1 — REQUIRED)
+ *  FVG       F(3-candle imbalance zone +2)
  *
- * SCORING: threshold 6. FVG tightens SL → bigger lots for same £ risk → larger profits.
+ * SCORING: max = 8, threshold = 6.
  * Minimum 2:1 R:R enforced — one loss never overshadows 2-3 winning trades.
  */
 import { evaluate } from '../../src/connection.js';
@@ -408,24 +408,20 @@ function buildDailyContext(bars) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// STRATEGY ENGINE — three families vote on direction
+// STRATEGY ENGINE — five strategies vote on direction
 //
-//  TREND (direction gate — determines buy/sell bias):
+//  TREND:
 //    A  SmartTrail aligned            (+1 when trail direction matches trade)
-//    B  EMA stack (8 > 21 > 50)      (+1 — stacked EMAs confirm trend)
-//    S  Daily trend alignment         (+1 — D1 EMA proxy)
 //    T  Weekly trend alignment        (+1 — W1 EMA proxy, REQUIRED gate)
 //
-//  SUPPORT & RESISTANCE ZONES (as regions, not lines):
-//    C  Adaptive S/R zone (ATR-wide)  (+1 fresh / +2 multi-touch)
-//    M  Break & Retest / Zone Flip    (+1 — broken level role reversal)
-//    U  Daily PDH/PDL zone            (+1 — yesterday's high/low region, REQUIRED gate)
+//  SUPPORT & RESISTANCE ZONES:
+//    C  S/R zone (wick-to-body)       (+2 fresh / +3 retested)
+//    U  Daily PDH/PDL zone            (+1 — yesterday's high/low, REQUIRED gate)
 //
 //  FAIR VALUE GAP — institutional imbalance zones:
 //    F  FVG zone hit (3-candle gap)   (+2 fresh+unmitigated / +1 old or mitigated)
-//    G  Order Block within FVG        (+1 bonus — institutional demand/supply origin)
 //
-//  Convergence bonus: 4+ distinct strategy codes → +1
+//  Max score = 8, threshold = 6.
 // ────────────────────────────────────────────────────────────────
 export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
@@ -457,13 +453,6 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     if (aligned) { score++; reasons.push('SmartTrail aligned'); strats.push('A'); }
   }
 
-  // ── B. EMA trend stack (8 > 21 > 50 for longs, reversed for shorts) ──
-  const emaLong  = ema8[n] > ema21[n] && ema21[n] > ema50[n];
-  const emaShort = ema8[n] < ema21[n] && ema21[n] < ema50[n];
-  if ((dir === 'long' && emaLong) || (dir === 'short' && emaShort)) {
-    score++; reasons.push('EMA stack aligned'); strats.push('B');
-  }
-
   // ── C. S/R Zone (wick-to-body) — price inside supply/demand zone ──
   // +2 for fresh zone, +3 for zone with retests (proven institutional level)
   // Matches the Pine indicator: resistance=[bodyLevel, wickTip], support=[wickTip, bodyLevel]
@@ -479,50 +468,6 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       score += pts;
       reasons.push(`S/R zone (${activeZone.type}) wick=${activeZone.wickTip.toFixed(4)} body=${activeZone.bodyLevel.toFixed(4)} ${strength}`);
       strats.push('C');
-    }
-  }
-
-  // ── M. Break & Retest + Broken Zone Flip ──
-  // Two signals:
-  //   1. Classic B&R: major level broken 5-20 bars ago, price now retesting it
-  //   2. Zone flip: broken support → new resistance; broken resistance → new support
-  {
-    const tolerance = atr[n] * 0.5;
-    const lookH = bars.slice(n-30, n-8).map(b=>b.h);
-    const lookL = bars.slice(n-30, n-8).map(b=>b.l);
-    const majorH = Math.max(...lookH);
-    const majorL = Math.min(...lookL);
-    const brokeMajorH = bars.slice(n-8, n-1).some(b => b.c > majorH);
-    const retestingH  = Math.abs(last.c - majorH) < tolerance && dir === 'long';
-    const brokeMajorL = bars.slice(n-8, n-1).some(b => b.c < majorL);
-    const retestingL  = Math.abs(last.c - majorL) < tolerance && dir === 'short';
-    if (brokeMajorH && retestingH) { score++; reasons.push(`B&R: broken resistance → support @${majorH.toFixed(4)}`); strats.push('M'); }
-    if (brokeMajorL && retestingL) { score++; reasons.push(`B&R: broken support → resistance @${majorL.toFixed(4)}`); strats.push('M'); }
-
-    if (!strats.includes('M')) {
-      const flipZone = srZones.broken.find(z =>
-        Math.abs(last.c - z.wickTip) < tolerance &&
-        ((z.type === 'resistance' && dir === 'long') || (z.type === 'support' && dir === 'short'))
-      );
-      if (flipZone) {
-        const role = flipZone.type === 'resistance' ? 'flipped → support' : 'flipped → resistance';
-        score++; reasons.push(`Zone flip: ${role} @${flipZone.wickTip.toFixed(4)}`); strats.push('M');
-      }
-    }
-  }
-
-  // ── S. Daily Trend Alignment — D1 EMA proxy from current-TF bars ──
-  {
-    const bpd = tf === '60' ? 24 : tf === '30' ? 48 : tf === '15' ? 96 : tf === '5' ? 288 : 96;
-    const lookback = Math.min(Math.floor(bars.length * 0.8), bpd);
-    if (lookback >= 20) {
-      const emaD1 = calcEMA(bars, lookback);
-      const shift = Math.max(1, Math.floor(lookback / 6));
-      const d1Bull = emaD1[n] > emaD1[n - shift];
-      const d1Bear = emaD1[n] < emaD1[n - shift];
-      if ((dir === 'long' && d1Bull) || (dir === 'short' && d1Bear)) {
-        score++; reasons.push('D1 trend aligned'); strats.push('S');
-      }
     }
   }
 
@@ -586,21 +531,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       score += pts;
       reasons.push(`FVG ${activeFVG.fresh ? 'fresh' : 'old'}/${activeFVG.mitigated ? 'mitigated' : 'unmitigated'} [${activeFVG.bottom.toFixed(4)}–${activeFVG.top.toFixed(4)}]`);
       strats.push('F');
-
-      if (activeFVG.orderBlock) {
-        const ob = activeFVG.orderBlock;
-        if (last.c >= ob.low && last.c <= ob.high) {
-          score++;
-          reasons.push(`Order Block [${ob.low.toFixed(4)}–${ob.high.toFixed(4)}]`);
-          strats.push('G');
-        }
-      }
     }
   }
-
-  // Convergence bonus: 4+ distinct strategy codes → +1
-  const uniqueStrats = [...new Set(strats.map(s => s[0]))].length;
-  if (uniqueStrats >= 4) { score++; reasons.push(`${uniqueStrats} strategies converge`); }
 
   return { score, reasons, strategies: [...new Set(strats)], rsi: rsi[n], atrVal: atr[n], activeFVG };
 }
@@ -691,7 +623,7 @@ export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
       // the other way, the trade is counter-trend on the entry TF — skip it.
       // Require: SmartTrail (A) OR EMA stack (B) aligned on 15M.
       const check15 = runAllStrategies(bars15, dir, utcHour, inst.label, '15');
-      const is15mAligned = check15.strategies.includes('A') || check15.strategies.includes('B');
+      const is15mAligned = check15.strategies.includes('A') || check15.strategies.includes('T');
       if (!is15mAligned) {
         process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — 15M not aligned (score=${check15.score}), waiting\n`);
         continue;

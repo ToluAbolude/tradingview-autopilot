@@ -1,13 +1,14 @@
 // ════════════════════════════════════════════════════════════════════════════
 // Trading System — Strategy Dashboard
-// Shows all 9 active strategies on the chart + live scoring table.
+// Shows 5 active strategies on the chart + live scoring table.
 //
 // FAMILIES:
-//   TREND  — A SmartTrail · B EMA Stack · S Daily trend · T Weekly trend
-//   S&R    — C Pivot zone  · M Break & Retest · U PDH/PDL zone
-//   FVG    — F Fair Value Gap zone · G Order Block within FVG
+//   TREND  — A SmartTrail · T Weekly trend
+//   S&R    — C Pivot zone · U PDH/PDL zone
+//   FVG    — F Fair Value Gap zone
 //
 // Signal fires when: T (required) + U (required) + score ≥ 6
+// Max score = 8  (A=1, T=1, U=1, C=+2/+3, F=+2)
 // ════════════════════════════════════════════════════════════════════════════
 //@version=6
 indicator("Strategy Dashboard — Trend · S&R · FVG",
@@ -19,13 +20,10 @@ indicator("Strategy Dashboard — Trend · S&R · FVG",
 // ── Inputs ──────────────────────────────────────────────────────────────────
 grp = "Display"
 show_trail    = input.bool(true,  "A  SmartTrail",              group=grp)
-show_emas     = input.bool(true,  "B  EMAs 8 / 21 / 50",       group=grp)
-show_d1w1     = input.bool(true,  "S/T  Daily + Weekly EMA",   group=grp)
+show_d1w1     = input.bool(true,  "T  Weekly EMA",              group=grp)
 show_pivots   = input.bool(true,  "C  Pivot S/R zones",         group=grp)
-show_br       = input.bool(true,  "M  Break & Retest level",    group=grp)
 show_pdh_pdl  = input.bool(true,  "U  PDH / PDL zones",         group=grp)
 show_fvg      = input.bool(true,  "F  FVG zones",               group=grp)
-show_ob       = input.bool(true,  "G  Order Blocks",            group=grp)
 show_signals  = input.bool(true,  "Signal entry labels",        group=grp)
 show_table    = input.bool(true,  "Strategy table",             group=grp)
 maxSR         = input.int(5, "Max S&R zones (total)", minval=2, maxval=20, group=grp)
@@ -60,34 +58,26 @@ A_long  = trailDir ==  1
 A_short = trailDir == -1
 
 // ════════════════════════════════════════════════════════════════════════════
-// B  EMA STACK  (8 > 21 > 50 for longs, reversed for shorts)
+// EMAs — used only for the emaFlat ranging-market gate (not scored)
 // ════════════════════════════════════════════════════════════════════════════
 ema8  = ta.ema(close, 8)
 ema21 = ta.ema(close, 21)
 ema50 = ta.ema(close, 50)
-
-B_long  = ema8 > ema21 and ema21 > ema50
-B_short = ema8 < ema21 and ema21 < ema50
 
 // Flatness gate: EMA spread < 0.4% → ranging market, no edge
 emaSpread = math.max(math.max(ema8, ema21), ema50) - math.min(math.min(ema8, ema21), ema50)
 emaFlat   = ema50 > 0 ? emaSpread / ema50 < 0.004 : false
 
 // ════════════════════════════════════════════════════════════════════════════
-// S  DAILY TREND  (D1 EMA proxy — lookback = ~1 day of bars)
 // T  WEEKLY TREND (W1 EMA proxy — lookback = ~5 days of bars)
 // ════════════════════════════════════════════════════════════════════════════
 tf_mins = timeframe.isintraday ? (timeframe.isminutes ? timeframe.multiplier : timeframe.isseconds ? timeframe.multiplier / 60.0 : 1.0) : 0.0
 bpd     = tf_mins > 0 ? math.max(math.min(math.round(1440.0 / tf_mins), 480), 20) : 1
 bpw     = math.min(bpd * 5, 500)
-shiftD  = math.max(1, math.round(bpd / 6))
 shiftW  = math.max(1, math.round(bpw / 10))
 
-emaD1 = ta.ema(close, bpd)
 emaW1 = ta.ema(close, bpw)
 
-S_long  = emaD1 > emaD1[shiftD]
-S_short = emaD1 < emaD1[shiftD]
 T_long  = emaW1 > emaW1[shiftW]
 T_short = emaW1 < emaW1[shiftW]
 
@@ -103,19 +93,6 @@ pricePos = pdRange > 0 ? (close - PDL) / pdRange : 0.5
 
 U_long  = pricePos < 0.40
 U_short = pricePos > 0.60
-
-// ════════════════════════════════════════════════════════════════════════════
-// M  BREAK & RETEST
-// Major high/low from 30 bars ago; price broke it then retested within 0.5×ATR.
-// ════════════════════════════════════════════════════════════════════════════
-majorH = ta.highest(high[8], 22)
-majorL = ta.lowest(low[8],   22)
-
-brokH = ta.highest(close, 8) > majorH
-brokL = ta.lowest(close,  8) < majorL
-
-M_long  = brokH and math.abs(close - majorH) < atr14 * 0.5
-M_short = brokL and math.abs(close - majorL) < atr14 * 0.5
 
 // ════════════════════════════════════════════════════════════════════════════
 // C  PIVOT S/R ZONE  (BigBeluga-style: ATR-width band around pivot level)
@@ -251,16 +228,10 @@ var float[] bFVG_top = array.new_float(0)
 var float[] bFVG_bot = array.new_float(0)
 var float[] rFVG_top = array.new_float(0)
 var float[] rFVG_bot = array.new_float(0)
-var float[] bOB_hi   = array.new_float(0)
-var float[] bOB_lo   = array.new_float(0)
-var float[] rOB_hi   = array.new_float(0)
-var float[] rOB_lo   = array.new_float(0)
 var int[]  bFVG_bar   = array.new_int(0)
 var bool[] bFVG_fresh = array.new_bool(0)
-var int[]  bOB_bar    = array.new_int(0)
 var int[]  rFVG_bar   = array.new_int(0)
 var bool[] rFVG_fresh = array.new_bool(0)
-var int[]  rOB_bar    = array.new_int(0)
 var box[]  srBoxes    = array.new_box(0)
 var box[]  fvgBoxes   = array.new_box(0)
 
@@ -271,29 +242,11 @@ if newBullFVG
     array.unshift(bFVG_bot, high[2])
     array.unshift(bFVG_bar, bar_index[2])
     array.unshift(bFVG_fresh, math.abs(close[1] - open[1]) > atr14 * 1.2)
-    // Find OB: last bearish candle before the impulse
-    obH = float(na)
-    obL = float(na)
-    obBarIdx = int(na)
-    for k = 3 to 14
-        if na(close[k])
-            break
-        if close[k] < open[k]
-            obH := high[k]
-            obL := low[k]
-            obBarIdx := bar_index - k
-            break
-    array.unshift(bOB_hi, obH)
-    array.unshift(bOB_lo, obL)
-    array.unshift(bOB_bar, obBarIdx)
     if array.size(bFVG_top) > maxFVG
         array.pop(bFVG_top)
         array.pop(bFVG_bot)
         array.pop(bFVG_bar)
         array.pop(bFVG_fresh)
-        array.pop(bOB_hi)
-        array.pop(bOB_lo)
-        array.pop(bOB_bar)
 
 // Register new bearish FVG
 newBearFVG = high < low[2] and (low[2] - high) > atr14 * 0.1
@@ -302,34 +255,15 @@ if newBearFVG
     array.unshift(rFVG_bot, high)
     array.unshift(rFVG_bar, bar_index[2])
     array.unshift(rFVG_fresh, math.abs(close[1] - open[1]) > atr14 * 1.2)
-    obH = float(na)
-    obL = float(na)
-    obBarIdx = int(na)
-    for k = 3 to 14
-        if na(close[k])
-            break
-        if close[k] > open[k]
-            obH := high[k]
-            obL := low[k]
-            obBarIdx := bar_index - k
-            break
-    array.unshift(rOB_hi, obH)
-    array.unshift(rOB_lo, obL)
-    array.unshift(rOB_bar, obBarIdx)
     if array.size(rFVG_top) > maxFVG
         array.pop(rFVG_top)
         array.pop(rFVG_bot)
         array.pop(rFVG_bar)
         array.pop(rFVG_fresh)
-        array.pop(rOB_hi)
-        array.pop(rOB_lo)
-        array.pop(rOB_bar)
 
 // Check if current price is inside any FVG zone
 F_long  = false
 F_short = false
-G_long  = false
-G_short = false
 
 if array.size(bFVG_top) > 0
     for i = 0 to array.size(bFVG_top) - 1
@@ -337,10 +271,6 @@ if array.size(bFVG_top) > 0
         b = array.get(bFVG_bot, i)
         if close >= b and close <= t
             F_long := true
-            obH = array.get(bOB_hi, i)
-            obL = array.get(bOB_lo, i)
-            if not na(obH) and close >= obL and close <= obH
-                G_long := true
 
 if array.size(rFVG_top) > 0
     for i = 0 to array.size(rFVG_top) - 1
@@ -348,29 +278,22 @@ if array.size(rFVG_top) > 0
         b = array.get(rFVG_bot, i)
         if close >= b and close <= t
             F_short := true
-            obH = array.get(rOB_hi, i)
-            obL = array.get(rOB_lo, i)
-            if not na(obH) and close >= obL and close <= obH
-                G_short := true
 
 // ════════════════════════════════════════════════════════════════════════════
-// SCORING  (max base = 12 + convergence bonus)
+// SCORING  (max = 8: A=1, T=1, U=1, C=+2/+3, F=+2)
 // Required gates: T + U must both be met, and EMA must not be flat.
-// Signal threshold: ≥ 8 points (A-grade only).
-// C = +2 fresh zone, +3 retested zone (matches FVG weight tier)
+// Signal threshold: ≥ 6 points.
 // ════════════════════════════════════════════════════════════════════════════
-score_l = (A_long  ? 1 : 0) + (B_long  ? 1 : 0) + (S_long  ? 1 : 0) + (T_long  ? 1 : 0) +
-          C_pts_l             + (M_long  ? 1 : 0) + (U_long  ? 1 : 0) +
-          (F_long  ? 2 : 0) + (G_long  ? 1 : 0)
+score_l = (A_long  ? 1 : 0) + (T_long  ? 1 : 0) + (U_long  ? 1 : 0) +
+          C_pts_l + (F_long  ? 2 : 0)
 
-score_s = (A_short ? 1 : 0) + (B_short ? 1 : 0) + (S_short ? 1 : 0) + (T_short ? 1 : 0) +
-          C_pts_s             + (M_short ? 1 : 0) + (U_short ? 1 : 0) +
-          (F_short ? 2 : 0) + (G_short ? 1 : 0)
+score_s = (A_short ? 1 : 0) + (T_short ? 1 : 0) + (U_short ? 1 : 0) +
+          C_pts_s + (F_short ? 2 : 0)
 
 valid_l  = T_long  and U_long  and not emaFlat
 valid_s  = T_short and U_short and not emaFlat
-sig_l    = valid_l and score_l >= 8
-sig_s    = valid_s and score_s >= 8
+sig_l    = valid_l and score_l >= 6
+sig_s    = valid_s and score_s >= 6
 
 // ════════════════════════════════════════════════════════════════════════════
 // PLOTS — TREND OVERLAYS
@@ -380,14 +303,10 @@ sig_s    = valid_s and score_s >= 8
 trailCol = A_long ? color.new(#00e676, 0) : color.new(#ff1744, 0)
 plot(show_trail ? trail : na, "SmartTrail (A)", color=trailCol, linewidth=2)
 
-// B EMAs
-plot(show_emas ? ema8  : na, "EMA 8",  color=color.new(#ffeb3b, 0), linewidth=1)
-plot(show_emas ? ema21 : na, "EMA 21", color=color.new(#ffa726, 0), linewidth=1)
-plot(show_emas ? ema50 : na, "EMA 50", color=color.new(#eeeeee, 0), linewidth=2)
-
-// S Daily EMA
-d1Col = S_long ? color.new(#80cbc4, 25) : S_short ? color.new(#ef9a9a, 25) : color.new(color.gray, 50)
-plot(show_d1w1 ? emaD1 : na, "D1 EMA (S)", color=d1Col, linewidth=1, style=plot.style_circles)
+// EMAs (always visible — used for ranging gate)
+plot(ema8,  "EMA 8",  color=color.new(#ffeb3b, 0), linewidth=1)
+plot(ema21, "EMA 21", color=color.new(#ffa726, 0), linewidth=1)
+plot(ema50, "EMA 50", color=color.new(#eeeeee, 0), linewidth=2)
 
 // T Weekly EMA
 w1Col = T_long ? color.new(#4dd0e1, 15) : T_short ? color.new(#e57373, 15) : color.new(color.gray, 50)
@@ -396,10 +315,6 @@ plot(show_d1w1 ? emaW1 : na, "W1 EMA (T)", color=w1Col, linewidth=2, style=plot.
 // U PDH/PDL lines
 plot(show_pdh_pdl ? PDH : na, "PDH", color=color.new(#ef5350, 35), linewidth=1, style=plot.style_stepline_diamond)
 plot(show_pdh_pdl ? PDL : na, "PDL", color=color.new(#66bb6a, 35), linewidth=1, style=plot.style_stepline_diamond)
-
-// M B&R level dots
-plot(show_br ? majorH : na, "B&R High (M)", color=color.new(#ffb300, 50), linewidth=1, style=plot.style_cross)
-plot(show_br ? majorL : na, "B&R Low  (M)", color=color.new(#ffb300, 50), linewidth=1, style=plot.style_cross)
 
 // C Pivot markers
 plotshape(show_pivots and not na(ph), "Pivot High (C)", style=shape.triangledown,
@@ -525,19 +440,6 @@ if barstate.islast
                          text_color  =color.new(#00e676, 10),
                          text_size=size.tiny, text_halign=text.align_left)
             array.push(fvgBoxes, _b)
-            if show_ob
-                obBarI = array.get(bOB_bar, i)
-                obHi   = array.get(bOB_hi,  i)
-                obLo   = array.get(bOB_lo,  i)
-                if not na(obBarI) and not na(obHi)
-                    _ob = box.new(obBarI, obHi, bar_index + 20, obLo,
-                                  border_color=color.new(#2196f3, 25),
-                                  bgcolor     =color.new(#2196f3, 88),
-                                  border_width=1,
-                                  text        =" OB (G)",
-                                  text_color  =color.new(#2196f3, 10),
-                                  text_size=size.tiny, text_halign=text.align_left)
-                    array.push(fvgBoxes, _ob)
 
     if show_fvg and array.size(rFVG_top) > 0
         for i = 0 to array.size(rFVG_top) - 1
@@ -553,19 +455,6 @@ if barstate.islast
                          text_color  =color.new(#ff1744, 10),
                          text_size=size.tiny, text_halign=text.align_left)
             array.push(fvgBoxes, _b)
-            if show_ob
-                obBarI = array.get(rOB_bar, i)
-                obHi   = array.get(rOB_hi,  i)
-                obLo   = array.get(rOB_lo,  i)
-                if not na(obBarI) and not na(obHi)
-                    _ob = box.new(obBarI, obHi, bar_index + 20, obLo,
-                                  border_color=color.new(#9c27b0, 25),
-                                  bgcolor     =color.new(#9c27b0, 88),
-                                  border_width=1,
-                                  text        =" OB (G)",
-                                  text_color  =color.new(#9c27b0, 10),
-                                  text_size=size.tiny, text_halign=text.align_left)
-                    array.push(fvgBoxes, _ob)
 
 // ════════════════════════════════════════════════════════════════════════════
 // BOXES — PDH/PDL ZONES (U)
@@ -590,11 +479,11 @@ if show_pdh_pdl and barstate.islast
 // SIGNAL LABELS  (appear when a new signal triggers)
 // ════════════════════════════════════════════════════════════════════════════
 if show_signals and sig_l and not sig_l[1]
-    codes = (A_long?"A":"")+(B_long?"B":"")+(C_long?"C":"")+(F_long?"F":"")+(G_long?"G":"")+(M_long?"M":"")+(S_long?"S":"")+(T_long?"T":"")+(U_long?"U":"")
+    codes = (A_long?"A":"")+(C_long?"C":"")+(F_long?"F":"")+(T_long?"T":"")+(U_long?"U":"")
     _l = label.new(bar_index, low - atr14 * 0.8, "▲ LONG  " + str.tostring(score_l) + " pts\n[" + codes + "]", style=label.style_label_up, color=color.new(#00c853, 10), textcolor=color.white, size=size.normal)
 
 if show_signals and sig_s and not sig_s[1]
-    codes = (A_short?"A":"")+(B_short?"B":"")+(C_short?"C":"")+(F_short?"F":"")+(G_short?"G":"")+(M_short?"M":"")+(S_short?"S":"")+(T_short?"T":"")+(U_short?"U":"")
+    codes = (A_short?"A":"")+(C_short?"C":"")+(F_short?"F":"")+(T_short?"T":"")+(U_short?"U":"")
     _l = label.new(bar_index, high + atr14 * 0.8, "▼ SHORT  " + str.tostring(score_s) + " pts\n[" + codes + "]", style=label.style_label_down, color=color.new(#d50000, 10), textcolor=color.white, size=size.normal)
 
 // Background flash on new signal
@@ -610,7 +499,7 @@ if show_table and barstate.islast
           tbl_pos == "bottom_right" ? position.bottom_right :
                                       position.bottom_left
 
-    t = table.new(pos, 4, 14,
+    t = table.new(pos, 4, 10,
                   bgcolor      = color.new(#0d1117, 5),
                   frame_color  = color.new(#30363d, 0), frame_width = 2,
                   border_color = color.new(#30363d, 50), border_width = 1)
@@ -638,74 +527,54 @@ if show_table and barstate.islast
     table.cell(t, 2, 1, A_long  ? "✓ +1" : "✗", bgcolor=A_long  ? metL : none, text_color=color.white, text_size=size.small)
     table.cell(t, 3, 1, A_short ? "✓ +1" : "✗", bgcolor=A_short ? metS : none, text_color=color.white, text_size=size.small)
 
-    table.cell(t, 0, 2, "B  EMA Stack",     bgcolor=row0, text_color=color.white,  text_size=size.small)
+    table.cell(t, 0, 2, "T  Weekly [REQ]",  bgcolor=row0, text_color=color.white,  text_size=size.small)
     table.cell(t, 1, 2, "TREND",            bgcolor=row0, text_color=trndC,         text_size=size.tiny)
-    table.cell(t, 2, 2, B_long  ? "✓ +1" : "✗", bgcolor=B_long  ? metL : none, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 2, B_short ? "✓ +1" : "✗", bgcolor=B_short ? metS : none, text_color=color.white, text_size=size.small)
-
-    table.cell(t, 0, 3, "S  Daily Trend",   bgcolor=row0, text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 3, "TREND",            bgcolor=row0, text_color=trndC,         text_size=size.tiny)
-    table.cell(t, 2, 3, S_long  ? "✓ +1" : "✗", bgcolor=S_long  ? metL : none, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 3, S_short ? "✓ +1" : "✗", bgcolor=S_short ? metS : none, text_color=color.white, text_size=size.small)
-
-    table.cell(t, 0, 4, "T  Weekly [REQ]",  bgcolor=row0, text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 4, "TREND",            bgcolor=row0, text_color=trndC,         text_size=size.tiny)
-    table.cell(t, 2, 4, T_long  ? "✓ +1" : "✗ REQ", bgcolor=T_long  ? metL : reqFail, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 4, T_short ? "✓ +1" : "✗ REQ", bgcolor=T_short ? metS : reqFail, text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 2, T_long  ? "✓ +1" : "✗ REQ", bgcolor=T_long  ? metL : reqFail, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 2, T_short ? "✓ +1" : "✗ REQ", bgcolor=T_short ? metS : reqFail, text_color=color.white, text_size=size.small)
 
     // ── S&R ──
-    table.cell(t, 0, 5, "C  S/R Zone",      bgcolor=row0, text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 5, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)
-    table.cell(t, 2, 5, C_long  ? "✓ +" + str.tostring(C_pts_l) : "✗", bgcolor=C_long  ? metL : none, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 5, C_short ? "✓ +" + str.tostring(C_pts_s) : "✗", bgcolor=C_short ? metS : none, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 3, "C  S/R Zone",      bgcolor=row0, text_color=color.white,  text_size=size.small)
+    table.cell(t, 1, 3, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)
+    table.cell(t, 2, 3, C_long  ? "✓ +" + str.tostring(C_pts_l) : "✗", bgcolor=C_long  ? metL : none, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 3, C_short ? "✓ +" + str.tostring(C_pts_s) : "✗", bgcolor=C_short ? metS : none, text_color=color.white, text_size=size.small)
 
-    table.cell(t, 0, 6, "M  Break & Retest",bgcolor=row0, text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 6, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)
-    table.cell(t, 2, 6, M_long  ? "✓ +1" : "✗", bgcolor=M_long  ? metL : none, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 6, M_short ? "✓ +1" : "✗", bgcolor=M_short ? metS : none, text_color=color.white, text_size=size.small)
-
-    table.cell(t, 0, 7, "U  PDH/PDL [REQ]", bgcolor=row0, text_color=color.white, text_size=size.small)
-    table.cell(t, 1, 7, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)
-    table.cell(t, 2, 7, U_long  ? "✓ +1" : "✗ REQ", bgcolor=U_long  ? metL : reqFail, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 7, U_short ? "✓ +1" : "✗ REQ", bgcolor=U_short ? metS : reqFail, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 4, "U  PDH/PDL [REQ]", bgcolor=row0, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 4, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)
+    table.cell(t, 2, 4, U_long  ? "✓ +1" : "✗ REQ", bgcolor=U_long  ? metL : reqFail, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 4, U_short ? "✓ +1" : "✗ REQ", bgcolor=U_short ? metS : reqFail, text_color=color.white, text_size=size.small)
 
     // ── FVG ──
-    table.cell(t, 0, 8, "F  FVG Zone",      bgcolor=row0, text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 8, "FVG",              bgcolor=row0, text_color=fvgC,          text_size=size.tiny)
-    table.cell(t, 2, 8, F_long  ? "✓ +2" : "✗", bgcolor=F_long  ? metL : none, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 8, F_short ? "✓ +2" : "✗", bgcolor=F_short ? metS : none, text_color=color.white, text_size=size.small)
-
-    table.cell(t, 0, 9, "G  Order Block",   bgcolor=row0, text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 9, "FVG",              bgcolor=row0, text_color=fvgC,          text_size=size.tiny)
-    table.cell(t, 2, 9, G_long  ? "✓ +1" : "✗", bgcolor=G_long  ? metL : none, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 9, G_short ? "✓ +1" : "✗", bgcolor=G_short ? metS : none, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 5, "F  FVG Zone",      bgcolor=row0, text_color=color.white,  text_size=size.small)
+    table.cell(t, 1, 5, "FVG",              bgcolor=row0, text_color=fvgC,          text_size=size.tiny)
+    table.cell(t, 2, 5, F_long  ? "✓ +2" : "✗", bgcolor=F_long  ? metL : none, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 5, F_short ? "✓ +2" : "✗", bgcolor=F_short ? metS : none, text_color=color.white, text_size=size.small)
 
     // ── EMA gate warning ──
     flatBg = emaFlat ? color.new(#92400e, 0) : color.new(#1c2127, 0)
     flatTx = emaFlat ? "⚠  EMA FLAT — no edge" : "EMA spread OK"
-    table.cell(t, 0, 10, flatTx,  bgcolor=flatBg, text_color=color.white, text_size=size.small)
-    table.cell(t, 1, 10, "",      bgcolor=flatBg, text_color=color.white, text_size=size.tiny)
-    table.cell(t, 2, 10, "",      bgcolor=flatBg, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 10, "",      bgcolor=flatBg, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 6, flatTx,  bgcolor=flatBg, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 6, "",      bgcolor=flatBg, text_color=color.white, text_size=size.tiny)
+    table.cell(t, 2, 6, "",      bgcolor=flatBg, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 6, "",      bgcolor=flatBg, text_color=color.white, text_size=size.small)
 
     // ── Score ──
-    sBgL = valid_l and score_l >= 8 ? metL : none
-    sBgS = valid_s and score_s >= 8 ? metS : none
-    table.cell(t, 0, 11, "SCORE  (threshold ≥ 8)", bgcolor=hBg, text_color=color.white, text_size=size.small)
-    table.cell(t, 1, 11, "max = 11",               bgcolor=hBg, text_color=#8b949e,     text_size=size.tiny)
-    table.cell(t, 2, 11, str.tostring(score_l) + (valid_l ? "" : "  (gate ✗)"), bgcolor=sBgL, text_color=color.white, text_size=size.normal)
-    table.cell(t, 3, 11, str.tostring(score_s) + (valid_s ? "" : "  (gate ✗)"), bgcolor=sBgS, text_color=color.white, text_size=size.normal)
+    sBgL = valid_l and score_l >= 6 ? metL : none
+    sBgS = valid_s and score_s >= 6 ? metS : none
+    table.cell(t, 0, 7, "SCORE  (threshold ≥ 6)", bgcolor=hBg, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 7, "max = 8",                bgcolor=hBg, text_color=#8b949e,     text_size=size.tiny)
+    table.cell(t, 2, 7, str.tostring(score_l) + (valid_l ? "" : "  (gate ✗)"), bgcolor=sBgL, text_color=color.white, text_size=size.normal)
+    table.cell(t, 3, 7, str.tostring(score_s) + (valid_s ? "" : "  (gate ✗)"), bgcolor=sBgS, text_color=color.white, text_size=size.normal)
 
     // ── Signal ──
     sigBgL = sig_l ? color.new(#2ea043, 0) : none
     sigBgS = sig_s ? color.new(#da3633, 0) : none
-    table.cell(t, 0, 12, "SIGNAL",           bgcolor=hBg, text_color=color.white, text_size=size.small)
-    table.cell(t, 1, 12, "T + U + score ≥ 8",bgcolor=hBg, text_color=#8b949e,    text_size=size.tiny)
-    table.cell(t, 2, 12, sig_l ? "▲  TRADE" : "—", bgcolor=sigBgL, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 12, sig_s ? "▼  TRADE" : "—", bgcolor=sigBgS, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 8, "SIGNAL",           bgcolor=hBg, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 8, "T + U + score ≥ 6",bgcolor=hBg, text_color=#8b949e,    text_size=size.tiny)
+    table.cell(t, 2, 8, sig_l ? "▲  TRADE" : "—", bgcolor=sigBgL, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 8, sig_s ? "▼  TRADE" : "—", bgcolor=sigBgS, text_color=color.white, text_size=size.small)
 
     // ── Price info ──
-    table.cell(t, 0, 13, "PDH/PDL",              bgcolor=row0, text_color=#8b949e,   text_size=size.tiny)
-    table.cell(t, 1, 13, "Pos in range",          bgcolor=row0, text_color=#8b949e,   text_size=size.tiny)
-    table.cell(t, 2, 13, str.tostring(math.round(PDL, 4)), bgcolor=row0, text_color=color.new(#66bb6a, 0), text_size=size.tiny)
-    table.cell(t, 3, 13, str.tostring(math.round(PDH, 4)), bgcolor=row0, text_color=color.new(#ef5350, 0), text_size=size.tiny)
+    table.cell(t, 0, 9, "PDH/PDL",              bgcolor=row0, text_color=#8b949e,   text_size=size.tiny)
+    table.cell(t, 1, 9, "Pos in range",          bgcolor=row0, text_color=#8b949e,   text_size=size.tiny)
+    table.cell(t, 2, 9, str.tostring(math.round(PDL, 4)), bgcolor=row0, text_color=color.new(#66bb6a, 0), text_size=size.tiny)
+    table.cell(t, 3, 9, str.tostring(math.round(PDH, 4)), bgcolor=row0, text_color=color.new(#ef5350, 0), text_size=size.tiny)

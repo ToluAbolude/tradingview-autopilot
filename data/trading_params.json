@@ -2,7 +2,7 @@
   "_note": "Tunable trading parameters. Apply changes via: node scripts/trading/apply_params.mjs --apply",
   "_lastUpdated": "2026-05-08",
   "_updatedBy": "manual",
-  "scoreThreshold": 8,
+  "scoreThreshold": 6,
   "stopRuleLosses": 2,
   "riskPct": [5.0, 3.5, 2.5],
   "slAtrMult": 0.75,
