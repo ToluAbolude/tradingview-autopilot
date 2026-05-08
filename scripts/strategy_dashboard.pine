@@ -206,13 +206,18 @@ if not na(ph)
 
 C_long  = false
 C_short = false
+C_pts_l = 0
+C_pts_s = 0
 
 if array.size(suppLvls) > 0
     for i = 0 to math.min(array.size(suppLvls) - 1, 7)
         zBot = array.get(suppLvls, i)
         zTop = array.get(suppBody, i)
         if close >= zBot and close <= zTop
-            C_long := true
+            C_long  := true
+            rt = array.get(suppRetests, i)
+            C_pts_l := rt > 0 ? 3 : 2
+            break
 
 if array.size(resLvls) > 0
     for i = 0 to math.min(array.size(resLvls) - 1, 7)
@@ -220,6 +225,9 @@ if array.size(resLvls) > 0
         zBot = array.get(resBody, i)
         if close >= zBot and close <= zTop
             C_short := true
+            rt = array.get(resRetests, i)
+            C_pts_s := rt > 0 ? 3 : 2
+            break
 
 // ════════════════════════════════════════════════════════════════════════════
 // F  FAIR VALUE GAP (FVG) ZONE + G  ORDER BLOCK
@@ -346,16 +354,17 @@ if array.size(rFVG_top) > 0
                 G_short := true
 
 // ════════════════════════════════════════════════════════════════════════════
-// SCORING  (max base = 11 + convergence bonus)
+// SCORING  (max base = 12 + convergence bonus)
 // Required gates: T + U must both be met, and EMA must not be flat.
 // Signal threshold: ≥ 8 points (A-grade only).
+// C = +2 fresh zone, +3 retested zone (matches FVG weight tier)
 // ════════════════════════════════════════════════════════════════════════════
 score_l = (A_long  ? 1 : 0) + (B_long  ? 1 : 0) + (S_long  ? 1 : 0) + (T_long  ? 1 : 0) +
-          (C_long  ? 1 : 0) + (M_long  ? 1 : 0) + (U_long  ? 1 : 0) +
+          C_pts_l             + (M_long  ? 1 : 0) + (U_long  ? 1 : 0) +
           (F_long  ? 2 : 0) + (G_long  ? 1 : 0)
 
 score_s = (A_short ? 1 : 0) + (B_short ? 1 : 0) + (S_short ? 1 : 0) + (T_short ? 1 : 0) +
-          (C_short ? 1 : 0) + (M_short ? 1 : 0) + (U_short ? 1 : 0) +
+          C_pts_s             + (M_short ? 1 : 0) + (U_short ? 1 : 0) +
           (F_short ? 2 : 0) + (G_short ? 1 : 0)
 
 valid_l  = T_long  and U_long  and not emaFlat
@@ -647,8 +656,8 @@ if show_table and barstate.islast
     // ── S&R ──
     table.cell(t, 0, 5, "C  S/R Zone",      bgcolor=row0, text_color=color.white,  text_size=size.small)
     table.cell(t, 1, 5, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)
-    table.cell(t, 2, 5, C_long  ? "✓ +1" : "✗", bgcolor=C_long  ? metL : none, text_color=color.white, text_size=size.small)
-    table.cell(t, 3, 5, C_short ? "✓ +1" : "✗", bgcolor=C_short ? metS : none, text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 5, C_long  ? "✓ +" + str.tostring(C_pts_l) : "✗", bgcolor=C_long  ? metL : none, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 5, C_short ? "✓ +" + str.tostring(C_pts_s) : "✗", bgcolor=C_short ? metS : none, text_color=color.white, text_size=size.small)
 
     table.cell(t, 0, 6, "M  Break & Retest",bgcolor=row0, text_color=color.white,  text_size=size.small)
     table.cell(t, 1, 6, "S&R",              bgcolor=row0, text_color=srC,           text_size=size.tiny)

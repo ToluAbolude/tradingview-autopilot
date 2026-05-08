@@ -252,35 +252,19 @@ function detectFVGZones(bars, atr, lookback = 30) {
   return zones;
 }
 
-// ── Adaptive S/R Zones — faithful JS port of BigBeluga's Pine algorithm ──────
-// Params match BigBeluga defaults: pivotLen=5, minStrength=0.1, mergeThresh=0.5,
-// maxLevels=5 per type, maxAgeBars=300, breakSens=0.1
+// ── S/R Zones — wick-to-body supply/demand zones matching the Pine indicator ──
+// Resistance: zone top = pivot wick high, zone bottom = closest body top below it
+// Support:    zone top = closest body bottom above it, zone bottom = pivot wick low
+// Retest dedup: new pivot inside existing zone increments retests instead of new zone
+// Break: body close beyond wick tip; Flip: retest + hold from other side
 function buildSRZones(bars, atr, {
-  pivotLen    = 5,
-  minStrength = 0.1,
-  maxAgeBars  = 300,
-  maxLevels   = 5,
-  mergeThresh = 0.5,
-  breakSens   = 0.1,
+  pivotLen = 5,
+  maxSR    = 5,
 } = {}) {
   const n = bars.length - 1;
   const currentATR = atr[n] || 1;
-  const breakBuf   = breakSens * currentATR;
 
-  // f_pivotStrong: BigBeluga checks only the two bars immediately adjacent to the
-  // pivot (high[pivotLen-1] and high[pivotLen+1] in Pine), not the full window.
-  function isStrong(price, type, idx) {
-    if (idx <= 0 || idx >= n) return false;
-    const localATR = atr[idx] || currentATR;
-    if (type === 'resistance') {
-      const nearHigh = Math.max(bars[idx - 1].h, bars[idx + 1].h);
-      return (price - nearHigh) >= minStrength * localATR;
-    }
-    const nearLow = Math.min(bars[idx - 1].l, bars[idx + 1].l);
-    return (nearLow - price) >= minStrength * localATR;
-  }
-
-  // ta.pivothigh / ta.pivotlow: strictly highest/lowest in the full [i-L .. i+L] window
+  // Strictly highest/lowest in full [i-L .. i+L] window (matches ta.pivothigh/ta.pivotlow)
   const pivotHighs = [], pivotLows = [];
   for (let i = pivotLen; i <= n - pivotLen; i++) {
     const ph = bars[i].h;
@@ -288,52 +272,94 @@ function buildSRZones(bars, atr, {
     for (let j = i - pivotLen; j <= i + pivotLen; j++) {
       if (j !== i && bars[j].h >= ph) { hi = false; break; }
     }
-    if (hi && isStrong(ph, 'resistance', i)) pivotHighs.push({ price: ph, idx: i });
+    if (hi) pivotHighs.push({ wickTip: ph, idx: i });
 
     const pl = bars[i].l;
     let lo = true;
     for (let j = i - pivotLen; j <= i + pivotLen; j++) {
       if (j !== i && bars[j].l <= pl) { lo = false; break; }
     }
-    if (lo && isStrong(pl, 'support', i)) pivotLows.push({ price: pl, idx: i });
+    if (lo) pivotLows.push({ wickTip: pl, idx: i });
   }
 
-  // f_isTooClose / f_addLevel: reject new pivot if within mergeThresh×ATR of any
-  // active level of the same type; otherwise add (respecting maxLevels cap).
-  // When rejected, increment the nearby level's touch count — that's multi-test strength.
-  function buildLevels(pivots, type) {
-    const levels = [];
+  // Build zones from oldest to newest; most-recent zones end up first after reversal
+  function buildZones(pivots, type, cap) {
+    const zones = [];
+    for (let p = 0; p < pivots.length; p++) {
+      const { wickTip, idx } = pivots[p];
 
-    for (const piv of pivots) {
-      const active = levels.filter(z => !z.broken);
-      const nearby = active.find(z => Math.abs(z.price - piv.price) < mergeThresh * currentATR);
-      if (nearby) {
-        nearby.touches++;
-        if (piv.idx > nearby.idx) nearby.idx = piv.idx;
-      } else if (active.length < maxLevels) {
-        levels.push({ price: piv.price, idx: piv.idx, type, touches: 1, broken: false });
+      if (type === 'resistance') {
+        // Check retest: pivot high falls inside existing resistance zone
+        const hit = zones.find(z => !z.broken && wickTip >= z.bodyLevel && wickTip <= z.wickTip);
+        if (hit) { hit.retests++; continue; }
+
+        // Find closest body top below wick tip among bars from pivot to n
+        let bodyLevel = null, minDist = Infinity;
+        for (let k = idx; k <= n; k++) {
+          const bt = Math.max(bars[k].o, bars[k].c);
+          const d  = wickTip - bt;
+          if (d >= 0 && d < minDist) { minDist = d; bodyLevel = bt; }
+        }
+        if (bodyLevel === null) bodyLevel = Math.max(bars[idx].o, bars[idx].c);
+        if (zones.filter(z => !z.broken).length < cap)
+          zones.push({ wickTip, bodyLevel, type, bar: idx, retests: 0, broken: false, flipped: false });
+
+      } else {
+        // Support: check retest — pivot low falls inside existing support zone
+        const hit = zones.find(z => !z.broken && wickTip >= z.wickTip && wickTip <= z.bodyLevel);
+        if (hit) { hit.retests++; continue; }
+
+        // Find closest body bottom above wick tip among bars from pivot to n
+        let bodyLevel = null, minDist = Infinity;
+        for (let k = idx; k <= n; k++) {
+          const bb = Math.min(bars[k].o, bars[k].c);
+          const d  = bb - wickTip;
+          if (d >= 0 && d < minDist) { minDist = d; bodyLevel = bb; }
+        }
+        if (bodyLevel === null) bodyLevel = Math.min(bars[idx].o, bars[idx].c);
+        if (zones.filter(z => !z.broken).length < cap)
+          zones.push({ wickTip, bodyLevel, type, bar: idx, retests: 0, broken: false, flipped: false });
       }
     }
-
-    // Breakout + age pruning (BigBeluga: close crosses price by breakSens×ATR)
-    for (const lvl of levels) {
-      if (n - lvl.idx > maxAgeBars) { lvl.broken = true; continue; }
-      for (let i = lvl.idx + 1; i <= n; i++) {
-        if (type === 'resistance' && bars[i].c > lvl.price + breakBuf) { lvl.broken = true; break; }
-        if (type === 'support'    && bars[i].c < lvl.price - breakBuf) { lvl.broken = true; break; }
-      }
-    }
-
-    return levels;
+    return zones;
   }
 
-  const allRes = buildLevels(pivotHighs, 'resistance');
-  const allSup = buildLevels(pivotLows,  'support');
-  const all    = [...allRes, ...allSup];
+  const capR = Math.ceil(maxSR / 2);
+  const capS = maxSR - capR;
+  const resZones  = buildZones(pivotHighs, 'resistance', capR);
+  const suppZones = buildZones(pivotLows,  'support',    capS);
 
+  // Break detection: body close beyond wick tip
+  for (const z of resZones) {
+    for (let i = z.bar + 1; i <= n; i++) {
+      if (Math.min(bars[i].o, bars[i].c) > z.wickTip) { z.broken = true; break; }
+    }
+  }
+  for (const z of suppZones) {
+    for (let i = z.bar + 1; i <= n; i++) {
+      if (Math.max(bars[i].o, bars[i].c) < z.wickTip) { z.broken = true; break; }
+    }
+  }
+
+  // Flip confirmation: price retests broken zone from other side and close holds
+  for (const z of resZones) {
+    if (!z.broken) continue;
+    for (let i = z.bar + 1; i <= n; i++) {
+      if (bars[i].l <= z.wickTip && bars[i].c > z.bodyLevel) { z.flipped = true; break; }
+    }
+  }
+  for (const z of suppZones) {
+    if (!z.broken) continue;
+    for (let i = z.bar + 1; i <= n; i++) {
+      if (bars[i].h >= z.wickTip && bars[i].c < z.bodyLevel) { z.flipped = true; break; }
+    }
+  }
+
+  const all = [...resZones, ...suppZones];
   return {
     active: all.filter(z => !z.broken),
-    broken: all.filter(z =>  z.broken),
+    broken: all.filter(z =>  z.broken && !z.flipped),
+    flipped: all.filter(z => z.flipped),
     currentATR,
   };
 }
@@ -438,20 +464,20 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     score++; reasons.push('EMA stack aligned'); strats.push('B');
   }
 
-  // ── C. Adaptive S/R Zone — price inside zone region (ATR-width band around pivot) ──
-  // Zone treated as a region: price anywhere within ±0.5×ATR of the pivot qualifies.
-  // Multi-touch zones (3+ touches) score +2 — heavily proven institutional level.
+  // ── C. S/R Zone (wick-to-body) — price inside supply/demand zone ──
+  // +2 for fresh zone, +3 for zone with retests (proven institutional level)
+  // Matches the Pine indicator: resistance=[bodyLevel, wickTip], support=[wickTip, bodyLevel]
   {
-    const zoneHalfWidth = srZones.currentATR * 0.5;
-    const activeZone = srZones.active.find(z =>
-      last.c >= z.price - zoneHalfWidth && last.c <= z.price + zoneHalfWidth &&
-      ((z.type === 'support' && dir === 'long') || (z.type === 'resistance' && dir === 'short'))
-    );
+    const activeZone = srZones.active.find(z => {
+      if (z.type === 'support'    && dir === 'long')  return last.c >= z.wickTip    && last.c <= z.bodyLevel;
+      if (z.type === 'resistance' && dir === 'short') return last.c >= z.bodyLevel  && last.c <= z.wickTip;
+      return false;
+    });
     if (activeZone) {
-      const pts = activeZone.touches >= 3 ? 2 : 1;
-      const strength = activeZone.touches >= 3 ? `${activeZone.touches}-touch` : activeZone.touches >= 2 ? '2-touch' : 'fresh';
+      const pts = activeZone.retests > 0 ? 3 : 2;
+      const strength = activeZone.retests > 0 ? `${activeZone.retests}-retest` : 'fresh';
       score += pts;
-      reasons.push(`S/R zone (${activeZone.type}) @${activeZone.price.toFixed(4)} ${strength} [±${zoneHalfWidth.toFixed(4)}]`);
+      reasons.push(`S/R zone (${activeZone.type}) wick=${activeZone.wickTip.toFixed(4)} body=${activeZone.bodyLevel.toFixed(4)} ${strength}`);
       strats.push('C');
     }
   }
@@ -475,12 +501,12 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 
     if (!strats.includes('M')) {
       const flipZone = srZones.broken.find(z =>
-        Math.abs(last.c - z.price) < tolerance &&
+        Math.abs(last.c - z.wickTip) < tolerance &&
         ((z.type === 'resistance' && dir === 'long') || (z.type === 'support' && dir === 'short'))
       );
       if (flipZone) {
         const role = flipZone.type === 'resistance' ? 'flipped → support' : 'flipped → resistance';
-        score++; reasons.push(`Zone flip: ${role} @${flipZone.price.toFixed(4)}`); strats.push('M');
+        score++; reasons.push(`Zone flip: ${role} @${flipZone.wickTip.toFixed(4)}`); strats.push('M');
       }
     }
   }
@@ -695,21 +721,21 @@ export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
       let sl;
       if (dir === 'long') {
         const supportsBelow = sr15.active
-          .filter(z => z.type === 'support' && z.price < entry
-                    && (entry - z.price) >= atrVal * 0.5
-                    && (entry - z.price) <= atrVal * 1.5)
-          .sort((a, b) => b.price - a.price);
+          .filter(z => z.type === 'support' && z.wickTip < entry
+                    && (entry - z.wickTip) >= atrVal * 0.5
+                    && (entry - z.wickTip) <= atrVal * 1.5)
+          .sort((a, b) => b.wickTip - a.wickTip);
         sl = supportsBelow.length > 0
-          ? supportsBelow[0].price - slBuf
+          ? supportsBelow[0].wickTip - slBuf
           : entry - atrVal * slAtrMult;
       } else {
         const resistsAbove = sr15.active
-          .filter(z => z.type === 'resistance' && z.price > entry
-                    && (z.price - entry) >= atrVal * 0.5
-                    && (z.price - entry) <= atrVal * 1.5)
-          .sort((a, b) => a.price - b.price);
+          .filter(z => z.type === 'resistance' && z.wickTip > entry
+                    && (z.wickTip - entry) >= atrVal * 0.5
+                    && (z.wickTip - entry) <= atrVal * 1.5)
+          .sort((a, b) => a.wickTip - b.wickTip);
         sl = resistsAbove.length > 0
-          ? resistsAbove[0].price + slBuf
+          ? resistsAbove[0].wickTip + slBuf
           : entry + atrVal * slAtrMult;
       }
 
@@ -729,32 +755,32 @@ export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
       let tp2;
       if (dir === 'long') {
         const resistsAhead = sr15.active
-          .filter(z => z.type === 'resistance' && z.price > entry
-                    && (z.price - entry) >= slDist * 0.5
-                    && (z.price - entry) <= slDist * 2.5)
-          .sort((a, b) => a.price - b.price);
-        tp2 = resistsAhead.length > 0 ? resistsAhead[0].price : entry + slDist;
+          .filter(z => z.type === 'resistance' && z.wickTip > entry
+                    && (z.wickTip - entry) >= slDist * 0.5
+                    && (z.wickTip - entry) <= slDist * 2.5)
+          .sort((a, b) => a.wickTip - b.wickTip);
+        tp2 = resistsAhead.length > 0 ? resistsAhead[0].wickTip : entry + slDist;
       } else {
         const supportsAhead = sr15.active
-          .filter(z => z.type === 'support' && z.price < entry
-                    && (entry - z.price) >= slDist * 0.5
-                    && (entry - z.price) <= slDist * 2.5)
-          .sort((a, b) => b.price - a.price);
-        tp2 = supportsAhead.length > 0 ? supportsAhead[0].price : entry - slDist;
+          .filter(z => z.type === 'support' && z.wickTip < entry
+                    && (entry - z.wickTip) >= slDist * 0.5
+                    && (entry - z.wickTip) <= slDist * 2.5)
+          .sort((a, b) => b.wickTip - a.wickTip);
+        tp2 = supportsAhead.length > 0 ? supportsAhead[0].wickTip : entry - slDist;
       }
 
       // TP2 (tp3): next S/R level beyond tp2 (runner); fall back to 2R
       let tp3;
       if (dir === 'long') {
         const resistsBeyond = sr15.active
-          .filter(z => z.type === 'resistance' && z.price > tp2 + slDist * 0.3)
-          .sort((a, b) => a.price - b.price);
-        tp3 = resistsBeyond.length > 0 ? resistsBeyond[0].price : entry + slDist * 2.0;
+          .filter(z => z.type === 'resistance' && z.wickTip > tp2 + slDist * 0.3)
+          .sort((a, b) => a.wickTip - b.wickTip);
+        tp3 = resistsBeyond.length > 0 ? resistsBeyond[0].wickTip : entry + slDist * 2.0;
       } else {
         const supportsBeyond = sr15.active
-          .filter(z => z.type === 'support' && z.price < tp2 - slDist * 0.3)
-          .sort((a, b) => b.price - a.price);
-        tp3 = supportsBeyond.length > 0 ? supportsBeyond[0].price : entry - slDist * 2.0;
+          .filter(z => z.type === 'support' && z.wickTip < tp2 - slDist * 0.3)
+          .sort((a, b) => b.wickTip - a.wickTip);
+        tp3 = supportsBeyond.length > 0 ? supportsBeyond[0].wickTip : entry - slDist * 2.0;
       }
 
       let actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
@@ -764,9 +790,9 @@ export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
       if (actualRR < 2.0) {
         const minTP = dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0;
         const furtherSR = dir === 'long'
-          ? sr15.active.filter(z => z.type === 'resistance' && z.price > minTP && (z.price - entry) <= slDist * 2.5).sort((a, b) => a.price - b.price)[0]
-          : sr15.active.filter(z => z.type === 'support' && z.price < minTP && (entry - z.price) <= slDist * 2.5).sort((a, b) => b.price - a.price)[0];
-        tp2 = furtherSR ? furtherSR.price : minTP;
+          ? sr15.active.filter(z => z.type === 'resistance' && z.wickTip > minTP && (z.wickTip - entry) <= slDist * 2.5).sort((a, b) => a.wickTip - b.wickTip)[0]
+          : sr15.active.filter(z => z.type === 'support' && z.wickTip < minTP && (entry - z.wickTip) <= slDist * 2.5).sort((a, b) => b.wickTip - a.wickTip)[0];
+        tp2 = furtherSR ? furtherSR.wickTip : minTP;
         actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
         if (actualRR < 2.0) {
           process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — R:R ${actualRR.toFixed(1)} < 2.0, no viable TP, skipping\n`);
