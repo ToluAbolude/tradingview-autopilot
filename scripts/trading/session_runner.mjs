@@ -32,7 +32,7 @@ const LOG_FILE = join(LOG_DIR, 'trades.csv');
 const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
 const PARAMS = existsSync(PARAMS_FILE)
   ? JSON.parse(readFileSync(PARAMS_FILE, 'utf8'))
-  : { scoreThreshold: 8, stopRuleLosses: 2, riskPct: [3.5, 2.5, 1.75], slAtrMult: 1.5, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
+  : { scoreThreshold: 6, stopRuleLosses: 2, riskPct: [5.0, 3.5, 2.5], slAtrMult: 1.5, minRR: 2.0, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
 
 function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
 
@@ -271,14 +271,14 @@ async function main() {
   log('Scanning instruments for setups...');
   let setups;
   try {
-    setups = await scanForSetups(PARAMS.scoreThreshold || 8, PARAMS.slAtrMult || 1.5);
+    setups = await scanForSetups(PARAMS.scoreThreshold || 6, PARAMS.slAtrMult || 1.5);
   } catch(e) {
     log(`Scan error: ${e.message}`);
     return;
   }
 
   if (setups.length === 0) {
-    log('No qualifying setups found (score < 9 or T+U gate not met). Skipping.');
+    log('No qualifying setups found (score < 6, T+U gate, or R:R < 2.0). Skipping.');
     logTrade({ session, symbol: 'NONE', tf: '-', direction: '-', score: 0, entry: 0, sl: 0, tp: 0, rr: 0, notes: 'no setup' });
     return;
   }
@@ -384,7 +384,7 @@ async function main() {
   //    O2: 1/2 risk at 2.0R runner (closed at EOD if not hit — never overnight)
   let totalPlaced = 0;
   for (const best of dedupedSelected) {
-    const riskPct  = best.score >= 12 ? baseRisk + 0.5 : baseRisk;
+    const riskPct  = best.score >= 8 ? baseRisk + 0.5 : baseRisk;
     const totalLots = calcLots(best.label, riskPct, equity, best.entry, best.sl);
     const halfLots  = Math.max(0.01, Math.floor((totalLots / 2) / LOT_STEP) * LOT_STEP);
     const sym       = best.sym.replace('BLACKBULL:', '');
