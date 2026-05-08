@@ -28,18 +28,24 @@ const DATA_ROOT = IS_LINUX
 const LOG_DIR  = join(DATA_ROOT, 'trade_log');
 const LOG_FILE = join(LOG_DIR, 'trades.csv');
 
-// ── Lock file — one runner at a time ──
+// ── PID lock — one runner at a time ──
+// Writes own PID to lock file. On startup, checks if the recorded PID is still alive.
+// This is crash-safe: if the process dies the PID is gone and the lock is auto-stale.
 const LOCK_FILE = join(DATA_ROOT, 'session_runner.lock');
-const LOCK_MAX_AGE_MS = 15 * 60 * 1000; // 15 min — stale if older than one cron interval
 
 function acquireLock() {
   if (existsSync(LOCK_FILE)) {
-    const stat = readFileSync(LOCK_FILE, 'utf8').trim();
-    const age  = Date.now() - parseInt(stat, 10);
-    if (age < LOCK_MAX_AGE_MS) return false;  // another run is active
-    // Lock is stale — previous run crashed without cleaning up
+    const pid = parseInt(readFileSync(LOCK_FILE, 'utf8').trim(), 10);
+    if (!isNaN(pid)) {
+      try {
+        process.kill(pid, 0); // throws if process doesn't exist
+        return false;          // process is alive — another run is active
+      } catch (_) {
+        // process is dead — stale lock, safe to override
+      }
+    }
   }
-  writeFileSync(LOCK_FILE, String(Date.now()));
+  writeFileSync(LOCK_FILE, String(process.pid));
   return true;
 }
 

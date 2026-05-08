@@ -717,82 +717,100 @@ export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
       const sr15 = buildSRZones(bars15, atr15);
       const slBuf = atrVal * 0.10;   // 10% ATR buffer outside the zone
 
-      // SL: prefer nearest active S/R level beyond entry (0.5–1.5×ATR away); fall back to slAtrMult
+      // ── Day-trade caps: all levels must be reachable in 15–20 fifteen-minute candles ──
+      // Max SL = 0.75×ATR, Max TP = 2.0×ATR. Directional 15M moves cover ~0.15–0.4 ATR/candle,
+      // so TP at 2×ATR hits in 5–13 candles (1–3 hours). Always a day trade.
+      const MAX_SL_ATR = 0.75;
+      const MAX_TP_ATR = 2.0;
+
+      // SL: nearest S/R zone within 0.5–0.75×ATR; fall back to 0.75×ATR
       let sl;
       if (dir === 'long') {
         const supportsBelow = sr15.active
           .filter(z => z.type === 'support' && z.wickTip < entry
-                    && (entry - z.wickTip) >= atrVal * 0.5
-                    && (entry - z.wickTip) <= atrVal * 1.5)
+                    && (entry - z.wickTip) >= atrVal * 0.25
+                    && (entry - z.wickTip) <= atrVal * MAX_SL_ATR)
           .sort((a, b) => b.wickTip - a.wickTip);
         sl = supportsBelow.length > 0
           ? supportsBelow[0].wickTip - slBuf
-          : entry - atrVal * slAtrMult;
+          : entry - atrVal * MAX_SL_ATR;
       } else {
         const resistsAbove = sr15.active
           .filter(z => z.type === 'resistance' && z.wickTip > entry
-                    && (z.wickTip - entry) >= atrVal * 0.5
-                    && (z.wickTip - entry) <= atrVal * 1.5)
+                    && (z.wickTip - entry) >= atrVal * 0.25
+                    && (z.wickTip - entry) <= atrVal * MAX_SL_ATR)
           .sort((a, b) => a.wickTip - b.wickTip);
         sl = resistsAbove.length > 0
           ? resistsAbove[0].wickTip + slBuf
-          : entry + atrVal * slAtrMult;
+          : entry + atrVal * MAX_SL_ATR;
       }
 
-      // FVG-based SL — tighter boundary means more lots for same £ risk → bigger wins
-      // Only adopt if it's tighter AND not too close (≥ 0.25×ATR from entry)
+      // FVG-based SL: tighter if available (min 0.2×ATR so not stopped by spread noise)
       if (check15.activeFVG) {
         const fvg = check15.activeFVG;
         const fvgSL = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
         const fvgDist = Math.abs(entry - fvgSL);
         const curDist = Math.abs(entry - sl);
-        if (fvgDist < curDist && fvgDist >= atrVal * 0.25) sl = fvgSL;
+        if (fvgDist < curDist && fvgDist >= atrVal * 0.2) sl = fvgSL;
       }
+
+      // Hard cap: SL must not exceed MAX_SL_ATR × ATR from entry
+      if (dir === 'long' && entry - sl > atrVal * MAX_SL_ATR) sl = entry - atrVal * MAX_SL_ATR;
+      if (dir === 'short' && sl - entry > atrVal * MAX_SL_ATR) sl = entry + atrVal * MAX_SL_ATR;
 
       const slDist = Math.abs(entry - sl);
 
-      // TP1 (tp2): nearest opposing S/R level ahead of entry (0.5–2.5×slDist away); fall back to 1R
+      // TP1 (tp2): nearest opposing S/R zone (0.5–2.0×slDist away); fall back to 1R
       let tp2;
       if (dir === 'long') {
         const resistsAhead = sr15.active
           .filter(z => z.type === 'resistance' && z.wickTip > entry
                     && (z.wickTip - entry) >= slDist * 0.5
-                    && (z.wickTip - entry) <= slDist * 2.5)
+                    && (z.wickTip - entry) <= atrVal * MAX_TP_ATR)
           .sort((a, b) => a.wickTip - b.wickTip);
         tp2 = resistsAhead.length > 0 ? resistsAhead[0].wickTip : entry + slDist;
       } else {
         const supportsAhead = sr15.active
           .filter(z => z.type === 'support' && z.wickTip < entry
                     && (entry - z.wickTip) >= slDist * 0.5
-                    && (entry - z.wickTip) <= slDist * 2.5)
+                    && (entry - z.wickTip) <= atrVal * MAX_TP_ATR)
           .sort((a, b) => b.wickTip - a.wickTip);
         tp2 = supportsAhead.length > 0 ? supportsAhead[0].wickTip : entry - slDist;
       }
 
-      // TP2 (tp3): next S/R level beyond tp2 (runner); fall back to 2R
+      // Hard cap TP1 at MAX_TP_ATR × ATR from entry
+      if (dir === 'long'  && tp2 - entry  > atrVal * MAX_TP_ATR) tp2 = entry + atrVal * MAX_TP_ATR;
+      if (dir === 'short' && entry  - tp2  > atrVal * MAX_TP_ATR) tp2 = entry - atrVal * MAX_TP_ATR;
+
+      // TP2 (tp3): runner — next zone beyond tp2, capped at 2.5×ATR (still same-day reachable)
       let tp3;
       if (dir === 'long') {
         const resistsBeyond = sr15.active
-          .filter(z => z.type === 'resistance' && z.wickTip > tp2 + slDist * 0.3)
+          .filter(z => z.type === 'resistance' && z.wickTip > tp2 + slDist * 0.3
+                    && z.wickTip - entry <= atrVal * 2.5)
           .sort((a, b) => a.wickTip - b.wickTip);
-        tp3 = resistsBeyond.length > 0 ? resistsBeyond[0].wickTip : entry + slDist * 2.0;
+        tp3 = resistsBeyond.length > 0 ? resistsBeyond[0].wickTip : Math.min(entry + slDist * 2.0, entry + atrVal * 2.5);
       } else {
         const supportsBeyond = sr15.active
-          .filter(z => z.type === 'support' && z.wickTip < tp2 - slDist * 0.3)
+          .filter(z => z.type === 'support' && z.wickTip < tp2 - slDist * 0.3
+                    && entry - z.wickTip <= atrVal * 2.5)
           .sort((a, b) => b.wickTip - a.wickTip);
-        tp3 = supportsBeyond.length > 0 ? supportsBeyond[0].wickTip : entry - slDist * 2.0;
+        tp3 = supportsBeyond.length > 0 ? supportsBeyond[0].wickTip : Math.max(entry - slDist * 2.0, entry - atrVal * 2.5);
       }
 
       let actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
 
-      // Enforce minimum 2:1 R:R — one loss must not overshadow 2-3 winning trades.
-      // If the nearest S/R TP gives < 2R, widen to minimum 2R (or next S/R beyond it).
+      // Enforce minimum 2:1 R:R — push TP2 to 2×slDist if current zone is too close
       if (actualRR < 2.0) {
         const minTP = dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0;
-        const furtherSR = dir === 'long'
-          ? sr15.active.filter(z => z.type === 'resistance' && z.wickTip > minTP && (z.wickTip - entry) <= slDist * 2.5).sort((a, b) => a.wickTip - b.wickTip)[0]
-          : sr15.active.filter(z => z.type === 'support' && z.wickTip < minTP && (entry - z.wickTip) <= slDist * 2.5).sort((a, b) => b.wickTip - a.wickTip)[0];
-        tp2 = furtherSR ? furtherSR.wickTip : minTP;
+        // Only extend if it still stays within the day-trade cap
+        const minTPDist = Math.abs(minTP - entry);
+        if (minTPDist <= atrVal * MAX_TP_ATR) {
+          tp2 = minTP;
+        } else {
+          // Can't reach 2:1 within cap — take best possible within cap
+          tp2 = dir === 'long' ? entry + atrVal * MAX_TP_ATR : entry - atrVal * MAX_TP_ATR;
+        }
         actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
         if (actualRR < 2.0) {
           process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — R:R ${actualRR.toFixed(1)} < 2.0, no viable TP, skipping\n`);
