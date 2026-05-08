@@ -125,14 +125,18 @@ ph     = ta.pivothigh(high, pivLen, pivLen)
 pl     = ta.pivotlow(low,   pivLen, pivLen)
 zHW    = atr14 * 0.5   // zone half-width
 
-var float[] suppLvls    = array.new_float(0)
-var float[] suppBody    = array.new_float(0)
-var int[]   suppBars    = array.new_int(0)
-var int[]   suppRetests = array.new_int(0)
-var float[] resLvls     = array.new_float(0)
-var float[] resBody     = array.new_float(0)
-var int[]   resBars     = array.new_int(0)
-var int[]   resRetests  = array.new_int(0)
+var float[] suppLvls      = array.new_float(0)
+var float[] suppBody      = array.new_float(0)
+var int[]   suppBars      = array.new_int(0)
+var int[]   suppRetests   = array.new_int(0)
+var bool[]  suppBroken    = array.new_bool(0)   // close below wick tip = broken
+var bool[]  suppFlipped   = array.new_bool(0)   // retest confirmed → now resistance
+var float[] resLvls       = array.new_float(0)
+var float[] resBody       = array.new_float(0)
+var int[]   resBars       = array.new_int(0)
+var int[]   resRetests    = array.new_int(0)
+var bool[]  resBroken     = array.new_bool(0)   // close above wick tip = broken
+var bool[]  resFlipped    = array.new_bool(0)   // retest confirmed → now support
 
 if not na(pl)
     // Check if pl falls within any existing support zone → retest, not a new zone
@@ -149,9 +153,13 @@ if not na(pl)
             array.pop(suppBody)
             array.pop(suppBars)
             array.pop(suppRetests)
+            array.pop(suppBroken)
+            array.pop(suppFlipped)
         array.unshift(suppLvls, pl)
         array.unshift(suppBars, bar_index[pivLen])
         array.unshift(suppRetests, 0)
+        array.unshift(suppBroken, false)
+        array.unshift(suppFlipped, false)
         // Demand zone top = body bottom of candle AFTER pivot closest (downward) to wick tip
         _sbv = float(na)
         _sd  = float(na)
@@ -178,9 +186,13 @@ if not na(ph)
             array.pop(resBody)
             array.pop(resBars)
             array.pop(resRetests)
+            array.pop(resBroken)
+            array.pop(resFlipped)
         array.unshift(resLvls, ph)
         array.unshift(resBars, bar_index[pivLen])
         array.unshift(resRetests, 0)
+        array.unshift(resBroken, false)
+        array.unshift(resFlipped, false)
         // Supply zone bottom = body top of candle AFTER pivot closest (upward) to wick tip
         _rbv = float(na)
         _rd  = float(na)
@@ -387,7 +399,46 @@ plotshape(show_pivots and not na(pl), "Pivot Low  (C)", style=shape.triangleup,
           location=location.belowbar, color=color.new(#66bb6a, 0), size=size.tiny)
 
 // ════════════════════════════════════════════════════════════════════════════
-// BOXES — S/R + FVG ZONES  (delete-and-redraw on last bar; capped at maxSR + maxFVG each side)
+// ZONE POLARITY FLIP DETECTION
+// Phase 1 — Break: candle BODY closes beyond wick tip (not just a wick poke).
+// Phase 2 — Flip confirmed: price retests the zone AND the close holds on the
+//            new side (continuation confirmed).
+// ════════════════════════════════════════════════════════════════════════════
+
+// Resistance zones: break = body close above wick tip; flip = retest from above
+if array.size(resLvls) > 0
+    for _fi = 0 to array.size(resLvls) - 1
+        if not array.get(resFlipped, _fi)
+            _rWick = array.get(resLvls, _fi)
+            _rBody = array.get(resBody, _fi)
+            if not array.get(resBroken, _fi)
+                // Body close above wick tip = zone broken
+                if math.min(open, close) > _rWick
+                    array.set(resBroken, _fi, true)
+            else
+                // Already broken — confirm flip on retest:
+                // low touches the zone AND close holds above body level
+                if low <= _rWick and close > _rBody
+                    array.set(resFlipped, _fi, true)
+
+// Support zones: break = body close below wick tip; flip = retest from below
+if array.size(suppLvls) > 0
+    for _fi = 0 to array.size(suppLvls) - 1
+        if not array.get(suppFlipped, _fi)
+            _sWick = array.get(suppLvls, _fi)
+            _sBody = array.get(suppBody, _fi)
+            if not array.get(suppBroken, _fi)
+                // Body close below wick tip = zone broken
+                if math.max(open, close) < _sWick
+                    array.set(suppBroken, _fi, true)
+            else
+                // Already broken — confirm flip on retest:
+                // high touches the zone AND close holds below body level
+                if high >= _sWick and close < _sBody
+                    array.set(suppFlipped, _fi, true)
+
+// ════════════════════════════════════════════════════════════════════════════
+// BOXES — S/R + FVG ZONES  (delete-and-redraw on last bar; capped at maxSR total)
 // ════════════════════════════════════════════════════════════════════════════
 if barstate.islast
     // — delete old S/R boxes —
@@ -396,39 +447,52 @@ if barstate.islast
             box.delete(array.get(srBoxes, i))
     array.clear(srBoxes)
 
-    if show_pivots and array.size(resLvls) > 0
-        for i = 0 to array.size(resLvls) - 1
-            wickTop  = array.get(resLvls, i)
-            bodyTop  = array.get(resBody, i)
-            lbi      = array.get(resBars, i)
-            rtCount  = array.get(resRetests, i)
-            rtTxt    = rtCount > 0 ? " ↻ " + str.tostring(rtCount) + "× Retest" : " Resistance"
-            rtAlpha  = rtCount > 0 ? 75 : 88
-            rtBorder = rtCount > 0 ? 15 : 40
-            rtWidth  = rtCount > 0 ? 2 : 1
+    // Total cap: ceil(maxSR/2) resistance + remainder support = maxSR total
+    _halfR = (maxSR + 1) / 2
+    _capR  = math.min(array.size(resLvls), _halfR)
+    _capS  = math.min(array.size(suppLvls), maxSR - _capR)
+
+    if show_pivots and _capR > 0
+        for i = 0 to _capR - 1
+            wickTop   = array.get(resLvls, i)
+            bodyTop   = array.get(resBody, i)
+            lbi       = array.get(resBars, i)
+            rtCount   = array.get(resRetests, i)
+            isFlipped = array.get(resFlipped, i)
+            isBroken  = array.get(resBroken, i)
+            // Flipped → draw as support (green); broken (awaiting retest) → dimmed; normal → red
+            _zCol   = isFlipped ? #66bb6a : #ef5350
+            _alpha  = isFlipped ? 85 : isBroken ? 93 : rtCount > 0 ? 75 : 88
+            _bAlpha = isFlipped ? 15 : isBroken ? 60 : rtCount > 0 ? 15 : 40
+            _bWidth = isFlipped or rtCount > 0 ? 2 : 1
+            _lbl    = isFlipped ? " ↕ Flipped→Support" : isBroken ? " ⚡ Broken" : rtCount > 0 ? " ↻ " + str.tostring(rtCount) + "× Retest" : " Resistance"
             _b = box.new(lbi, wickTop, bar_index + 20, bodyTop,
-                         border_color=color.new(#ef5350, rtBorder),
-                         bgcolor     =color.new(#ef5350, rtAlpha),
-                         border_width=rtWidth,
-                         text=rtTxt, text_color=color.new(#ef5350, 10),
+                         border_color=color.new(_zCol, _bAlpha),
+                         bgcolor     =color.new(_zCol, _alpha),
+                         border_width=_bWidth,
+                         text=_lbl, text_color=color.new(_zCol, 10),
                          text_size=size.tiny, text_halign=text.align_left)
             array.push(srBoxes, _b)
 
-    if show_pivots and array.size(suppLvls) > 0
-        for i = 0 to array.size(suppLvls) - 1
-            wickBot  = array.get(suppLvls, i)
-            bodyBot  = array.get(suppBody, i)
-            lbi      = array.get(suppBars, i)
-            rtCount  = array.get(suppRetests, i)
-            rtTxt    = rtCount > 0 ? " ↻ " + str.tostring(rtCount) + "× Retest" : " Support"
-            rtAlpha  = rtCount > 0 ? 75 : 88
-            rtBorder = rtCount > 0 ? 15 : 40
-            rtWidth  = rtCount > 0 ? 2 : 1
+    if show_pivots and _capS > 0
+        for i = 0 to _capS - 1
+            wickBot   = array.get(suppLvls, i)
+            bodyBot   = array.get(suppBody, i)
+            lbi       = array.get(suppBars, i)
+            rtCount   = array.get(suppRetests, i)
+            isFlipped = array.get(suppFlipped, i)
+            isBroken  = array.get(suppBroken, i)
+            // Flipped → draw as resistance (red); broken → dimmed; normal → green
+            _zCol   = isFlipped ? #ef5350 : #66bb6a
+            _alpha  = isFlipped ? 85 : isBroken ? 93 : rtCount > 0 ? 75 : 88
+            _bAlpha = isFlipped ? 15 : isBroken ? 60 : rtCount > 0 ? 15 : 40
+            _bWidth = isFlipped or rtCount > 0 ? 2 : 1
+            _lbl    = isFlipped ? " ↕ Flipped→Resistance" : isBroken ? " ⚡ Broken" : rtCount > 0 ? " ↻ " + str.tostring(rtCount) + "× Retest" : " Support"
             _b = box.new(lbi, bodyBot, bar_index + 20, wickBot,
-                         border_color=color.new(#66bb6a, rtBorder),
-                         bgcolor     =color.new(#66bb6a, rtAlpha),
-                         border_width=rtWidth,
-                         text=rtTxt, text_color=color.new(#66bb6a, 10),
+                         border_color=color.new(_zCol, _bAlpha),
+                         bgcolor     =color.new(_zCol, _alpha),
+                         border_width=_bWidth,
+                         text=_lbl, text_color=color.new(_zCol, 10),
                          text_size=size.tiny, text_halign=text.align_left)
             array.push(srBoxes, _b)
 
