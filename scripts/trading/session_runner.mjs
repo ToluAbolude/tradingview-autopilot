@@ -13,7 +13,7 @@ import { scanForSetups } from './setup_finder.mjs';
 import { placeOrder, getEquity, closeAllPositions } from './execute_trade.mjs';
 import { fetchTwitterSignals, aggregateSignals } from './twitter_feed.mjs';
 import { analyzePerformance } from './performance_tracker.mjs';
-import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync } from 'fs';
+import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
@@ -27,6 +27,25 @@ const DATA_ROOT = IS_LINUX
   : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
 const LOG_DIR  = join(DATA_ROOT, 'trade_log');
 const LOG_FILE = join(LOG_DIR, 'trades.csv');
+
+// ── Lock file — one runner at a time ──
+const LOCK_FILE = join(DATA_ROOT, 'session_runner.lock');
+const LOCK_MAX_AGE_MS = 15 * 60 * 1000; // 15 min — stale if older than one cron interval
+
+function acquireLock() {
+  if (existsSync(LOCK_FILE)) {
+    const stat = readFileSync(LOCK_FILE, 'utf8').trim();
+    const age  = Date.now() - parseInt(stat, 10);
+    if (age < LOCK_MAX_AGE_MS) return false;  // another run is active
+    // Lock is stale — previous run crashed without cleaning up
+  }
+  writeFileSync(LOCK_FILE, String(Date.now()));
+  return true;
+}
+
+function releaseLock() {
+  try { unlinkSync(LOCK_FILE); } catch (_) {}
+}
 
 // Load tunable parameters from config file (falls back to safe defaults if missing)
 const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
@@ -172,6 +191,11 @@ function getOpenSymbols() {
 }
 
 async function main() {
+  if (!acquireLock()) {
+    log('Another session_runner is already active (lock file exists). Exiting.');
+    process.exit(0);
+  }
+
   const session = currentSession();
   log(`=== SESSION START: ${session} ===`);
 
@@ -435,4 +459,6 @@ async function main() {
   log(`\n=== SESSION END — ${totalPlaced} orders placed across ${dedupedSelected.length} instrument(s) ===\n`);
 }
 
-main().catch(e => { console.error('Fatal:', e.message); process.exit(1); });
+main()
+  .catch(e => { console.error('Fatal:', e.message); process.exit(1); })
+  .finally(() => releaseLock());
