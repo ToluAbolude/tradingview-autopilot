@@ -24,7 +24,7 @@ const TRADES_CSV    = join(DATA_ROOT, 'trade_log', 'trades.csv');
 const MONITOR_LOG   = join(DATA_ROOT, 'position_monitor.log');
 
 const POLL_MS        = 60_000;
-const MAX_HOURS      = 12;
+const MAX_HOURS      = 3;
 const MAX_TICKS      = (MAX_HOURS * 60 * 60 * 1000) / POLL_MS;
 const FIRST_DELAY_MS = 30_000;
 const EOD_CLOSE_HOUR = 20;  // UTC — force-close any open position at 20:00 (mirrors eod_close.mjs cron)
@@ -257,8 +257,19 @@ async function main() {
     if (state.balance != null) prevBalance = state.balance;
   }
 
-  log(`Max time (${MAX_HOURS}h) reached. Recording result=? for safety.`);
-  updateLastTrade('?', null, 'timeout');
+  log(`Max time (${MAX_HOURS}h) reached — forcing position close.`);
+  try {
+    const closeResult = await closeAllPositions();
+    log(`Force-close result: ${JSON.stringify(closeResult)}`);
+  } catch(e) { log(`Force-close error: ${e.message}`); }
+  await sleep(3000);
+  const finalState = await getPositionState().catch(() => null);
+  const delta = finalState?.balance != null && prevBalance != null
+    ? Math.round((finalState.balance - prevBalance) * 100) / 100
+    : null;
+  const result = delta != null ? (delta >= 0 ? 'W' : 'L') : '?';
+  updateLastTrade(result, delta, 'timeout_forced');
+  log(`Timeout force-close complete → result=${result} pnl=${delta}. Exiting.`);
 }
 
 main().catch(e => {

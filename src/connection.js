@@ -69,10 +69,20 @@ export async function connect() {
 }
 
 async function findChartTarget() {
+  // Read scanner tab ID so we never accidentally target the background scanner tab
+  let scannerTabId = null;
+  try {
+    const { readFileSync } = await import('fs');
+    scannerTabId = readFileSync('/tmp/.scanner_tab_id', 'utf8').trim();
+  } catch (_) {}
+
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
-  // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
+  const chartTargets = targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+
+  // Exclude the scanner's dedicated tab — prefer the user's visible chart
+  return chartTargets.find(t => t.id !== scannerTabId)
+    || chartTargets[0]
     || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
     || null;
 }

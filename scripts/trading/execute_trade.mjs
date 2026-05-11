@@ -3,7 +3,7 @@
  * Place, manage, and close trades on the BlackBull demo account via TradingView broker panel.
  * ALWAYS sets TP and SL on every order.
  */
-import { evaluate } from '../../src/connection.js';
+import { evaluate, getClient, getTargetInfo } from '../../src/connection.js';
 import { captureScreenshot } from '../../src/core/capture.js';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -16,7 +16,60 @@ export async function openTicket(symbol, direction = 'buy') {
       a.setSymbol('BLACKBULL:${symbol}', null, true);
     })()`);
     await sleep(1800);
+
+    // Verify the chart actually finished loading the correct symbol before clicking anything.
+    // Without this, a slow load leaves the previous symbol's ticket open and the trade fires
+    // on the wrong instrument.
+    const targetSym = symbol.toUpperCase();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const current = await evaluate(`(function(){
+        try { return window.TradingViewApi._activeChartWidgetWV.value().symbol(); }
+        catch(e) { return null; }
+      })()`);
+      if (current && current.toUpperCase().includes(targetSym)) break;
+      if (attempt === 4) throw new Error(`Symbol switch failed: chart shows "${current}", expected "${symbol}"`);
+      await sleep(800);
+    }
   }
+
+  // Bring Tab 1 (broker tab) to foreground so UI interactions land on the right target.
+  try {
+    const c = await getClient();
+    const tgt = await getTargetInfo();
+    if (tgt) await c.Target.activateTarget({ targetId: tgt.id });
+    await sleep(300);
+  } catch(_) {}
+
+  // Close any leftover order ticket from a prior placement before opening a fresh one.
+  // Without this, clicking buy/sell a second time (e.g. O2 after O1) can interact with
+  // the still-open O1 ticket instead of creating a new independent order.
+  await evaluate(`(function(){
+    var ticket = document.querySelector('[class*="orderTicket"]');
+    if (!ticket) return;
+    var selectors = ['[class*="close-"]', '[aria-label*="Close"]', '[aria-label*="close"]', '[class*="closeButton"]'];
+    for (var i = 0; i < selectors.length; i++) {
+      var btn = ticket.querySelector(selectors[i]);
+      if (btn && btn.offsetParent) { btn.click(); return; }
+    }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, keyCode: 27 }));
+  })()`);
+  await sleep(500);
+
+  // Ensure the trading panel (buy/sell buttons) is visible before clicking.
+  // If buttons are missing, try clicking the Trading panel tab to open it.
+  const panelState = await evaluate(`(function(){
+    if (document.querySelector('[data-name="buy-order-button"]') ||
+        document.querySelector('[data-name="sell-order-button"]')) return 'visible';
+    var btns = Array.from(document.querySelectorAll('button'));
+    var panel = btns.find(function(b){
+      var n = (b.getAttribute('data-name')||'').toLowerCase();
+      var a = (b.getAttribute('aria-label')||'').toLowerCase();
+      return n === 'trading' || a.includes('trading panel');
+    });
+    if (panel) { panel.click(); return 'opened'; }
+    return 'not_found';
+  })()`);
+  if (panelState !== 'visible') await sleep(1000);
 
   const isBuy = direction === 'buy' || direction === 'long';
   // Open ticket in the correct direction — buy-order-button for longs, sell-order-button for shorts
@@ -298,8 +351,20 @@ export async function placeOrder({
 
   // Open order ticket in correct direction (buy/sell mode)
   await openTicket(symbol, direction);
-  const ticket = await waitForTicket(10);
-  if (!ticket) throw new Error('Order ticket not found after 10s. Is TradingView connected?');
+  let ticket = await waitForTicket(10);
+  if (!ticket) {
+    // One retry — re-click the buy/sell button in case the first click missed
+    const retryBtn = (direction === 'buy' || direction === 'long')
+      ? '[data-name="buy-order-button"]' : '[data-name="sell-order-button"]';
+    console.log(`  Ticket not found — retrying button click...`);
+    await evaluate(`(function(){
+      var btn = document.querySelector('${retryBtn}');
+      if (btn && btn.offsetParent) btn.click();
+    })()`);
+    await sleep(800);
+    ticket = await waitForTicket(8);
+  }
+  if (!ticket) throw new Error('Order ticket not found after retry. Is TradingView connected?');
 
   console.log(`  Ticket: bid=${ticket.sell} ask=${ticket.buy}`);
 

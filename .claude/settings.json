@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wait)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/tmp/tv_after.jpg \"/c/Users/Tda-d/AppData/Local/Temp/tv_after.jpg\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/tmp/tv_done.jpg \"/c/Users/Tda-d/AppData/Local/Temp/tv_done.jpg\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/tmp/tv_final2.jpg \"/c/Users/Tda-d/AppData/Local/Temp/tv_final2.jpg\")",
+      "Bash(powershell.exe -Command \"Stop-Process -Name chrome -Force -ErrorAction SilentlyContinue; Start-Sleep 2; echo 'Chrome closed'\")",
+      "Bash(powershell.exe -Command ' *)",
+      "Bash(curl -s http://localhost:9223/json/list)",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\)\\); d.forEach\\(t=>console.log\\(t.type, t.url?.substring\\(0,80\\)\\)\\)\")",
+      "Bash(python3 -c \"import sys,json; [print\\(t['type'], t.get\\('url',''\\)[:80]\\) for t in json.load\\(sys.stdin\\)]\")",
+      "Bash(python3 -c \"import sys,json; targets=json.load\\(sys.stdin\\); print\\('VM tunnel OK:', any\\('tradingview' in t.get\\('url',''\\).lower\\(\\) for t in targets\\)\\)\")",
+      "Bash(node -e ' *)",
+      "Bash(node sync_cookies.mjs)",
+      "PowerShell(Get-Process chrome -ErrorAction SilentlyContinue)",
+      "PowerShell(head -5)",
+      "PowerShell(netstat -ano)",
+      "PowerShell(Get-Process -Id 21528)",
+      "PowerShell(Get-Process -Id 21528 -ErrorAction SilentlyContinue)",
+      "PowerShell(Start-Process powershell -ArgumentList \"-NoExit\", \"-File\", \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\proxy_tunnel.ps1\" -WindowStyle Normal)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/tmp/taskbar_check.png __TRACKED_VAR__/Downloads/taskbar_check.png)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/Users/Tda-d/tradingview-mcp-jackson/src/connection.js ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/src/connection.js)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/tmp/scan_running.png __TRACKED_VAR__/Downloads/scan_running.png)",
+      "PowerShell(scp -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\execute_trade.mjs\" \"ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/execute_trade.mjs\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"node --check /home/ubuntu/tradingview-mcp-jackson/scripts/trading/execute_trade.mjs && echo SYNTAX_OK\")",
+      "PowerShell(scp -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\setup_finder.mjs\" \"ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"node --check /home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs && echo SYNTAX_OK\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tmux send-keys -t tradingview C-c '' && sleep 1 && tmux send-keys -t tradingview 'node /home/ubuntu/tradingview-mcp-jackson/scripts/trading/market_scanner.mjs' Enter\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sleep 3 && tmux capture-pane -t tradingview -p | tail -20\")",
+      "Bash(find /mnt/c/Users/Tda-d/tradingview-mcp-jackson -type f | sort | grep -v node_modules | grep -v \".git/\")",
+      "Read(//mnt/c/Users/Tda-d/**)",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\vm\")",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\proxy_tunnel.ps1\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\vm\\\\proxy_tunnel.ps1\")",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\reconnect_blackbull.ps1\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\vm\\\\reconnect_blackbull.ps1\")",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\refresh_cookies.sh\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\vm\\\\refresh_cookies.sh\")",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\sync_cookies.mjs\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\vm\\\\sync_cookies.mjs\")",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\watchdog.mjs\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\vm\\\\watchdog.mjs\")",
+      "PowerShell(Copy-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\UsersTda-dtradingview-mcp-jacksonscriptstradingleap_runner.mjs\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\leap_runner.mjs\")",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\weekly_review.mjs\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\")",
+      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\"\\) -replace \"'../src/connection.js'\",\"'../../src/connection.js'\" | Set-Content \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\" -Encoding utf8; Write-Host \"Fixed import path in weekly_review.mjs\")"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Tda-d\\job-scanner"
+    ]
+  }
+}

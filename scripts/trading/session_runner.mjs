@@ -34,19 +34,26 @@ const LOG_FILE = join(LOG_DIR, 'trades.csv');
 const LOCK_FILE = join(DATA_ROOT, 'session_runner.lock');
 
 function acquireLock() {
-  if (existsSync(LOCK_FILE)) {
-    const pid = parseInt(readFileSync(LOCK_FILE, 'utf8').trim(), 10);
-    if (!isNaN(pid)) {
-      try {
-        process.kill(pid, 0); // throws if process doesn't exist
-        return false;          // process is alive — another run is active
-      } catch (_) {
-        // process is dead — stale lock, safe to override
+  try {
+    // 'wx' = O_CREAT|O_EXCL — atomically fails if file exists, no TOCTOU window
+    writeFileSync(LOCK_FILE, String(process.pid), { flag: 'wx' });
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    // File exists — check if the owning process is still alive
+    try {
+      const pid = parseInt(readFileSync(LOCK_FILE, 'utf8').trim(), 10);
+      if (!isNaN(pid)) {
+        try { process.kill(pid, 0); return false; } catch (_) {}
       }
-    }
+    } catch (_) {}
+    // Stale lock (dead process) — remove and retry once
+    try { unlinkSync(LOCK_FILE); } catch (_) {}
+    try {
+      writeFileSync(LOCK_FILE, String(process.pid), { flag: 'wx' });
+      return true;
+    } catch (_) { return false; }
   }
-  writeFileSync(LOCK_FILE, String(process.pid));
-  return true;
 }
 
 function releaseLock() {
@@ -179,6 +186,26 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
 // Legacy alias — kept so nothing else breaks
 function calcUnits(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   return calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice);
+}
+
+// Returns a Set of "SYMBOL:dir" pairs that recorded a loss within the last 60 minutes.
+// Prevents re-entering the same instrument+direction right after a stop-out.
+function getRecentLossCooldowns() {
+  const cooldowns = new Set();
+  if (!existsSync(LOG_FILE)) return cooldowns;
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  const lines = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1);
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const cols   = line.split(',');
+    const ts     = (cols[0] || '').trim();
+    const symbol = (cols[2] || '').trim();
+    const dir    = (cols[4] || '').trim();
+    const result = (cols[10] || '').trim();
+    if (!ts || !symbol || !dir || result !== 'L') continue;
+    try { if (new Date(ts).getTime() >= cutoff) cooldowns.add(`${symbol}:${dir}`); } catch (_) {}
+  }
+  return cooldowns;
 }
 
 // Returns symbols that have an unresolved (no result recorded) trade in the CSV
@@ -327,9 +354,16 @@ async function main() {
   const CRYPTO_SYMBOLS = ['BTCUSD', 'ETHUSD', 'SOLUSD', 'ADAUSD', 'XRPUSD', 'BNBUSD', 'LTCUSD'];
   const CRYPTO_ASIAN_MIN_SCORE = 10; // Asian session is thin/noisy — require higher conviction for crypto
 
+  const lossCooldowns = getRecentLossCooldowns();
+  if (lossCooldowns.size > 0) log(`  60-min loss cooldowns active: ${[...lossCooldowns].join(', ')}`);
+
   const viableSetups = sessionFiltered.filter(s => {
     if (PARAMS.blockedSymbols?.includes(s.label)) {
       log(`  Skipping ${s.label}: temporarily blocked by performance review`);
+      return false;
+    }
+    if (lossCooldowns.has(`${s.label}:${s.dir}`)) {
+      log(`  Skipping ${s.label} ${s.dir}: 60-min loss cooldown active`);
       return false;
     }
     if (session === 'ASIAN' && CRYPTO_SYMBOLS.includes(s.label) && s.score < CRYPTO_ASIAN_MIN_SCORE) {

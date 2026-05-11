@@ -13,10 +13,103 @@
  * SCORING: max = 8, threshold = 6.
  * Minimum 2:1 R:R enforced — one loss never overshadows 2-3 winning trades.
  */
-import { evaluate } from '../../src/connection.js';
-import { appendFileSync, existsSync, mkdirSync } from 'fs';
+import CDP from '/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
+
+// ── Scanner-tab CDP client (separate from user's visible chart) ───────────────
+// The scanner opens a second TradingView tab and does ALL symbol/TF switching
+// there. The user's main chart tab is never touched.
+const CDP_HOST = 'localhost';
+const CDP_PORT = 9222;
+const SCANNER_ID_FILE = '/tmp/.scanner_tab_id';
+
+let _scannerClient  = null;
+let _scannerTabId   = null;
+let _lastScannedSym = null;  // tracks loaded symbol so setSymbol is skipped for same-instrument TF changes
+
+async function scannerEval(expression) {
+  const c = await _getScannerClient();
+  const r = await c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false });
+  if (r.exceptionDetails) return null;
+  return r.result?.value ?? null;
+}
+
+async function _getScannerClient() {
+  // Fast path: reuse existing healthy client
+  if (_scannerClient && _scannerTabId) {
+    try {
+      await _scannerClient.Runtime.evaluate({ expression: '1', returnByValue: true });
+      return _scannerClient;
+    } catch (_) {
+      _scannerClient = null;
+    }
+  }
+
+  // Try to reuse a tab from a previous scanner run
+  if (!_scannerTabId) {
+    try { _scannerTabId = readFileSync(SCANNER_ID_FILE, 'utf8').trim(); } catch (_) {}
+  }
+
+  const targets = await (await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`)).json();
+
+  if (_scannerTabId) {
+    const existing = targets.find(t => t.id === _scannerTabId);
+    if (existing) {
+      _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: existing.id });
+      await _scannerClient.Runtime.enable();
+      return _scannerClient;
+    }
+    _scannerTabId = null;
+  }
+
+  // Find the main chart tab (the user's visible chart — do NOT use this one)
+  const mainTab = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+  if (!mainTab) throw new Error('Main TradingView chart not found on port 9222');
+
+  // Open a new tab via the main tab's Target domain
+  const ctrl = await CDP({ host: CDP_HOST, port: CDP_PORT, target: mainTab.id });
+  const { targetId } = await ctrl.Target.createTarget({ url: 'https://www.tradingview.com/chart/' });
+  await ctrl.close();
+
+  _scannerTabId   = targetId;
+  _lastScannedSym = null;  // new tab has no symbol loaded yet
+  writeFileSync(SCANNER_ID_FILE, targetId);
+  console.log('  [Scanner] Created scanner tab:', targetId);
+
+  // Wait for TradingView to fully load in the new tab
+  await new Promise(r => setTimeout(r, 14000));
+
+  const fresh = await (await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`)).json();
+  const scanTab = fresh.find(t => t.id === targetId);
+  if (!scanTab) throw new Error('Scanner tab disappeared after creation');
+
+  _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: scanTab.id });
+  await _scannerClient.Runtime.enable();
+
+  // Wait for TradingViewApi to be ready in the new tab
+  for (let i = 0; i < 30; i++) {
+    const ready = await _scannerClient.Runtime.evaluate({
+      expression: 'typeof window.TradingViewApi !== "undefined" && !!window.TradingViewApi._activeChartWidgetWV ? "ready" : "no"',
+      returnByValue: true
+    });
+    if (ready.result?.value === 'ready') break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  // Bring the user's main chart tab back to the foreground
+  const allTargets = await (await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`)).json();
+  const userTab = allTargets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url) && t.id !== targetId);
+  if (userTab) {
+    const tmp = await CDP({ host: CDP_HOST, port: CDP_PORT, target: userTab.id });
+    await tmp.Target.activateTarget({ targetId: userTab.id });
+    await tmp.close();
+  }
+
+  console.log('  [Scanner] Scanner tab ready');
+  return _scannerClient;
+}
 
 const IS_LINUX   = os.platform() === 'linux';
 const DATA_ROOT  = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
@@ -108,16 +201,27 @@ function sessionSymbols(utcHour) {
 
 // ── OHLCV reader (correct API: valueAt) ──
 export async function setChart(sym, tf) {
-  await evaluate(`(function(){
-    var a = window.TradingViewApi._activeChartWidgetWV.value();
-    a.setSymbol('${sym}', null, true);
-    a.setResolution('${tf}');
-  })()`);
-  await sleep(1800);
+  if (sym !== _lastScannedSym) {
+    // Symbol change — load new instrument (takes longer, give it more time)
+    await scannerEval(`(function(){
+      var a = window.TradingViewApi._activeChartWidgetWV.value();
+      a.setSymbol('${sym}', null, true);
+      a.setResolution('${tf}');
+    })()`);
+    await sleep(2500);
+    _lastScannedSym = sym;
+  } else {
+    // Same instrument, TF change only — no setSymbol, chart stays stable
+    await scannerEval(`(function(){
+      var a = window.TradingViewApi._activeChartWidgetWV.value();
+      a.setResolution('${tf}');
+    })()`);
+    await sleep(1500);
+  }
 }
 
 export async function getBars(count = 200) {
-  return evaluate(`(function() {
+  return scannerEval(`(function() {
     try {
       var bars = window.TradingViewApi._activeChartWidgetWV.value()
                    ._chartWidget.model().mainSeries().bars();
@@ -506,7 +610,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       }
       const biasMatch = (dir === 'long' && bias === 'bullish') || (dir === 'short' && bias === 'bearish');
       if (biasMatch) reasons.push(`Daily bias ${bias}`);
-      else if (bias !== 'neutral') reasons.push(`⚠ Daily bias ${bias} (counter-trend)`);
+      else if (bias !== 'neutral') { score -= 1; reasons.push(`⚠ Daily bias ${bias} (counter-trend, -1)`); }
     }
   }
 
@@ -536,6 +640,52 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 
   return { score, reasons, strategies: [...new Set(strats)], rsi: rsi[n], atrVal: atr[n], activeFVG };
 }
+
+// ── Per-instrument SL/TP profiles ───────────────────────────────────────────
+// slMode:   'fvg_sr' → FVG boundary first, then S&R zone, ATR fallback
+//           'sr'     → S&R zone first, FVG secondary, ATR fallback
+//           'atr'    → pure ATR (indices gap through zones, no snapping)
+// maxSlAtr: max SL distance as ATR multiple (hard cap)
+// minSlAtr: min SL distance as ATR multiple (avoids spread noise)
+// tpCap:    max TP1 distance as ATR multiple
+// tp3Cap:   max runner (TP2) distance as ATR multiple
+const INST_PROFILE = {
+  // Commodities: institutional FVG zones are reliable; structural SL needed for large swings
+  // Gold/Silver/Oil respect key daily/weekly levels strongly — FVG + S&R is ideal
+  XAUUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.50 },
+  XAGUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.50 },
+  WTI:    { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.50 },
+
+  // Crypto: FVG + order block confluences dominate; price sweeps liquidity before moving
+  // Wider SL required to survive stop hunts below FVG / OB — tight SL = guaranteed stop-out
+  BTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.10, tpCap: 2.00, tp3Cap: 3.00 },
+  ETHUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.10, tpCap: 2.00, tp3Cap: 3.00 },
+  LTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.00 },
+  XRPUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.00 },
+
+  // Indices: momentum-driven; frequently gap THROUGH wick-to-body S&R zones at session open
+  // ATR-based SL is more reliable than zone snapping; tight TP for session burst capture
+  NAS100: { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
+  US30:   { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
+  SPX500: { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
+  GER40:  { slMode: 'atr',    maxSlAtr: 0.35, minSlAtr: 0.08, tpCap: 0.80, tp3Cap: 1.20 },
+  UK100:  { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
+
+  // Forex majors: wick-to-body S&R zones are reliable; moderate ATR, tight intraday ranges
+  EURUSD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 },
+  GBPUSD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 },
+  AUDUSD: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.05, tpCap: 0.60, tp3Cap: 0.90 },
+  NZDUSD: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.05, tpCap: 0.60, tp3Cap: 0.90 },
+  USDCAD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 },
+  USDCHF: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.05, tpCap: 0.60, tp3Cap: 0.90 },
+
+  // JPY pairs: strong trending behaviour with large pip moves; S&R respected but need more room
+  USDJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.08, tpCap: 0.90, tp3Cap: 1.40 },
+  EURJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.08, tpCap: 0.90, tp3Cap: 1.40 },
+  GBPJPY: { slMode: 'sr',     maxSlAtr: 0.45, minSlAtr: 0.08, tpCap: 1.00, tp3Cap: 1.60 },
+  AUDJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.08, tpCap: 0.90, tp3Cap: 1.40 },
+};
+const DEFAULT_PROFILE = { slMode: 'sr', maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 };
 
 // ── Main scan ──
 //
@@ -649,100 +799,107 @@ export async function scanForSetups(minScore = 8, slAtrMult = 1.5) {
       const sr15 = buildSRZones(bars15, atr15);
       const slBuf = atrVal * 0.10;   // 10% ATR buffer outside the zone
 
-      // ── Day-trade caps: all levels must be reachable in 15–20 fifteen-minute candles ──
-      // Max SL = 0.75×ATR, Max TP = 2.0×ATR. Directional 15M moves cover ~0.15–0.4 ATR/candle,
-      // so TP at 2×ATR hits in 5–13 candles (1–3 hours). Always a day trade.
-      const MAX_SL_ATR = 0.75;
-      const MAX_TP_ATR = 2.0;
+      // ── Per-instrument SL/TP strategy ────────────────────────────────────────────
+      const prof = INST_PROFILE[inst.label] || DEFAULT_PROFILE;
+      const { slMode, maxSlAtr, minSlAtr, tpCap, tp3Cap } = prof;
 
-      // SL: nearest S/R zone within 0.5–0.75×ATR; fall back to 0.75×ATR
+      // ── SL placement ─────────────────────────────────────────────────────────────
       let sl;
-      if (dir === 'long') {
-        const supportsBelow = sr15.active
-          .filter(z => z.type === 'support' && z.wickTip < entry
-                    && (entry - z.wickTip) >= atrVal * 0.25
-                    && (entry - z.wickTip) <= atrVal * MAX_SL_ATR)
-          .sort((a, b) => b.wickTip - a.wickTip);
-        sl = supportsBelow.length > 0
-          ? supportsBelow[0].wickTip - slBuf
-          : entry - atrVal * MAX_SL_ATR;
+
+      if (slMode === 'fvg_sr') {
+        // 1. FVG boundary (tightest structural SL — institutions defend these)
+        if (check15.activeFVG) {
+          const fvg    = check15.activeFVG;
+          const fvgSL  = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
+          const fvgDist = Math.abs(entry - fvgSL);
+          if (fvgDist >= atrVal * minSlAtr && fvgDist <= atrVal * maxSlAtr) sl = fvgSL;
+        }
+        // 2. Nearest S&R zone (if FVG not available or out of range)
+        if (sl === undefined) {
+          if (dir === 'long') {
+            const z = sr15.active.filter(z => z.type === 'support' && z.wickTip < entry
+              && (entry - z.wickTip) >= atrVal * minSlAtr
+              && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
+            sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
+          } else {
+            const z = sr15.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+              && (z.wickTip - entry) >= atrVal * minSlAtr
+              && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
+            sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
+          }
+        }
+
+      } else if (slMode === 'atr') {
+        // Pure ATR — indices gap through zones at session opens, no zone snapping
+        sl = dir === 'long' ? entry - atrVal * maxSlAtr : entry + atrVal * maxSlAtr;
+
       } else {
-        const resistsAbove = sr15.active
-          .filter(z => z.type === 'resistance' && z.wickTip > entry
-                    && (z.wickTip - entry) >= atrVal * 0.25
-                    && (z.wickTip - entry) <= atrVal * MAX_SL_ATR)
-          .sort((a, b) => a.wickTip - b.wickTip);
-        sl = resistsAbove.length > 0
-          ? resistsAbove[0].wickTip + slBuf
-          : entry + atrVal * MAX_SL_ATR;
+        // 'sr' — S&R zone primary, FVG secondary, ATR fallback (forex + JPY pairs)
+        if (dir === 'long') {
+          const z = sr15.active.filter(z => z.type === 'support' && z.wickTip < entry
+            && (entry - z.wickTip) >= atrVal * minSlAtr
+            && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
+          sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
+        } else {
+          const z = sr15.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+            && (z.wickTip - entry) >= atrVal * minSlAtr
+            && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
+          sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
+        }
+        // Secondary: FVG tighter override (only if valid and tighter than current SL)
+        if (check15.activeFVG) {
+          const fvg    = check15.activeFVG;
+          const fvgSL  = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
+          const fvgDist = Math.abs(entry - fvgSL);
+          const curDist = Math.abs(entry - sl);
+          if (fvgDist < curDist && fvgDist >= atrVal * minSlAtr) sl = fvgSL;
+        }
       }
 
-      // FVG-based SL: tighter if available (min 0.2×ATR so not stopped by spread noise)
-      if (check15.activeFVG) {
-        const fvg = check15.activeFVG;
-        const fvgSL = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
-        const fvgDist = Math.abs(entry - fvgSL);
-        const curDist = Math.abs(entry - sl);
-        if (fvgDist < curDist && fvgDist >= atrVal * 0.2) sl = fvgSL;
-      }
-
-      // Hard cap: SL must not exceed MAX_SL_ATR × ATR from entry
-      if (dir === 'long' && entry - sl > atrVal * MAX_SL_ATR) sl = entry - atrVal * MAX_SL_ATR;
-      if (dir === 'short' && sl - entry > atrVal * MAX_SL_ATR) sl = entry + atrVal * MAX_SL_ATR;
+      // Hard cap at maxSlAtr regardless of mode
+      if (dir === 'long'  && entry - sl > atrVal * maxSlAtr) sl = entry - atrVal * maxSlAtr;
+      if (dir === 'short' && sl - entry > atrVal * maxSlAtr) sl = entry + atrVal * maxSlAtr;
 
       const slDist = Math.abs(entry - sl);
 
-      // TP1 (tp2): nearest opposing S/R zone (0.5–2.0×slDist away); fall back to 1R
+      // ── TP1 (tp2): nearest opposing S/R zone within tpCap × ATR ─────────────────
       let tp2;
       if (dir === 'long') {
-        const resistsAhead = sr15.active
-          .filter(z => z.type === 'resistance' && z.wickTip > entry
-                    && (z.wickTip - entry) >= slDist * 0.5
-                    && (z.wickTip - entry) <= atrVal * MAX_TP_ATR)
-          .sort((a, b) => a.wickTip - b.wickTip);
-        tp2 = resistsAhead.length > 0 ? resistsAhead[0].wickTip : entry + slDist;
+        const z = sr15.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+          && (z.wickTip - entry) >= slDist * 0.5
+          && (z.wickTip - entry) <= atrVal * tpCap).sort((a, b) => a.wickTip - b.wickTip);
+        tp2 = z.length > 0 ? z[0].wickTip : entry + slDist;
       } else {
-        const supportsAhead = sr15.active
-          .filter(z => z.type === 'support' && z.wickTip < entry
-                    && (entry - z.wickTip) >= slDist * 0.5
-                    && (entry - z.wickTip) <= atrVal * MAX_TP_ATR)
-          .sort((a, b) => b.wickTip - a.wickTip);
-        tp2 = supportsAhead.length > 0 ? supportsAhead[0].wickTip : entry - slDist;
+        const z = sr15.active.filter(z => z.type === 'support' && z.wickTip < entry
+          && (entry - z.wickTip) >= slDist * 0.5
+          && (entry - z.wickTip) <= atrVal * tpCap).sort((a, b) => b.wickTip - a.wickTip);
+        tp2 = z.length > 0 ? z[0].wickTip : entry - slDist;
       }
+      if (dir === 'long'  && tp2 - entry  > atrVal * tpCap) tp2 = entry + atrVal * tpCap;
+      if (dir === 'short' && entry  - tp2  > atrVal * tpCap) tp2 = entry - atrVal * tpCap;
 
-      // Hard cap TP1 at MAX_TP_ATR × ATR from entry
-      if (dir === 'long'  && tp2 - entry  > atrVal * MAX_TP_ATR) tp2 = entry + atrVal * MAX_TP_ATR;
-      if (dir === 'short' && entry  - tp2  > atrVal * MAX_TP_ATR) tp2 = entry - atrVal * MAX_TP_ATR;
-
-      // TP2 (tp3): runner — next zone beyond tp2, capped at 2.5×ATR (still same-day reachable)
+      // ── TP2 (tp3): runner beyond tp2, capped at tp3Cap × ATR ────────────────────
       let tp3;
       if (dir === 'long') {
-        const resistsBeyond = sr15.active
-          .filter(z => z.type === 'resistance' && z.wickTip > tp2 + slDist * 0.3
-                    && z.wickTip - entry <= atrVal * 2.5)
-          .sort((a, b) => a.wickTip - b.wickTip);
-        tp3 = resistsBeyond.length > 0 ? resistsBeyond[0].wickTip : Math.min(entry + slDist * 2.0, entry + atrVal * 2.5);
+        const z = sr15.active.filter(z => z.type === 'resistance'
+          && z.wickTip > tp2 + slDist * 0.3
+          && z.wickTip - entry <= atrVal * tp3Cap).sort((a, b) => a.wickTip - b.wickTip);
+        tp3 = z.length > 0 ? z[0].wickTip : Math.min(entry + slDist * 3.0, entry + atrVal * tp3Cap);
       } else {
-        const supportsBeyond = sr15.active
-          .filter(z => z.type === 'support' && z.wickTip < tp2 - slDist * 0.3
-                    && entry - z.wickTip <= atrVal * 2.5)
-          .sort((a, b) => b.wickTip - a.wickTip);
-        tp3 = supportsBeyond.length > 0 ? supportsBeyond[0].wickTip : Math.max(entry - slDist * 2.0, entry - atrVal * 2.5);
+        const z = sr15.active.filter(z => z.type === 'support'
+          && z.wickTip < tp2 - slDist * 0.3
+          && entry - z.wickTip <= atrVal * tp3Cap).sort((a, b) => b.wickTip - a.wickTip);
+        tp3 = z.length > 0 ? z[0].wickTip : Math.max(entry - slDist * 3.0, entry - atrVal * tp3Cap);
       }
 
+      // ── 2:1 R:R enforcement ──────────────────────────────────────────────────────
       let actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
-
-      // Enforce minimum 2:1 R:R — push TP2 to 2×slDist if current zone is too close
       if (actualRR < 2.0) {
-        const minTP = dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0;
-        // Only extend if it still stays within the day-trade cap
+        const minTP    = dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0;
         const minTPDist = Math.abs(minTP - entry);
-        if (minTPDist <= atrVal * MAX_TP_ATR) {
-          tp2 = minTP;
-        } else {
-          // Can't reach 2:1 within cap — take best possible within cap
-          tp2 = dir === 'long' ? entry + atrVal * MAX_TP_ATR : entry - atrVal * MAX_TP_ATR;
-        }
+        tp2 = minTPDist <= atrVal * tpCap
+          ? minTP
+          : (dir === 'long' ? entry + atrVal * tpCap : entry - atrVal * tpCap);
         actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
         if (actualRR < 2.0) {
           process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — R:R ${actualRR.toFixed(1)} < 2.0, no viable TP, skipping\n`);

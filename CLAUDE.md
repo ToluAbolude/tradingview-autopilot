@@ -127,3 +127,107 @@ Claude Code ←→ MCP Server (stdio) ←→ CDP (localhost:9222) ←→ Trading
 ```
 
 Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines').get(false)._primitivesDataById`
+
+---
+
+## VM Infrastructure
+
+The trading system runs on an Oracle Cloud VM (ubuntu@132.145.44.68). TradingView runs as Google Chrome (not Electron) managed by systemd.
+
+### Services on the VM
+
+| Service | Purpose |
+| --- | --- |
+| `xvfb.service` | Virtual display :1 at 1920×1080, 96 DPI |
+| `openbox.service` | Window manager — provides minimize/maximize/close controls |
+| `tradingview.service` | Google Chrome with CDP on port 9222 |
+| `market_scanner.mjs` | Node.js scanner process (tmux session "tradingview") |
+
+### Key files on VM
+
+- `/etc/systemd/system/tradingview.service` — Chrome launch config (proxy PAC, scale factor, etc.)
+- `/home/ubuntu/proxy.pac` — Routes `*.blackbull.com` and `*.ctrader.com` through SOCKS5 proxy; all other traffic goes direct
+- `/home/ubuntu/trading-data/scanner.log` — Live scanner output
+- `/home/ubuntu/trading-data/live_signals.json` — Current signals
+
+### Key files on local PC
+
+- `scripts/vm/proxy_tunnel.ps1` — Starts SSH reverse SOCKS5 proxy (VM port 1080 → home IP). Only needed during BlackBull reconnection.
+- `scripts/vm/reconnect_blackbull.ps1` — Full automated reconnect script (starts tunnel, clicks Connect, closes tunnel)
+- `scripts/vm/sync_cookies.mjs` — Extracts cookies from local Chrome (port 9223) and injects into VM Chrome (port 9222)
+- `scripts/vm/watchdog.mjs` — Runs every 5 min via cron; checks TradingView + BlackBull are alive, heals if not
+
+### SSH access
+
+```bash
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
+```
+
+### VNC access (for manual UI interaction)
+
+```bash
+ssh -i ~/.ssh/id_rsa_oracle -L 6080:localhost:6080 -N ubuntu@132.145.44.68
+```
+
+Then open <http://localhost:6080/vnc.html> in browser.
+
+---
+
+## BlackBull Markets Broker — Reconnection Guide
+
+### Why it disconnects
+
+BlackBull session persists for days/weeks while Chrome keeps running. It disconnects when:
+
+- Chrome crashes and systemd restarts it
+- VM reboots
+- TradingView session expires
+
+### Why reconnection needs a proxy
+
+BlackBull blocks OAuth logins from VM/datacenter IPs (Oracle Cloud IP is flagged). The fix: route the OAuth flow through your home PC's IP via SSH reverse SOCKS5 proxy. Once authenticated, ongoing API calls work directly from the VM — the proxy is only needed during the login step.
+
+### Reconnect steps
+
+1. **Start proxy tunnel** — run `scripts/vm/proxy_tunnel.ps1` in a PowerShell window (keep it open)
+2. **Run reconnect script** — run `scripts/vm/reconnect_blackbull.ps1` (auto-clicks BlackBull card + Connect button)
+3. **If CAPTCHA appears** — open VNC (see above), check "I am human" in the popup
+4. **Close proxy tunnel** — once Account Manager shows balance, close the `scripts/vm/proxy_tunnel.ps1` window
+
+The full reconnect takes ~2 minutes. The session then holds 24/7 without the proxy.
+
+### Reconnect via CDP manually (if scripts fail)
+
+```javascript
+// On VM port 9222 — click BlackBull card (3rd card in broker grid, at approx x=721, y=260)
+await c.Input.dispatchMouseEvent({ type: 'mousePressed', x: 721, y: 260, button: 'left', clickCount: 1 });
+await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: 721, y: 260, button: 'left', clickCount: 1 });
+// Then click Connect button (appears at approx x=640, y=328)
+await c.Input.dispatchMouseEvent({ type: 'mousePressed', x: 640, y: 328, button: 'left', clickCount: 1 });
+await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: 640, y: 328, button: 'left', clickCount: 1 });
+```
+
+### 24/7 trading status
+
+| Component | Always on? |
+| --- | --- |
+| Market scanner | Yes — independent Node.js process |
+| BlackBull session | Yes — persists after proxy is closed |
+| After Chrome crash/restart | No — needs manual reconnect (steps above) |
+
+---
+
+## VM Display & Zoom Notes
+
+Chrome runs at DPR 1.5 on the virtual display (Chrome ignores `--force-device-scale-factor=1` on Xvfb). To compensate:
+
+- Chrome profile default zoom is set to 67% (`partition.default_zoom_level = -2.2239`) so TradingView renders at full 1920×1080 equivalent content
+- openbox WM is set to auto-maximize Chrome via `wmctrl` in `ExecStartPost`
+- Xft.dpi=96 is set via `xrdb` on Xvfb startup
+
+If the display looks zoomed in after a VM restart, run:
+
+```bash
+DISPLAY=:1 xrdb -merge <<< 'Xft.dpi: 96'
+DISPLAY=:1 wmctrl -r 'Google Chrome' -b add,maximized_vert,maximized_horz
+```
