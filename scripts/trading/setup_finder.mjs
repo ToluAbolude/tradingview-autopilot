@@ -14,7 +14,7 @@
  * Minimum 2:1 R:R enforced — one loss never overshadows 2-3 winning trades.
  */
 import CDP from '/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js';
-import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
 
@@ -25,25 +25,41 @@ const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
 const SCANNER_ID_FILE = '/tmp/.scanner_tab_id';
 
-let _scannerClient  = null;
-let _scannerTabId   = null;
-let _lastScannedSym = null;  // tracks loaded symbol so setSymbol is skipped for same-instrument TF changes
+let _scannerClient    = null;
+let _scannerTabId     = null;
+let _lastScannedSym   = null;   // tracks loaded symbol so setSymbol is skipped for same-instrument TF changes
+let _consecutiveNulls = 0;
+const MAX_CONSECUTIVE_NULLS = 10;
 
 async function scannerEval(expression) {
   const c = await _getScannerClient();
-  const r = await c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false });
-  if (r.exceptionDetails) return null;
-  return r.result?.value ?? null;
+  try {
+    const r = await c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false });
+    if (r.exceptionDetails) return null;
+    return r.result?.value ?? null;
+  } catch(e) {
+    // CDP dropped — force full rebuild on next call
+    _scannerClient  = null;
+    _lastScannedSym = null;
+    return null;
+  }
 }
 
 async function _getScannerClient() {
-  // Fast path: reuse existing healthy client
+  // Fast path: reuse existing client only if TradingViewApi is actually ready
   if (_scannerClient && _scannerTabId) {
     try {
-      await _scannerClient.Runtime.evaluate({ expression: '1', returnByValue: true });
-      return _scannerClient;
+      const ready = await _scannerClient.Runtime.evaluate({
+        expression: 'typeof window.TradingViewApi !== "undefined" && !!window.TradingViewApi._activeChartWidgetWV ? "ready" : "no"',
+        returnByValue: true
+      });
+      if (ready.result?.value === 'ready') return _scannerClient;
+      console.log('  [Scanner] TradingViewApi not ready — rebuilding tab');
+      _scannerClient  = null;
+      _lastScannedSym = null;
     } catch (_) {
-      _scannerClient = null;
+      _scannerClient  = null;
+      _lastScannedSym = null;
     }
   }
 
@@ -221,7 +237,7 @@ export async function setChart(sym, tf) {
 }
 
 export async function getBars(count = 200) {
-  return scannerEval(`(function() {
+  const result = await scannerEval(`(function() {
     try {
       var bars = window.TradingViewApi._activeChartWidgetWV.value()
                    ._chartWidget.model().mainSeries().bars();
@@ -236,6 +252,23 @@ export async function getBars(count = 200) {
       return result.length > 10 ? result : null;
     } catch(e) { return null; }
   })()`);
+
+  if (result === null) {
+    _consecutiveNulls++;
+    if (_consecutiveNulls >= MAX_CONSECUTIVE_NULLS) {
+      console.log(`\n  [Scanner] ${MAX_CONSECUTIVE_NULLS} consecutive null reads — forcing tab rebuild`);
+      if (_scannerClient) { try { await _scannerClient.close(); } catch(_) {} }
+      _scannerClient    = null;
+      _scannerTabId     = null;
+      _lastScannedSym   = null;
+      _consecutiveNulls = 0;
+      try { unlinkSync(SCANNER_ID_FILE); } catch(_) {}
+    }
+    return null;
+  }
+
+  _consecutiveNulls = 0;
+  return result;
 }
 
 // ── Indicators ──

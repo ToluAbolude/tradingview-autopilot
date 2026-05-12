@@ -39,7 +39,13 @@
       "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\watchdog.mjs\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\vm\\\\watchdog.mjs\")",
       "PowerShell(Copy-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\UsersTda-dtradingview-mcp-jacksonscriptstradingleap_runner.mjs\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\leap_runner.mjs\")",
       "PowerShell(Move-Item \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\weekly_review.mjs\" \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\")",
-      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\"\\) -replace \"'../src/connection.js'\",\"'../../src/connection.js'\" | Set-Content \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\" -Encoding utf8; Write-Host \"Fixed import path in weekly_review.mjs\")"
+      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\"\\) -replace \"'../src/connection.js'\",\"'../../src/connection.js'\" | Set-Content \"C:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\weekly_review.mjs\" -Encoding utf8; Write-Host \"Fixed import path in weekly_review.mjs\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"cat /home/ubuntu/trading-data/live_signals.json\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"grep '2026-05-11' /home/ubuntu/trading-data/trade_log/trades.csv\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tail -100 /home/ubuntu/trading-data/scanner.log 2>/dev/null || echo 'no scanner.log'\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"node --check /home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs && echo 'SYNTAX_OK'\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tmux send-keys -t tradingview C-c '' && sleep 1 && tmux send-keys -t tradingview 'node /home/ubuntu/tradingview-mcp-jackson/scripts/trading/market_scanner.mjs >> /home/ubuntu/trading-data/scanner.log 2>&1 &' Enter\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sleep 3 && tail -20 /home/ubuntu/trading-data/scanner.log\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner"
