@@ -45,7 +45,19 @@
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tail -100 /home/ubuntu/trading-data/scanner.log 2>/dev/null || echo 'no scanner.log'\")",
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"node --check /home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs && echo 'SYNTAX_OK'\")",
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tmux send-keys -t tradingview C-c '' && sleep 1 && tmux send-keys -t tradingview 'node /home/ubuntu/tradingview-mcp-jackson/scripts/trading/market_scanner.mjs >> /home/ubuntu/trading-data/scanner.log 2>&1 &' Enter\")",
-      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sleep 3 && tail -20 /home/ubuntu/trading-data/scanner.log\")"
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sleep 3 && tail -20 /home/ubuntu/trading-data/scanner.log\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"ls /home/ubuntu/trading-data/ && tail -5 /home/ubuntu/trading-data/scanner.log\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"ls /home/ubuntu/trading-data/trade_log/\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tail -10 /home/ubuntu/trading-data/trade_log/trades.csv && echo '---' && cat /home/ubuntu/trading-data/session.log | tail -30\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"free -m && echo '---' && ps aux --sort=-%mem | head -15\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"ps aux | grep session_runner | grep -v grep && echo '---' && cat /proc/$\\(cat /home/ubuntu/trading-data/scanner.pid 2>/dev/null\\)/status 2>/dev/null | grep -E 'Name|VmRSS|OOMScore' && dmesg | grep -i 'oom\\\\|killed' | tail -10\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"pkill -f session_runner.mjs; sleep 2; ps aux | grep session_runner | grep -v grep | wc -l\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"pkill -f session_runner.mjs 2>/dev/null; echo done\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" -o ServerAliveInterval=5 ubuntu@132.145.44.68 \"pkill -9 -f session_runner.mjs; echo killed\")",
+      "PowerShell(Start-Sleep -Seconds 5; ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"echo connected\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"free -m | head -2 && echo '---' && ps aux | grep session_runner | grep -v grep | wc -l && echo '---' && ps aux | grep -E 'market_scanner|session_runner' | grep -v grep\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"cat /home/ubuntu/trading-data/trading_params.json && echo '---' && cat /home/ubuntu/tradingview-mcp-jackson/run_session.sh && echo '---' && crontab -l\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tail -30 /home/ubuntu/trading-data/cron_runner.log && echo '---' && ls -la /home/ubuntu/trading-data/session_runner.lock 2>/dev/null || echo 'no lock file'\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner"

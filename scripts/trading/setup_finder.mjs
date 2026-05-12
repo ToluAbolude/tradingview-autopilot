@@ -46,17 +46,33 @@ async function scannerEval(expression) {
 }
 
 async function _getScannerClient() {
-  // Fast path: reuse existing client only if TradingViewApi is actually ready
+  // Fast path: reuse existing client only if TradingViewApi is ready AND URL is correct
   if (_scannerClient && _scannerTabId) {
     try {
+      // Check 1: TradingViewApi ready
       const ready = await _scannerClient.Runtime.evaluate({
         expression: 'typeof window.TradingViewApi !== "undefined" && !!window.TradingViewApi._activeChartWidgetWV ? "ready" : "no"',
         returnByValue: true
       });
-      if (ready.result?.value === 'ready') return _scannerClient;
-      console.log('  [Scanner] TradingViewApi not ready — rebuilding tab');
-      _scannerClient  = null;
-      _lastScannedSym = null;
+      if (ready.result?.value !== 'ready') {
+        console.log('  [Scanner] TradingViewApi not ready — rebuilding tab');
+        _scannerClient  = null;
+        _lastScannedSym = null;
+      } else {
+        // Check 2: URL is still on tradingview chart (not login page or other URL)
+        const urlCheck = await _scannerClient.Runtime.evaluate({
+          expression: 'window.location.href',
+          returnByValue: true
+        });
+        const currentUrl = urlCheck.result?.value || '';
+        if (!/tradingview\.com\/chart/i.test(currentUrl)) {
+          console.log(`  [Scanner] Tab navigated to non-chart URL: ${currentUrl.slice(0, 60)}... — rebuilding`);
+          _scannerClient  = null;
+          _lastScannedSym = null;
+        } else {
+          return _scannerClient;
+        }
+      }
     } catch (_) {
       _scannerClient  = null;
       _lastScannedSym = null;
@@ -72,10 +88,17 @@ async function _getScannerClient() {
 
   if (_scannerTabId) {
     const existing = targets.find(t => t.id === _scannerTabId);
-    if (existing) {
+    if (existing && /tradingview\.com\/chart/i.test(existing.url)) {
       _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: existing.id });
       await _scannerClient.Runtime.enable();
-      return _scannerClient;
+      // Verify the tab is still responsive and on correct URL
+      try {
+        const urlCheck = await _scannerClient.Runtime.evaluate({
+          expression: 'window.location.href',
+          returnByValue: true
+        });
+        if (/tradingview\.com\/chart/i.test(urlCheck.result?.value || '')) return _scannerClient;
+      } catch(_) {}
     }
     _scannerTabId = null;
   }
@@ -103,6 +126,17 @@ async function _getScannerClient() {
 
   _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: scanTab.id });
   await _scannerClient.Runtime.enable();
+
+  // Check that the new tab actually loaded the chart page (not a login page or error)
+  const urlCheck = await _scannerClient.Runtime.evaluate({
+    expression: 'window.location.href',
+    returnByValue: true
+  });
+  const tabUrl = urlCheck.result?.value || '';
+  if (!/tradingview\.com\/chart/i.test(tabUrl)) {
+    await _scannerClient.close();
+    throw new Error(`Scanner tab loaded wrong URL: ${tabUrl.slice(0, 80)}`);
+  }
 
   // Wait for TradingViewApi to be ready in the new tab
   for (let i = 0; i < 30; i++) {
