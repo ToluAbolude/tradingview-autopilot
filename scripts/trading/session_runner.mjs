@@ -66,6 +66,9 @@ const PARAMS = existsSync(PARAMS_FILE)
   ? JSON.parse(readFileSync(PARAMS_FILE, 'utf8'))
   : { scoreThreshold: 6, stopRuleLosses: 2, riskPct: [5.0, 3.5, 2.5], slAtrMult: 1.5, minRR: 2.0, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
 
+// Daily context written by morning_agent.mjs at 08:45 UTC — bias, skip flag, threshold override
+const DAILY_CONTEXT_FILE = join(DATA_ROOT, 'daily_context', `${new Date().toISOString().slice(0, 10)}.json`);
+
 function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
 
 function logTrade(entry) {
@@ -231,6 +234,28 @@ async function main() {
 
   const session = currentSession();
   log(`=== SESSION START: ${session} ===`);
+
+  // 0a-pre. Morning agent daily context — bias, skip flag, threshold override for today
+  if (existsSync(DAILY_CONTEXT_FILE)) {
+    try {
+      const ctx = JSON.parse(readFileSync(DAILY_CONTEXT_FILE, 'utf8'));
+      log(`Morning context: bias=${ctx.session_bias} skip=${ctx.skip_today} threshold=${ctx.score_threshold_override ?? 'default'}`);
+      if (ctx.skip_today) {
+        log(`⚠ Morning agent: SKIP TODAY — ${ctx.skip_reason || 'no reason given'}`);
+        releaseLock(); return;
+      }
+      if (ctx.score_threshold_override != null) {
+        log(`  Threshold override for today: ${PARAMS.scoreThreshold} → ${ctx.score_threshold_override}`);
+        PARAMS.scoreThreshold = ctx.score_threshold_override;
+      }
+      if (ctx.instruments_to_avoid_today?.length) {
+        log(`  Avoiding today: ${ctx.instruments_to_avoid_today.join(', ')}`);
+        PARAMS.blockedSymbols = [...(PARAMS.blockedSymbols || []), ...ctx.instruments_to_avoid_today];
+      }
+    } catch (e) {
+      log(`Warning: could not read morning context: ${e.message}`);
+    }
+  }
 
   const now     = new Date();
   const isSun   = now.getUTCDay() === 0;

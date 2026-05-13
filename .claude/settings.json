@@ -57,7 +57,14 @@
       "PowerShell(Start-Sleep -Seconds 5; ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"echo connected\")",
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"free -m | head -2 && echo '---' && ps aux | grep session_runner | grep -v grep | wc -l && echo '---' && ps aux | grep -E 'market_scanner|session_runner' | grep -v grep\")",
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"cat /home/ubuntu/trading-data/trading_params.json && echo '---' && cat /home/ubuntu/tradingview-mcp-jackson/run_session.sh && echo '---' && crontab -l\")",
-      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tail -30 /home/ubuntu/trading-data/cron_runner.log && echo '---' && ls -la /home/ubuntu/trading-data/session_runner.lock 2>/dev/null || echo 'no lock file'\")"
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"tail -30 /home/ubuntu/trading-data/cron_runner.log && echo '---' && ls -la /home/ubuntu/trading-data/session_runner.lock 2>/dev/null || echo 'no lock file'\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sudo systemctl restart xvfb.service openbox.service tradingview.service 2>&1 && sleep 5 && sudo systemctl status xvfb.service tradingview.service --no-pager | grep -E 'Active|Loaded'\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sudo journalctl -xeu xvfb.service --no-pager -n 20\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"cat /etc/systemd/system/xvfb.service\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sudo journalctl -xeu xvfb.service --no-pager -n 5 2>&1 | tail -10\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sudo journalctl -xeu xvfb.service --no-pager -n 30 2>&1 | grep -E 'bash|xrdb|Xvfb|error|failed|exit' | tail -15\")",
+      "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"cat -A /etc/systemd/system/xvfb.service\")",
+      "Bash(git remote *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner"
