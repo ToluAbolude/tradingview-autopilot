@@ -27,7 +27,7 @@ const DATA_ROOT       = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d
 const SIGNALS_FILE    = join(DATA_ROOT, 'live_signals.json');
 const SCAN_INTERVAL   = 15 * 60 * 1000;   // 15 minutes
 const MAX_HISTORY     = 500;               // keep last 500 expired signals
-const MIN_SCORE       = 8;                 // match live scanner default
+const MIN_SCORE       = 6;                 // per-TF Pass 1 threshold (MTF bonus adds up to +3 on top)
 
 // How long a signal stays "active" before auto-expiring
 const TTL = { '15': 30 * 60 * 1000, '60': 2 * 60 * 60 * 1000 };

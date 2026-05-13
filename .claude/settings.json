@@ -64,7 +64,8 @@
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sudo journalctl -xeu xvfb.service --no-pager -n 5 2>&1 | tail -10\")",
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sudo journalctl -xeu xvfb.service --no-pager -n 30 2>&1 | grep -E 'bash|xrdb|Xvfb|error|failed|exit' | tail -15\")",
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"cat -A /etc/systemd/system/xvfb.service\")",
-      "Bash(git remote *)"
+      "Bash(git remote *)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/setup_finder.mjs scripts/trading/market_scanner.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner"
