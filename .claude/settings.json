@@ -65,7 +65,11 @@
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"sudo journalctl -xeu xvfb.service --no-pager -n 30 2>&1 | grep -E 'bash|xrdb|Xvfb|error|failed|exit' | tail -15\")",
       "PowerShell(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle\" ubuntu@132.145.44.68 \"cat -A /etc/systemd/system/xvfb.service\")",
       "Bash(git remote *)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/setup_finder.mjs scripts/trading/market_scanner.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/setup_finder.mjs scripts/trading/market_scanner.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/weekly_review_agent.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/setup_finder.mjs scripts/trading/weekly_review_agent.mjs scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/ ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/weekly_review_agent.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/weekly_review_agent.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scanner_config.json)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner"

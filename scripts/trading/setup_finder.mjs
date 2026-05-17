@@ -14,19 +14,38 @@
  * Minimum 2:1 R:R enforced — one loss never overshadows 2-3 winning trades.
  */
 import CDP from '/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js';
-import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import os from 'os';
 
-// ── Scanner-tab CDP client (separate from user's visible chart) ───────────────
-// The scanner opens a second TradingView tab and does ALL symbol/TF switching
-// there. The user's main chart tab is never touched.
+// ── Load tunable config (auto-updated weekly by weekly_review_agent) ──────────
+const __dir = dirname(fileURLToPath(import.meta.url));
+const CONFIG_FILE = join(__dir, '../../scanner_config.json');
+let SC = {};  // scoring config
+let TC = {};  // threshold config
+let MTFC = [];
+let TFW = {};
+let INST_CFG = {};
+try {
+  const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
+  SC    = cfg.scoring       || {};
+  TC    = cfg.thresholds    || {};
+  MTFC  = cfg.mtf_bonus     || [];
+  TFW   = cfg.tf_weights    || {};
+  INST_CFG = cfg.inst_profiles || {};
+} catch (_) {
+  // config missing — all defaults below apply
+}
+
+// ── CDP client — scans directly on the main (broker-connected) chart tab ──────
+// Single-tab approach: the scanner controls TradingView's main chart tab.
+// A second background tab is unreliable because Chrome throttles JS in background
+// tabs, making TradingViewApi unresponsive when VNC is closed.
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
-const SCANNER_ID_FILE = '/tmp/.scanner_tab_id';
 
 let _scannerClient    = null;
-let _scannerTabId     = null;
 let _lastScannedSym   = null;   // tracks loaded symbol so setSymbol is skipped for same-instrument TF changes
 let _consecutiveNulls = 0;
 const MAX_CONSECUTIVE_NULLS = 10;
@@ -38,7 +57,7 @@ async function scannerEval(expression) {
     if (r.exceptionDetails) return null;
     return r.result?.value ?? null;
   } catch(e) {
-    // CDP dropped — force full rebuild on next call
+    // CDP dropped — reconnect on next call
     _scannerClient  = null;
     _lastScannedSym = null;
     return null;
@@ -46,118 +65,27 @@ async function scannerEval(expression) {
 }
 
 async function _getScannerClient() {
-  // Fast path: reuse existing client only if TradingViewApi is ready AND URL is correct
-  if (_scannerClient && _scannerTabId) {
+  // Fast path: reuse existing client if TradingViewApi is still ready
+  if (_scannerClient) {
     try {
-      // Check 1: TradingViewApi ready
       const ready = await _scannerClient.Runtime.evaluate({
         expression: 'typeof window.TradingViewApi !== "undefined" && !!window.TradingViewApi._activeChartWidgetWV ? "ready" : "no"',
         returnByValue: true
       });
-      if (ready.result?.value !== 'ready') {
-        console.log('  [Scanner] TradingViewApi not ready — rebuilding tab');
-        _scannerClient  = null;
-        _lastScannedSym = null;
-      } else {
-        // Check 2: URL is still on tradingview chart (not login page or other URL)
-        const urlCheck = await _scannerClient.Runtime.evaluate({
-          expression: 'window.location.href',
-          returnByValue: true
-        });
-        const currentUrl = urlCheck.result?.value || '';
-        if (!/tradingview\.com\/chart/i.test(currentUrl)) {
-          console.log(`  [Scanner] Tab navigated to non-chart URL: ${currentUrl.slice(0, 60)}... — rebuilding`);
-          _scannerClient  = null;
-          _lastScannedSym = null;
-        } else {
-          return _scannerClient;
-        }
-      }
-    } catch (_) {
-      _scannerClient  = null;
-      _lastScannedSym = null;
-    }
+      if (ready.result?.value === 'ready') return _scannerClient;
+    } catch (_) {}
+    _scannerClient  = null;
+    _lastScannedSym = null;
   }
 
-  // Try to reuse a tab from a previous scanner run
-  if (!_scannerTabId) {
-    try { _scannerTabId = readFileSync(SCANNER_ID_FILE, 'utf8').trim(); } catch (_) {}
-  }
-
+  // Connect to the main TradingView chart tab (broker-connected, always foreground)
   const targets = await (await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`)).json();
+  const mainTab  = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+  if (!mainTab) throw new Error('TradingView chart tab not found on port 9222');
 
-  if (_scannerTabId) {
-    const existing = targets.find(t => t.id === _scannerTabId);
-    if (existing && /tradingview\.com\/chart/i.test(existing.url)) {
-      _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: existing.id });
-      await _scannerClient.Runtime.enable();
-      // Verify the tab is still responsive and on correct URL
-      try {
-        const urlCheck = await _scannerClient.Runtime.evaluate({
-          expression: 'window.location.href',
-          returnByValue: true
-        });
-        if (/tradingview\.com\/chart/i.test(urlCheck.result?.value || '')) return _scannerClient;
-      } catch(_) {}
-    }
-    _scannerTabId = null;
-  }
-
-  // Find the main chart tab (the user's visible chart — do NOT use this one)
-  const mainTab = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
-  if (!mainTab) throw new Error('Main TradingView chart not found on port 9222');
-
-  // Open a new tab via the main tab's Target domain
-  const ctrl = await CDP({ host: CDP_HOST, port: CDP_PORT, target: mainTab.id });
-  const { targetId } = await ctrl.Target.createTarget({ url: 'https://www.tradingview.com/chart/' });
-  await ctrl.close();
-
-  _scannerTabId   = targetId;
-  _lastScannedSym = null;  // new tab has no symbol loaded yet
-  writeFileSync(SCANNER_ID_FILE, targetId);
-  console.log('  [Scanner] Created scanner tab:', targetId);
-
-  // Wait for TradingView to fully load in the new tab
-  await new Promise(r => setTimeout(r, 14000));
-
-  const fresh = await (await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`)).json();
-  const scanTab = fresh.find(t => t.id === targetId);
-  if (!scanTab) throw new Error('Scanner tab disappeared after creation');
-
-  _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: scanTab.id });
+  _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: mainTab.id });
   await _scannerClient.Runtime.enable();
-
-  // Check that the new tab actually loaded the chart page (not a login page or error)
-  const urlCheck = await _scannerClient.Runtime.evaluate({
-    expression: 'window.location.href',
-    returnByValue: true
-  });
-  const tabUrl = urlCheck.result?.value || '';
-  if (!/tradingview\.com\/chart/i.test(tabUrl)) {
-    await _scannerClient.close();
-    throw new Error(`Scanner tab loaded wrong URL: ${tabUrl.slice(0, 80)}`);
-  }
-
-  // Wait for TradingViewApi to be ready in the new tab
-  for (let i = 0; i < 30; i++) {
-    const ready = await _scannerClient.Runtime.evaluate({
-      expression: 'typeof window.TradingViewApi !== "undefined" && !!window.TradingViewApi._activeChartWidgetWV ? "ready" : "no"',
-      returnByValue: true
-    });
-    if (ready.result?.value === 'ready') break;
-    await new Promise(r => setTimeout(r, 1000));
-  }
-
-  // Bring the user's main chart tab back to the foreground
-  const allTargets = await (await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`)).json();
-  const userTab = allTargets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url) && t.id !== targetId);
-  if (userTab) {
-    const tmp = await CDP({ host: CDP_HOST, port: CDP_PORT, target: userTab.id });
-    await tmp.Target.activateTarget({ targetId: userTab.id });
-    await tmp.close();
-  }
-
-  console.log('  [Scanner] Scanner tab ready');
+  console.log('  [Scanner] Connected to main chart tab:', mainTab.id);
   return _scannerClient;
 }
 
@@ -200,7 +128,9 @@ const ALL_TFS = ['1', '5', '15', '30', '60', '240', 'D', 'W'];
 
 // TF display labels and confluence weights (higher TF = more signal weight, less noise)
 const TF_LABEL  = { '1':'1M', '5':'5M', '15':'15M', '30':'30M', '60':'1H', '240':'4H', 'D':'D', 'W':'W' };
-const TF_WEIGHT = { '1': 0.25, '5': 0.5, '15': 1, '30': 1, '60': 1.5, '240': 2.5, 'D': 3, 'W': 4 };
+const TF_WEIGHT = Object.keys(TFW).length > 0
+  ? TFW
+  : { '1': 0.25, '5': 0.5, '15': 1, '30': 1, '60': 1.5, '240': 2.5, 'D': 3, 'W': 4 };;
 
 export const FULL_SCAN_LIST = [
   // ── TIER 1: Proven high WR — ranked by 2-week audit (Apr 13-25) ──
@@ -290,13 +220,11 @@ export async function getBars(count = 200) {
   if (result === null) {
     _consecutiveNulls++;
     if (_consecutiveNulls >= MAX_CONSECUTIVE_NULLS) {
-      console.log(`\n  [Scanner] ${MAX_CONSECUTIVE_NULLS} consecutive null reads — forcing tab rebuild`);
+      console.log(`\n  [Scanner] ${MAX_CONSECUTIVE_NULLS} consecutive null reads — forcing reconnect`);
       if (_scannerClient) { try { await _scannerClient.close(); } catch(_) {} }
       _scannerClient    = null;
-      _scannerTabId     = null;
       _lastScannedSym   = null;
       _consecutiveNulls = 0;
-      try { unlinkSync(SCANNER_ID_FILE); } catch(_) {}
     }
     return null;
   }
@@ -613,7 +541,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 
   // EMA flatness gate — dead-ranging market, no edge (8-14% WR in backtests)
   const emaSpread = Math.max(ema8[n], ema21[n], ema50[n]) - Math.min(ema8[n], ema21[n], ema50[n]);
-  const emaFlat   = emaSpread / ema50[n] < 0.004;
+  const emaFlat   = emaSpread / ema50[n] < (TC.ema_flat_pct ?? 0.004);
   if (emaFlat) {
     return { score: 2, reasons: ['EMA flat (ranging — no edge)'], strategies: [], rsi: rsi[n], atrVal: atr[n], activeFVG: null };
   }
@@ -621,12 +549,13 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   // ── A. SmartTrail direction ──
   if (st.dir[n] !== null) {
     const aligned = (dir === 'long' && st.dir[n] === 1) || (dir === 'short' && st.dir[n] === -1);
-    if (aligned) { score++; reasons.push('SmartTrail aligned'); strats.push('A'); }
+    if (aligned) {
+      score += (SC.A_smarttrail ?? 1);
+      reasons.push('SmartTrail aligned'); strats.push('A');
+    }
   }
 
   // ── C. S/R Zone (wick-to-body) — price inside supply/demand zone ──
-  // +2 for fresh zone, +3 for zone with retests (proven institutional level)
-  // Matches the Pine indicator: resistance=[bodyLevel, wickTip], support=[wickTip, bodyLevel]
   {
     const activeZone = srZones.active.find(z => {
       if (z.type === 'support'    && dir === 'long')  return last.c >= z.wickTip    && last.c <= z.bodyLevel;
@@ -634,7 +563,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       return false;
     });
     if (activeZone) {
-      const pts = activeZone.retests > 0 ? 3 : 2;
+      const pts = activeZone.retests > 0 ? (SC.C_sr_retested ?? 3) : (SC.C_sr_fresh ?? 2);
       const strength = activeZone.retests > 0 ? `${activeZone.retests}-retest` : 'fresh';
       score += pts;
       reasons.push(`S/R zone (${activeZone.type}) wick=${activeZone.wickTip.toFixed(4)} body=${activeZone.bodyLevel.toFixed(4)} ${strength}`);
@@ -653,7 +582,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const wkBull = emaW[n] > emaW[n - shift];
       const wkBear = emaW[n] < emaW[n - shift];
       if ((dir === 'long' && wkBull) || (dir === 'short' && wkBear)) {
-        score++; reasons.push('W1 trend aligned'); strats.push('T');
+        score += (SC.T_weekly_trend ?? 1);
+        reasons.push('W1 trend aligned'); strats.push('T');
       }
     }
   }
@@ -666,29 +596,25 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const nearPDL = pricePos < 0.40 && dir === 'long';
       const nearPDH = pricePos > 0.60 && dir === 'short';
       if (nearPDL) {
-        score++;
+        score += (SC.U_pdh_pdl ?? 1);
         reasons.push(`PDL support zone (${(pricePos*100).toFixed(0)}% of range, PDL=${PDL.toFixed(4)})`);
         strats.push('U');
       }
       if (nearPDH) {
-        score++;
+        score += (SC.U_pdh_pdl ?? 1);
         reasons.push(`PDH resistance zone (${(pricePos*100).toFixed(0)}% of range, PDH=${PDH.toFixed(4)})`);
         strats.push('U');
       }
       const biasMatch = (dir === 'long' && bias === 'bullish') || (dir === 'short' && bias === 'bearish');
       if (biasMatch) reasons.push(`Daily bias ${bias}`);
-      else if (bias !== 'neutral') { score -= 1; reasons.push(`⚠ Daily bias ${bias} (counter-trend, -1)`); }
+      else if (bias !== 'neutral') {
+        score -= (SC.bias_penalty ?? 1);
+        reasons.push(`⚠ Daily bias ${bias} (counter-trend, -${SC.bias_penalty ?? 1})`);
+      }
     }
   }
 
-  // ── F. Fair Value Gap (FVG) — institutional imbalance zone ────────────────
-  // 3-candle pattern: price moved so fast an untraded gap was left behind.
-  // These zones act as magnets — institutions return to fill the imbalance.
-  // Enter when price retraces INTO the zone (not after it passes through).
-  // SL sits just outside the FVG boundary (tighter SL → larger lots for same £ risk).
-  //
-  // G. Order Block (OB): the last opposing candle before the impulse.
-  //    If price is simultaneously inside the OB and the FVG → +1 bonus.
+  // ── F. Fair Value Gap (FVG) — institutional imbalance zone ──
   {
     const fvgZones = detectFVGZones(bars, atr);
     const relevantType = dir === 'long' ? 'bullish' : 'bearish';
@@ -698,7 +624,9 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 
     if (hitZones.length > 0) {
       activeFVG = hitZones[0];
-      const pts = (activeFVG.fresh && !activeFVG.mitigated) ? 2 : 1;
+      const pts = (activeFVG.fresh && !activeFVG.mitigated)
+        ? (SC.F_fvg_fresh ?? 2)
+        : (SC.F_fvg_other ?? 1);
       score += pts;
       reasons.push(`FVG ${activeFVG.fresh ? 'fresh' : 'old'}/${activeFVG.mitigated ? 'mitigated' : 'unmitigated'} [${activeFVG.bottom.toFixed(4)}–${activeFVG.top.toFixed(4)}]`);
       strats.push('F');
@@ -850,7 +778,11 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
       const maxScore    = Math.max(...cands.map(c => c.score));
       const totalWeight = cands.reduce((s, c) => s + (TF_WEIGHT[c.tf] || 1), 0);
       // Higher TF confluence earns bigger bonus: W+D = 7pts → +3; D+4H = 5.5pts → +3; 1H alone = +1
-      const mtfBonus  = totalWeight >= 5 ? 3 : totalWeight >= 3 ? 2 : totalWeight >= 1.5 ? 1 : 0;
+      const mtfTiers  = MTFC.length > 0 ? MTFC : [
+        { min_weight: 5, bonus: 3 }, { min_weight: 3, bonus: 2 },
+        { min_weight: 1.5, bonus: 1 }, { min_weight: 0, bonus: 0 }
+      ];
+      const mtfBonus  = (mtfTiers.find(t => totalWeight >= t.min_weight) || { bonus: 0 }).bonus;
       const finalScore = maxScore + mtfBonus;
 
       const allStrats  = [...new Set([...cands.flatMap(c => c.strategies), ...check15.strategies])];
@@ -867,7 +799,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
       const slBuf = atrVal * 0.10;   // 10% ATR buffer outside the zone
 
       // ── Per-instrument SL/TP strategy ────────────────────────────────────────────
-      const prof = INST_PROFILE[inst.label] || DEFAULT_PROFILE;
+      const prof = INST_CFG[inst.label] || INST_PROFILE[inst.label] || DEFAULT_PROFILE;
       const { slMode, maxSlAtr, minSlAtr, tpCap, tp3Cap } = prof;
 
       // ── SL placement ─────────────────────────────────────────────────────────────

@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "updated": "2026-05-14",
+  "notes": "Auto-updated weekly by weekly_review_agent.mjs. Edit history below.",
+
+  "scoring": {
+    "A_smarttrail":      1,
+    "C_sr_fresh":        2,
+    "C_sr_retested":     3,
+    "T_weekly_trend":    1,
+    "U_pdh_pdl":         1,
+    "F_fvg_fresh":       2,
+    "F_fvg_other":       1,
+    "bias_penalty":      1
+  },
+
+  "thresholds": {
+    "pass1_min_score":   6,
+    "ema_flat_pct":      0.004,
+    "rr_min":            2.0
+  },
+
+  "mtf_bonus": [
+    { "min_weight": 5,   "bonus": 3 },
+    { "min_weight": 3,   "bonus": 2 },
+    { "min_weight": 1.5, "bonus": 1 },
+    { "min_weight": 0,   "bonus": 0 }
+  ],
+
+  "tf_weights": {
+    "1": 0.25, "5": 0.5, "15": 1, "30": 1, "60": 1.5, "240": 2.5, "D": 3, "W": 4
+  },
+
+  "inst_profiles": {
+    "XAUUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.50 },
+    "XAGUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.50 },
+    "WTI":    { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.50 },
+    "BTCUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.80, "minSlAtr": 0.10, "tpCap": 2.00, "tp3Cap": 3.00 },
+    "ETHUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.80, "minSlAtr": 0.10, "tpCap": 2.00, "tp3Cap": 3.00 },
+    "LTCUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.00 },
+    "XRPUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.00 },
+    "NAS100": { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
+    "US30":   { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
+    "SPX500": { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
+    "GER40":  { "slMode": "atr",    "maxSlAtr": 0.35, "minSlAtr": 0.08, "tpCap": 0.80, "tp3Cap": 1.20 },
+    "UK100":  { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
+    "EURUSD": { "slMode": "sr",     "maxSlAtr": 0.30, "minSlAtr": 0.05, "tpCap": 0.70, "tp3Cap": 1.10 },
+    "GBPUSD": { "slMode": "sr",     "maxSlAtr": 0.30, "minSlAtr": 0.05, "tpCap": 0.70, "tp3Cap": 1.10 },
+    "AUDUSD": { "slMode": "sr",     "maxSlAtr": 0.25, "minSlAtr": 0.05, "tpCap": 0.60, "tp3Cap": 0.90 },
+    "NZDUSD": { "slMode": "sr",     "maxSlAtr": 0.25, "minSlAtr": 0.05, "tpCap": 0.60, "tp3Cap": 0.90 },
+    "USDCAD": { "slMode": "sr",     "maxSlAtr": 0.30, "minSlAtr": 0.05, "tpCap": 0.70, "tp3Cap": 1.10 },
+    "USDCHF": { "slMode": "sr",     "maxSlAtr": 0.25, "minSlAtr": 0.05, "tpCap": 0.60, "tp3Cap": 0.90 },
+    "USDJPY": { "slMode": "sr",     "maxSlAtr": 0.40, "minSlAtr": 0.08, "tpCap": 0.90, "tp3Cap": 1.40 },
+    "EURJPY": { "slMode": "sr",     "maxSlAtr": 0.40, "minSlAtr": 0.08, "tpCap": 0.90, "tp3Cap": 1.40 },
+    "GBPJPY": { "slMode": "sr",     "maxSlAtr": 0.45, "minSlAtr": 0.08, "tpCap": 1.00, "tp3Cap": 1.60 },
+    "AUDJPY": { "slMode": "sr",     "maxSlAtr": 0.40, "minSlAtr": 0.08, "tpCap": 0.90, "tp3Cap": 1.40 }
+  },
+
+  "change_history": []
+}
