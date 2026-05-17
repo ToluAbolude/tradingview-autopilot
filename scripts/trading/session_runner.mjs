@@ -9,7 +9,7 @@
  * Token-efficient: does ONE pass per session, stops after best trade placed.
  */
 import { fetchHighImpactNews, isSafeToTrade, filterForSymbol } from './news_checker.mjs';
-import { scanForSetups } from './setup_finder.mjs';
+import { scanForSetups } from './setup_finder.mjs'; // fallback only — primary source is live_signals.json
 import { placeOrder, getEquity, closeAllPositions } from './execute_trade.mjs';
 import { fetchTwitterSignals, aggregateSignals } from './twitter_feed.mjs';
 import { analyzePerformance } from './performance_tracker.mjs';
@@ -349,14 +349,49 @@ async function main() {
     log(`Today's high-impact events: ${todayNews.map(e => `${e.time} ${e.currency} ${e.title}`).join(' | ')}`);
   }
 
-  // 2. Scan for setups
-  log('Scanning instruments for setups...');
+  // 2. Read setups from market_scanner's live_signals.json.
+  // market_scanner.mjs already scans all instruments every 15 min and writes here.
+  // Reading the file avoids two processes competing for the same Chrome tab via CDP,
+  // which was causing renderer crashes (Target crashed / _activeChartWidgetWV undefined).
+  // Falls back to a direct scan only if the file is missing or stale (>25 min old).
+  log('Reading setups from live_signals.json...');
+  const SIGNALS_FILE = join(DATA_ROOT, 'live_signals.json');
   let setups;
   try {
-    setups = await scanForSetups(PARAMS.scoreThreshold || 6, PARAMS.slAtrMult || 1.5);
+    const threshold = PARAMS.scoreThreshold || 6;
+    let usedFallback = false;
+
+    if (existsSync(SIGNALS_FILE)) {
+      const state = JSON.parse(readFileSync(SIGNALS_FILE, 'utf8'));
+      const lastScan = state.meta?.last_scan ? new Date(state.meta.last_scan).getTime() : 0;
+      const staleMs  = 25 * 60 * 1000; // 25 min — market_scanner runs every 15 min
+
+      if (Date.now() - lastScan > staleMs) {
+        log(`WARN: live_signals.json stale (last: ${state.meta?.last_scan}) — falling back to direct scan`);
+        usedFallback = true;
+      } else {
+        const now = Date.now();
+        setups = (state.active || []).filter(s =>
+          s.score >= threshold && new Date(s.expires).getTime() > now
+        );
+        log(`Read ${setups.length} active signal(s) from live_signals.json (last scan: ${state.meta?.last_scan})`);
+      }
+    } else {
+      log('live_signals.json not found — falling back to direct scan');
+      usedFallback = true;
+    }
+
+    if (usedFallback) {
+      setups = await scanForSetups(threshold, PARAMS.slAtrMult || 1.5);
+    }
   } catch(e) {
-    log(`Scan error: ${e.message}`);
-    return;
+    log(`Setup read error: ${e.message} — falling back to direct scan`);
+    try {
+      setups = await scanForSetups(PARAMS.scoreThreshold || 6, PARAMS.slAtrMult || 1.5);
+    } catch(e2) {
+      log(`Scan error: ${e2.message}`);
+      return;
+    }
   }
 
   if (setups.length === 0) {

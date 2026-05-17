@@ -69,7 +69,23 @@
       "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/weekly_review_agent.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
       "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/setup_finder.mjs scripts/trading/weekly_review_agent.mjs scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/ ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/)",
       "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/weekly_review_agent.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/weekly_review_agent.mjs)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scanner_config.json)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scanner_config.json)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\watchdog_new.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/watchdog.mjs)",
+      "PowerShell(\"done\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\setup_finder.mjs\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/news_checker.mjs \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\news_checker.mjs\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\setup_finder.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\news_checker.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/news_checker.mjs)",
+      "Bash(git -C \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\" diff --stat HEAD)",
+      "Bash(git -C \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\" status --short)",
+      "Bash(git -C \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\" ls-files watchdog.mjs run_session.sh)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/watchdog.mjs \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\watchdog.mjs\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/run_session.sh \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\run_session.sh\")",
+      "Bash(git -C \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\" log --oneline --all)",
+      "Bash(git -C \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\" log --oneline --diff-filter=A -- scripts/trading/market_scanner.mjs scripts/trading/morning_agent.mjs scripts/trading/eod_agent.mjs scripts/trading/weekly_review_agent.mjs)",
+      "Bash(git -C \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\" log --format=\"%H %ai %s\" fe78d7c 6b85543 1a2b23f 73815cb)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/session_runner.mjs \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\session_runner.mjs\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\session_runner.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/session_runner.mjs)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner"

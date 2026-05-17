@@ -50,14 +50,41 @@ let _lastScannedSym   = null;   // tracks loaded symbol so setSymbol is skipped 
 let _consecutiveNulls = 0;
 const MAX_CONSECUTIVE_NULLS = 10;
 
+// ── Timeout helpers — prevent indefinite hangs when Chrome is down/restarting ─
+// Without these, a fetch() to localhost:9222 mid-restart can hang forever and
+// accumulate zombie processes that exhaust RAM and eventually OOM-kill Chrome.
+const CDP_TIMEOUT_MS = 8000;
+
+function withTimeout(promise, label = 'CDP operation') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout: ${label} exceeded ${CDP_TIMEOUT_MS}ms`)), CDP_TIMEOUT_MS)
+    ),
+  ]);
+}
+
+async function fetchWithTimeout(url) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), CDP_TIMEOUT_MS);
+  try {
+    return await fetch(url, { signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function scannerEval(expression) {
   const c = await _getScannerClient();
   try {
-    const r = await c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false });
+    const r = await withTimeout(
+      c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false }),
+      'Runtime.evaluate'
+    );
     if (r.exceptionDetails) return null;
     return r.result?.value ?? null;
   } catch(e) {
-    // CDP dropped — reconnect on next call
+    // CDP dropped or timed out — reconnect on next call
     _scannerClient  = null;
     _lastScannedSym = null;
     return null;
@@ -68,10 +95,13 @@ async function _getScannerClient() {
   // Fast path: reuse existing client if TradingViewApi is still ready
   if (_scannerClient) {
     try {
-      const ready = await _scannerClient.Runtime.evaluate({
-        expression: 'typeof window.TradingViewApi !== "undefined" && !!window.TradingViewApi._activeChartWidgetWV ? "ready" : "no"',
-        returnByValue: true
-      });
+      const ready = await withTimeout(
+        _scannerClient.Runtime.evaluate({
+          expression: 'typeof window.TradingViewApi !== "undefined" && !!window.TradingViewApi._activeChartWidgetWV ? "ready" : "no"',
+          returnByValue: true
+        }),
+        'readiness check'
+      );
       if (ready.result?.value === 'ready') return _scannerClient;
     } catch (_) {}
     _scannerClient  = null;
@@ -79,12 +109,16 @@ async function _getScannerClient() {
   }
 
   // Connect to the main TradingView chart tab (broker-connected, always foreground)
-  const targets = await (await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`)).json();
+  const resp    = await fetchWithTimeout(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const targets = await resp.json();
   const mainTab  = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
   if (!mainTab) throw new Error('TradingView chart tab not found on port 9222');
 
-  _scannerClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: mainTab.id });
-  await _scannerClient.Runtime.enable();
+  _scannerClient = await withTimeout(
+    CDP({ host: CDP_HOST, port: CDP_PORT, target: mainTab.id }),
+    'CDP connect'
+  );
+  await withTimeout(_scannerClient.Runtime.enable(), 'Runtime.enable');
   console.log('  [Scanner] Connected to main chart tab:', mainTab.id);
   return _scannerClient;
 }

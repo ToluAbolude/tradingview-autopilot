@@ -11,7 +11,14 @@ const POST_MIN  = 30; // block this many minutes AFTER news
 
 export async function fetchHighImpactNews() {
   try {
-    const resp = await fetch(FF_URL);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 8000);
+    let resp;
+    try {
+      resp = await fetch(FF_URL, { signal: ac.signal });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const events = await resp.json();
 
