@@ -96,11 +96,20 @@
       "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/check_sym.mjs ubuntu@132.145.44.68:/tmp/check_sym.mjs)",
       "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/check_bars.mjs ubuntu@132.145.44.68:/tmp/check_bars.mjs)",
       "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/add_scanner_lock.js ubuntu@132.145.44.68:/tmp/add_scanner_lock.js)",
-      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/fix_rr_check.js ubuntu@132.145.44.68:/tmp/fix_rr_check.js)"
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/fix_rr_check.js ubuntu@132.145.44.68:/tmp/fix_rr_check.js)",
+      "Bash(mkdir -p \"C:\\\\Users\\\\Tda-d\\\\AI-WebPilot\\\\src\\\\core\" \"C:\\\\Users\\\\Tda-d\\\\AI-WebPilot\\\\src\\\\tools\" \"C:\\\\Users\\\\Tda-d\\\\AI-WebPilot\\\\src\\\\cli\" \"C:\\\\Users\\\\Tda-d\\\\AI-WebPilot\\\\screenshots\" && echo done)",
+      "Bash(npm install *)",
+      "Bash(node --check src/connection.js)",
+      "Bash(node --check src/wait.js)",
+      "Bash(node --check src/core/browser.js)",
+      "Bash(node --check src/core/ui.js)",
+      "Bash(node --check src/core/capture.js)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
-      "\\tmp"
+      "\\tmp",
+      "C:\\Users\\Tda-d\\AI-WebPilot\\src",
+      "C:\\Users\\Tda-d\\AI-WebPilot"
     ]
   }
 }
