@@ -165,18 +165,30 @@ console.log(`  Output: ${SIGNALS_FILE}`);
 console.log('══════════════════════════════════════════════════════');
 
 let state = load();
+let _stopping = false;
 
-// Run immediately on start
-state = await runScan(state);
-
-// Then every 15 minutes
-const interval = setInterval(async () => {
+// Chain scans with setTimeout so the next scan only starts after the previous
+// one fully completes — setInterval would fire a new scan while the previous is
+// still running (now that waitForBars adds retry delays), causing two scans to
+// compete for the same Chrome tab simultaneously.
+async function loop() {
+  const start = Date.now();
   state = await runScan(state);
-}, SCAN_INTERVAL);
+  if (_stopping) return;
+  const elapsed = Date.now() - start;
+  const wait = Math.max(0, SCAN_INTERVAL - elapsed);
+  if (elapsed > SCAN_INTERVAL) {
+    console.log(`  [Scanner] Scan took ${Math.round(elapsed / 1000)}s (>${SCAN_INTERVAL / 60000} min) — next scan starting immediately`);
+  }
+  setTimeout(loop, wait);
+}
+
+// Run immediately on start, then chain
+loop();
 
 // Clean exit on Ctrl+C
 process.on('SIGINT', () => {
-  clearInterval(interval);
+  _stopping = true;
   console.log(`\n  Scanner stopped after ${state.meta.scan_count} scans.`);
   console.log(`  Signals preserved in ${SIGNALS_FILE}\n`);
   process.exit(0);

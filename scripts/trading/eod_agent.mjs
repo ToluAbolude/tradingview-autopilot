@@ -11,7 +11,7 @@
  * Fallback: If API unavailable, falls back to static review_params.mjs rules.
  */
 import Anthropic from '@anthropic-ai/sdk';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -33,16 +33,14 @@ const PARAMS_FILE  = join(DATA_ROOT, 'trading_params.json');
 const PENDING_FILE = join(DATA_ROOT, 'pending_params.json');
 const REVIEWS_DIR  = join(DATA_ROOT, 'reviews');
 const SCANNER_LOG  = join(DATA_ROOT, 'scanner.log');
-const AGENT_LOG    = join(DATA_ROOT, 'eod_agent.log');
 
 const LOOKBACK_DAYS = 30;
 const MIN_TRADES    = 20;
 const AUTO_APPLY    = process.argv.includes('--auto-apply');
 
 function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
-  process.stdout.write(line);
-  try { appendFileSync(AGENT_LOG, line); } catch (_) {}
+  // stdout only — cron redirects stdout to eod_agent.log, so appendFileSync would double-write
+  process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`);
 }
 
 // ── Data loading ─────────────────────────────────────────────────────────────
@@ -179,7 +177,7 @@ RULES — follow these strictly when making recommendations:
 2. scoreThreshold: raise by 1 if WR < 40% AND total trades ≥ 20. Lower by 1 if WR > 70% AND PF > 2 AND trades ≥ 20. Max 12, min 4.
 3. slAtrMult: increase by 0.1–0.2 if PF < 1.2 (stops too tight). Decrease by 0.1 if PF > 2.5. Max 3.0, min 1.0.
 4. blockedSymbols: block for 30 days if WR < 30% over 5+ trades for that symbol. Unblock on expiry.
-5. blockedSessions: block if WR < 35% AND net PnL < 0 over 10+ trades for that session.
+5. blockedSessions: block if WR < 35% AND net PnL < 0 over 5+ trades for that session.
 6. riskPct: DO NOT change. Requires explicit user approval.
 7. tp1Mult / tp2Mult: DO NOT change without strong missed-runner evidence.
 8. stopRuleLosses: only suggest changing if loss streak shows a clear pattern.
@@ -291,7 +289,7 @@ function staticFallback(trades, params) {
   const bySess   = computeBreakdown(trades, 'session');
   const blockedS = [...(params.blockedSessions || [])];
   for (const [sess, d] of Object.entries(bySess)) {
-    if (d.total >= 10 && d.wr < 35 && d.pnl < 0 && !blockedS.includes(sess)) {
+    if (d.total >= 5 && d.wr < 35 && d.pnl < 0 && !blockedS.includes(sess)) {
       blockedS.push(sess);
       recs.push({ param: 'blockedSessions', current: params.blockedSessions, proposed: [...blockedS], reason: `${sess} WR ${d.wr}% < 35% and net PnL £${d.pnl}`, confidence: 'medium', condition: `${sess} WR=${d.wr}% PnL=${d.pnl}` });
     }

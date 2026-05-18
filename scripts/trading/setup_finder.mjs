@@ -148,6 +148,20 @@ function logDailyContext(label, tf, dc) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ── Wait for chart to settle with enough bars loaded ─────────────────────────
+// TradingView fetches bars asynchronously after a symbol/TF switch. A fixed sleep
+// sometimes returns too few bars (e.g. 60 instead of 300), making EMA-50/200 and
+// the weekly trend proxy (needs ~270 bars on 15M) completely inaccurate.
+// This polls until minRequired bars are available, retrying up to maxRetries times.
+async function waitForBars(count = 300, minRequired = 200, maxRetries = 4, retryMs = 600) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const bars = await getBars(count);
+    if (bars && bars.length >= minRequired) return bars;
+    if (attempt < maxRetries - 1) await sleep(retryMs);
+  }
+  return null;
+}
+
 // ── Full symbol universe (BlackBull Markets via TradingView) ──
 // Sorted by commission efficiency (spread/ADR ratio)
 // Scan order = WR performance rank from weekly_review.mjs audit.
@@ -316,7 +330,27 @@ function calcSmartTrail(bars, len = 22, mult = 3.0) {
   return { trail, dir };
 }
 
+// ── Heiken Ashi candles ───────────────────────────────────────────────────────
+function calcHA(bars) {
+  const ha = [];
+  for (let i = 0; i < bars.length; i++) {
+    const haC = (bars[i].o + bars[i].h + bars[i].l + bars[i].c) / 4;
+    const haO = i === 0 ? (bars[i].o + bars[i].c) / 2 : (ha[i-1].o + ha[i-1].c) / 2;
+    ha.push({ o: haO, h: Math.max(bars[i].h, haO, haC), l: Math.min(bars[i].l, haO, haC), c: haC });
+  }
+  return ha;
+}
 
+// ── Bollinger Bands ───────────────────────────────────────────────────────────
+function calcBB(bars, len = 20, mult = 2.0) {
+  return bars.map((_, i) => {
+    if (i < len) return null;
+    const slice = bars.slice(i - len, i);
+    const sma = slice.reduce((s, b) => s + b.c, 0) / len;
+    const std = Math.sqrt(slice.reduce((s, b) => s + (b.c - sma) ** 2, 0) / len);
+    return { upper: sma + mult * std, lower: sma - mult * std, bw: std * 2 * mult / sma };
+  });
+}
 
 // ── Fair Value Gap (FVG) Zone Detection — 3-candle institutional imbalance ───
 // Bullish FVG: bars[i].low > bars[i-2].high  → gap UP, demand zone forms
@@ -605,19 +639,26 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     }
   }
 
-  // ── T. Weekly Trend Alignment — W1 EMA proxy (5× daily lookback) ──
+  // ── T. Weekly Trend Alignment — EMA proxy over one week of bars ──
+  // BARS_PER_WEEK: how many bars of each TF span one trading week (5 × bpd).
+  // W TF uses 13 bars (one quarter) — "weekly trend" on a weekly chart = multi-week direction.
+  // For TFs where bpw > available bars (1M, 5M, some 15M), lookback < bpw and
+  // the gate measures a shorter trend — labelled "trend aligned" rather than "W1 trend".
   {
-    const bpd  = tf === '60' ? 24 : tf === '30' ? 48 : tf === '15' ? 96 : tf === '5' ? 288 : 96;
-    const bpw  = bpd * 5;
-    const lookback = Math.min(Math.floor(bars.length * 0.9), bpw);
-    if (lookback >= 40) {
+    const BARS_PER_WEEK = { '1': 7200, '5': 1440, '15': 480, '30': 240, '60': 120, '240': 30, 'D': 5, 'W': 13 };
+    const bpw = BARS_PER_WEEK[tf] ?? 480;
+    const maxLookback = Math.floor(bars.length * 0.9);
+    const lookback = Math.min(maxLookback, bpw);
+    const isFullWeek = bpw <= maxLookback;
+    if (lookback >= 5) {
       const emaW = calcEMA(bars, lookback);
       const shift = Math.max(1, Math.floor(lookback / 10));
       const wkBull = emaW[n] > emaW[n - shift];
       const wkBear = emaW[n] < emaW[n - shift];
       if ((dir === 'long' && wkBull) || (dir === 'short' && wkBear)) {
         score += (SC.T_weekly_trend ?? 1);
-        reasons.push('W1 trend aligned'); strats.push('T');
+        reasons.push(isFullWeek ? 'W1 trend aligned' : 'Trend aligned (partial week)');
+        strats.push('T');
       }
     }
   }
@@ -640,8 +681,10 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
         strats.push('U');
       }
       const biasMatch = (dir === 'long' && bias === 'bullish') || (dir === 'short' && bias === 'bearish');
-      if (biasMatch) reasons.push(`Daily bias ${bias}`);
-      else if (bias !== 'neutral') {
+      if (biasMatch) {
+        score += (SC.D_daily_bias ?? 1);
+        reasons.push(`Daily bias ${bias}`); strats.push('D');
+      } else if (bias !== 'neutral') {
         score -= (SC.bias_penalty ?? 1);
         reasons.push(`⚠ Daily bias ${bias} (counter-trend, -${SC.bias_penalty ?? 1})`);
       }
@@ -664,6 +707,197 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       score += pts;
       reasons.push(`FVG ${activeFVG.fresh ? 'fresh' : 'old'}/${activeFVG.mitigated ? 'mitigated' : 'unmitigated'} [${activeFVG.bottom.toFixed(4)}–${activeFVG.top.toFixed(4)}]`);
       strats.push('F');
+    }
+  }
+
+  // ── B. EMA Stack — three EMAs in clean trend order ──
+  {
+    const stacked = dir === 'long'
+      ? ema8[n] > ema21[n] && ema21[n] > ema50[n]
+      : ema50[n] > ema21[n] && ema21[n] > ema8[n];
+    if (stacked) {
+      score += (SC.B_ema_stack ?? 1);
+      reasons.push('EMA stack aligned'); strats.push('B');
+    }
+  }
+
+  // ── P. Prime session — London open + NY overlap (highest liquidity) ──
+  {
+    if (utcHour >= 8 && utcHour < 17) {
+      score += (SC.P_prime_session ?? 1);
+      reasons.push('Prime session'); strats.push('P');
+    }
+  }
+
+  // ── R. RSI extreme — oversold for longs, overbought for shorts ──
+  {
+    const rsiVal = rsi[n];
+    if ((dir === 'long' && rsiVal < 45) || (dir === 'short' && rsiVal > 55)) {
+      score += (SC.R_rsi_extreme ?? 1);
+      reasons.push(`RSI ${Math.round(rsiVal)}`); strats.push('R');
+    }
+  }
+
+  // ── K. Candlestick pattern — pin bar, doji, engulfing ──
+  {
+    if (n >= 1) {
+      const cur = last, prev = bars[n - 1];
+      const body       = Math.abs(cur.c - cur.o);
+      const range      = cur.h - cur.l;
+      const upperWick  = cur.h - Math.max(cur.c, cur.o);
+      const lowerWick  = Math.min(cur.c, cur.o) - cur.l;
+      let pattern = null;
+      if (range > 0) {
+        if (body / range < 0.1) {
+          pattern = 'Doji';
+        } else if (dir === 'long'  && lowerWick > 2 * body && lowerWick > upperWick) {
+          pattern = 'Pin bar';
+        } else if (dir === 'short' && upperWick > 2 * body && upperWick > lowerWick) {
+          pattern = 'Pin bar';
+        } else if (dir === 'long'  && cur.c > cur.o && cur.o <= prev.c && cur.c >= prev.o) {
+          pattern = 'Engulfing';
+        } else if (dir === 'short' && cur.c < cur.o && cur.o >= prev.c && cur.c <= prev.o) {
+          pattern = 'Engulfing';
+        }
+      }
+      if (pattern) {
+        score += (SC.K_candle_pattern ?? 1);
+        reasons.push(pattern); strats.push('K');
+      }
+    }
+  }
+
+  // ── H. Heiken Ashi pullback — 2-4 opposing HA candles then flip with trend ──
+  {
+    const ha = calcHA(bars);
+    const haDir = c => c.c >= c.o ? 1 : -1;
+    const wantDir = dir === 'long' ? 1 : -1;
+    if (ha.length >= 5 && haDir(ha[n]) === wantDir) {
+      let pullLen = 0;
+      for (let k = n - 1; k >= Math.max(0, n - 4); k--) {
+        if (haDir(ha[k]) === -wantDir) pullLen++;
+        else break;
+      }
+      if (pullLen >= 2) {
+        score += (SC.H_ha_pullback ?? 1);
+        reasons.push(`HA pullback (${pullLen} bars)`); strats.push('H');
+      }
+    }
+  }
+
+  // ── V. Volume spike — current bar 1.5× the 20-bar average ──
+  {
+    const slice = bars.slice(Math.max(0, n - 20), n);
+    const avgVol = slice.reduce((s, b) => s + (b.v || 0), 0) / slice.length;
+    if (avgVol > 0 && last.v > avgVol * 1.5) {
+      score += (SC.V_volume_spike ?? 1);
+      reasons.push(`Volume spike ${(last.v / avgVol).toFixed(1)}×`); strats.push('V');
+    }
+  }
+
+  // ── O. ICT Optimal Trade Entry — 61.8–79% Fibonacci retracement zone ──
+  {
+    const lookback = bars.slice(Math.max(0, n - 30), n);
+    const swingH = Math.max(...lookback.map(b => b.h));
+    const swingL = Math.min(...lookback.map(b => b.l));
+    const range  = swingH - swingL;
+    if (range > 0) {
+      if (dir === 'long') {
+        const oteHigh = swingH - range * 0.618;
+        const oteLow  = swingH - range * 0.79;
+        if (last.c >= oteLow && last.c <= oteHigh) {
+          score += (SC.O_ict_ote ?? 1);
+          reasons.push(`ICT OTE long (${oteLow.toFixed(2)}–${oteHigh.toFixed(2)})`); strats.push('O');
+        }
+      } else {
+        const oteLow  = swingL + range * 0.618;
+        const oteHigh = swingL + range * 0.79;
+        if (last.c >= oteLow && last.c <= oteHigh) {
+          score += (SC.O_ict_ote ?? 1);
+          reasons.push(`ICT OTE short (${oteLow.toFixed(2)}–${oteHigh.toFixed(2)})`); strats.push('O');
+        }
+      }
+    }
+  }
+
+  // ── L. Trendline break/bounce — two-pivot structural line ──
+  // Break  (+2): price crossed a trendline (reversal signal — higher conviction)
+  // Bounce (+1): price touching but still inside a trendline (continuation signal)
+  {
+    const pivLen = 5;
+    const findPivots = (type) => {
+      const pivots = [];
+      for (let i = n - pivLen - 1; i >= pivLen && pivots.length < 2; i--) {
+        let ok = true;
+        for (let j = i - pivLen; j <= i + pivLen; j++) {
+          if (j !== i && (type === 'high' ? bars[j].h >= bars[i].h : bars[j].l <= bars[i].l)) { ok = false; break; }
+        }
+        if (ok) pivots.push({ idx: i, price: type === 'high' ? bars[i].h : bars[i].l });
+      }
+      return pivots;
+    };
+
+    if (dir === 'long') {
+      // Break: price broke above a downward-sloping resistance trendline
+      const highs = findPivots('high');
+      if (highs.length === 2) {
+        const slope = (highs[0].price - highs[1].price) / (highs[0].idx - highs[1].idx);
+        const proj  = highs[0].price + slope * (n - highs[0].idx);
+        if (slope < 0 && last.c > proj) {
+          score += (SC.L_trendline_break ?? 2);
+          reasons.push('Trendline break (resistance)'); strats.push('L');
+        }
+      }
+      // Bounce: price near an upward-sloping support trendline (trend continuation)
+      const lows = findPivots('low');
+      if (lows.length === 2 && !strats.includes('L')) {
+        const slope = (lows[0].price - lows[1].price) / (lows[0].idx - lows[1].idx);
+        const proj  = lows[0].price + slope * (n - lows[0].idx);
+        if (slope > 0 && last.l >= proj && last.l <= proj + atr[n] * 0.5) {
+          score += (SC.L_trendline_bounce ?? 1);
+          reasons.push('Trendline support (continuation)'); strats.push('L');
+        }
+      }
+    } else {
+      // Break: price broke below an upward-sloping support trendline
+      const lows = findPivots('low');
+      if (lows.length === 2) {
+        const slope = (lows[0].price - lows[1].price) / (lows[0].idx - lows[1].idx);
+        const proj  = lows[0].price + slope * (n - lows[0].idx);
+        if (slope > 0 && last.c < proj) {
+          score += (SC.L_trendline_break ?? 2);
+          reasons.push('Trendline break (support)'); strats.push('L');
+        }
+      }
+      // Bounce: price near a downward-sloping resistance trendline (trend continuation)
+      const highs = findPivots('high');
+      if (highs.length === 2 && !strats.includes('L')) {
+        const slope = (highs[0].price - highs[1].price) / (highs[0].idx - highs[1].idx);
+        const proj  = highs[0].price + slope * (n - highs[0].idx);
+        if (slope < 0 && last.h <= proj && last.h >= proj - atr[n] * 0.5) {
+          score += (SC.L_trendline_bounce ?? 1);
+          reasons.push('Trendline resistance (continuation)'); strats.push('L');
+        }
+      }
+    }
+  }
+
+  // ── BB. Bollinger Band touch or squeeze ──
+  {
+    const bb = calcBB(bars);
+    const bbN = bb[n];
+    if (bbN) {
+      if (dir === 'long'  && last.l <= bbN.lower * 1.001) {
+        score += (SC.BB_band_touch ?? 1);
+        reasons.push('BB lower band touch'); strats.push('BB');
+      } else if (dir === 'short' && last.h >= bbN.upper * 0.999) {
+        score += (SC.BB_band_touch ?? 1);
+        reasons.push('BB upper band touch'); strats.push('BB');
+      }
+      if (bbN.bw < 0.005) {
+        score += (SC.BB_squeeze ?? 1);
+        reasons.push('BB squeeze (breakout pending)'); strats.push('BB');
+      }
     }
   }
 
@@ -748,9 +982,11 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
     for (const tf of inst.tfs) {
       process.stdout.write(`${TF_LABEL[tf]||tf}:`);
       await setChart(inst.sym, tf);
-      const bars = await getBars(300);
+      // Require ≥250 bars. 500-bar request gives 15M ~450 bars (4.7 days → near-weekly T gate),
+      // 30M/1H/4H full-week coverage, D/W trivially covered. Retries 4× with 600ms gaps.
+      const bars = await waitForBars(500, 250);
 
-      if (!bars || bars.length < 50) {
+      if (!bars) {
         process.stdout.write(`? `);
         skipped.push(`${inst.label}/${tf}`);
         continue;
@@ -762,11 +998,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
       const directions = ['long', ...(inst.autoShort ? ['short'] : [])];
       for (const dir of directions) {
         const { score, reasons, strategies, rsi } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
-        // D and W bars: U (daily range context) is meaningless — price is always "somewhere in yesterday's range"
-        // on a daily/weekly chart. Only require T (macro trend alignment) for these higher TFs.
-        const isHigherTF = tf === 'D' || tf === 'W';
-        const hasTU = strategies.includes('T');
-        if (score >= minScore && hasTU) {
+        if (score >= minScore) {
           candidates.push({ tf, dir, score, reasons, strategies, rsi });
           process.stdout.write(`✓ `);
         } else {
@@ -788,10 +1020,10 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
     }
 
     await setChart(inst.sym, '15');
-    const bars15 = await getBars(200);
+    const bars15 = await waitForBars(200, 150);
 
     for (const [dir, cands] of Object.entries(byDir)) {
-      if (!bars15 || bars15.length < 50) {
+      if (!bars15) {
         process.stdout.write(`\n  → 15M fetch failed for ${inst.label}\n`);
         continue;
       }
@@ -802,7 +1034,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
       // the other way, the trade is counter-trend on the entry TF — skip it.
       // Require: SmartTrail (A) OR EMA stack (B) aligned on 15M.
       const check15 = runAllStrategies(bars15, dir, utcHour, inst.label, '15');
-      const is15mAligned = check15.strategies.includes('A') || check15.strategies.includes('T');
+      const is15mAligned = ['A', 'B', 'T', 'L'].some(s => check15.strategies.includes(s));
       if (!is15mAligned) {
         process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — 15M not aligned (score=${check15.score}), waiting\n`);
         continue;

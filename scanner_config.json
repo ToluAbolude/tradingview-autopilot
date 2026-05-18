@@ -4,14 +4,26 @@
   "notes": "Auto-updated weekly by weekly_review_agent.mjs. Edit history below.",
 
   "scoring": {
-    "A_smarttrail":      1,
-    "C_sr_fresh":        2,
-    "C_sr_retested":     3,
-    "T_weekly_trend":    1,
-    "U_pdh_pdl":         1,
-    "F_fvg_fresh":       2,
-    "F_fvg_other":       1,
-    "bias_penalty":      1
+    "A_smarttrail":       1,
+    "B_ema_stack":        1,
+    "C_sr_fresh":         2,
+    "C_sr_retested":      3,
+    "D_daily_bias":       1,
+    "F_fvg_fresh":        2,
+    "F_fvg_other":        1,
+    "H_ha_pullback":      1,
+    "K_candle_pattern":   1,
+    "L_trendline_break":  2,
+    "L_trendline_bounce": 1,
+    "O_ict_ote":          1,
+    "P_prime_session":    1,
+    "R_rsi_extreme":      1,
+    "T_weekly_trend":     1,
+    "U_pdh_pdl":          1,
+    "V_volume_spike":     1,
+    "BB_band_touch":      1,
+    "BB_squeeze":         1,
+    "bias_penalty":       1
   },
 
   "thresholds": {
