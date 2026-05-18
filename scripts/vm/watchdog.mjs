@@ -3,11 +3,33 @@
  * Runs every 5 minutes via cron.
  * Checks TradingView + BlackBull are alive. Heals if not.
  */
-import { appendFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { appendFileSync, mkdirSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import http from 'http';
 
 const ALERT_SENT_FILE = '/home/ubuntu/trading-data/.session_alert_sent';
+const WATCHDOG_LOCK   = '/home/ubuntu/trading-data/.watchdog.lock';
+
+// ── Single-instance lock ──────────────────────────────────────────────────────
+// Prevents two cron instances running concurrently (e.g. if a tick takes >5 min)
+function acquireWatchdogLock() {
+  try {
+    writeFileSync(WATCHDOG_LOCK, String(process.pid), { flag: 'wx' });
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    try {
+      const pid = parseInt(readFileSync(WATCHDOG_LOCK, 'utf8').trim(), 10);
+      if (!isNaN(pid)) {
+        try { process.kill(pid, 0); return false; } catch (_) {}
+      }
+    } catch (_) {}
+    // Stale lock — remove and retry
+    try { unlinkSync(WATCHDOG_LOCK); } catch (_) {}
+    try { writeFileSync(WATCHDOG_LOCK, String(process.pid), { flag: 'wx' }); return true; } catch (_) { return false; }
+  }
+}
+function releaseWatchdogLock() { try { unlinkSync(WATCHDOG_LOCK); } catch (_) {} }
 
 function sendAlert(subject, body) {
   try {
@@ -53,6 +75,41 @@ async function restartChrome() {
   }
 }
 
+// ── Health: kill excess session_runner processes ──────────────────────────────
+function killExcessSessionRunners() {
+  try {
+    const out = execSync('ps -eo pid,comm,args | grep session_runner.mjs | grep -v timeout | grep -v grep | awk \'{print $1}\'  2>/dev/null || true', { encoding: 'utf8' }).trim();
+    if (!out) return;
+    const pids = out.split('\n').map(p => parseInt(p.trim(), 10)).filter(Boolean);
+    if (pids.length <= 1) return;
+    // Keep the newest (highest PID), kill the rest
+    const sorted = pids.sort((a, b) => b - a);
+    const toKill = sorted.slice(1);
+    log(`HEAL: killing ${toKill.length} excess session_runner(s): ${toKill.join(', ')}`);
+    for (const pid of toKill) {
+      try { execSync(`kill ${pid} 2>/dev/null || true`); } catch (_) {}
+    }
+    try { execSync('rm -f /home/ubuntu/trading-data/session_runner.lock'); } catch (_) {}
+  } catch (_) {}
+}
+
+// ── Health: check available RAM — restart Chrome if critically low ────────────
+function checkMemory() {
+  try {
+    const meminfo = readFileSync('/proc/meminfo', 'utf8');
+    const avail = parseInt((meminfo.match(/MemAvailable:\s+(\d+)/) || [])[1] || '0', 10); // kB
+    const availMB = Math.round(avail / 1024);
+    if (availMB < 600) {
+      log(`WARN: low memory ${availMB} MB — will restart Chrome`);
+      return 'low';
+    }
+    if (availMB < 1500) {
+      log(`WARN: memory pressure — ${availMB} MB available`);
+    }
+    return 'ok';
+  } catch (_) { return 'ok'; }
+}
+
 // Run a CDP command using the cdp-tool node_modules
 async function runCdpScript(script) {
   try {
@@ -66,7 +123,29 @@ async function runCdpScript(script) {
 }
 
 async function main() {
+  if (!acquireWatchdogLock()) {
+    // Previous watchdog tick still running — skip silently to avoid log spam
+    process.exit(0);
+  }
+
+  try {
+    await _main();
+  } finally {
+    releaseWatchdogLock();
+  }
+}
+
+async function _main() {
   log('--- Watchdog tick ---');
+
+  // 0. Kill any excess session_runner processes (symptom of lock bypass under OOM)
+  killExcessSessionRunners();
+
+  // 0b. Memory check — restart Chrome if critically low
+  if (checkMemory() === 'low') {
+    await restartChrome();
+    return;
+  }
 
   // 1. Check CDP is reachable
   let tabs;
@@ -108,7 +187,6 @@ const r = await client.Runtime.evaluate({
     var tradeBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Trade');
     var bbConnected = body.includes('BlackBull') && !body.includes('Trade with your broker');
     if (!bbConnected && tradeBtn) { tradeBtn.click(); return JSON.stringify({action:'opened_trade_panel'}); }
-    // Detect full session expiry — TradingView shows sign-in page
     var sessionExpired = body.includes('Sign in') && !body.includes('chart') && !body.includes('XAUUSD');
     return JSON.stringify({ok:true, bbConnected, disconnected, sessionExpired});
   })()\`,
@@ -120,14 +198,12 @@ await client.close();
 
   log('Page state: ' + result);
 
-  // 4. Detect session expiry (logged out of TradingView account entirely)
-  //    Signs: body contains 'Sign in' or 'Log in' but NOT the chart
+  // 4. Detect session expiry (logged out of TradingView entirely)
   try {
     const state = JSON.parse(result);
     const sessionExpired = typeof state === 'object' && state.sessionExpired;
 
     if (sessionExpired) {
-      // Only send one alert per expiry event (avoid spam)
       if (!existsSync(ALERT_SENT_FILE)) {
         writeFileSync(ALERT_SENT_FILE, new Date().toISOString());
         sendAlert(
@@ -144,7 +220,6 @@ await client.close();
         );
       }
     } else {
-      // Clear the alert flag once session is healthy again
       if (existsSync(ALERT_SENT_FILE)) {
         try { execSync('rm ' + ALERT_SENT_FILE); } catch {}
         log('Session healthy — alert flag cleared');
