@@ -18,7 +18,7 @@
  */
 
 import { scanForSetups } from './setup_finder.mjs';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
 
@@ -158,6 +158,23 @@ async function runScan(state) {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
+// Single-instance lock — prevents two scanners racing on the same Chrome tab
+const SCANNER_LOCK = join(DATA_ROOT, 'market_scanner.lock');
+if (existsSync(SCANNER_LOCK)) {
+  const pid = parseInt(readFileSync(SCANNER_LOCK, 'utf8').trim(), 10);
+  let alive = false;
+  try { process.kill(pid, 0); alive = true; } catch (_) {}
+  if (alive) {
+    console.error(`[market_scanner] Another instance is running (PID ${pid}). Exiting.`);
+    process.exit(1);
+  }
+  unlinkSync(SCANNER_LOCK); // stale lock
+}
+writeFileSync(SCANNER_LOCK, String(process.pid));
+process.on('exit', () => { try { unlinkSync(SCANNER_LOCK); } catch (_) {} });
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+
 console.log('\n══════════════════════════════════════════════════════');
 console.log('  Market Scanner — 15-min continuous scan');
 console.log(`  Threshold ≥${MIN_SCORE} | 27 instruments | All sessions`);

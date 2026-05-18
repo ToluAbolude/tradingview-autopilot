@@ -216,12 +216,14 @@ function getOpenSymbols() {
   if (!existsSync(LOG_FILE)) return new Set();
   const lines = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1);
   const open = new Set();
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const line of lines) {
     if (!line.trim()) continue;
     const cols = line.split(',');
     const symbol = (cols[2] || '').trim();
     const result = (cols[10] || '').trim();
-    if (symbol && symbol !== 'NONE' && !result) open.add(symbol);
+    const tradeDate = new Date(cols[0] || '').getTime();
+    if (symbol && symbol !== 'NONE' && !result && tradeDate > cutoff) open.add(symbol);
   }
   return open;
 }
@@ -511,7 +513,7 @@ async function main() {
     const riskPct  = best.score >= 8 ? baseRisk + 0.5 : baseRisk;
     const totalLots = calcLots(best.label, riskPct, equity, best.entry, best.sl);
     const halfLots  = Math.max(0.01, Math.floor((totalLots / 2) / LOT_STEP) * LOT_STEP);
-    const sym       = best.sym.replace('BLACKBULL:', '');
+    const sym       = best.label;
 
     log(`\n── ${best.label} ${best.dir.toUpperCase()} | Risk:${riskPct}% | ${halfLots}×2 lots ──`);
     log(`   O1(1.0R):${best.tp2} | O2(2.0R):${best.tp3} | SL:${best.sl}`);

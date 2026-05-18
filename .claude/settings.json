@@ -88,10 +88,19 @@
       "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\session_runner.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/session_runner.mjs)",
       "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/market_scanner.mjs \"c:\\\\Users\\\\Tda-d\\\\tradingview-mcp-jackson\\\\scripts\\\\trading\\\\market_scanner.mjs\")",
       "Bash(scp -i ~/.ssh/id_rsa_oracle c:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/eod_agent.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/eod_agent.mjs)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle c:/Users/Tda-d/tradingview-mcp-jackson/scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scanner_config.json)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle c:/Users/Tda-d/tradingview-mcp-jackson/scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scanner_config.json)",
+      "Bash(ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"cat /home/ubuntu/tradingview-mcp-jackson/watchdog.mjs\" > /tmp/watchdog_vm.mjs && echo \"fetched\")",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle c:\\\\tmp\\\\fix_watchdog.js ubuntu@132.145.44.68:/tmp/fix_watchdog.js)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/fix_watchdog.js ubuntu@132.145.44.68:/tmp/fix_watchdog.js)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/fix_open_symbols.js ubuntu@132.145.44.68:/tmp/fix_open_symbols.js)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/check_sym.mjs ubuntu@132.145.44.68:/tmp/check_sym.mjs)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/check_bars.mjs ubuntu@132.145.44.68:/tmp/check_bars.mjs)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/add_scanner_lock.js ubuntu@132.145.44.68:/tmp/add_scanner_lock.js)",
+      "Bash(scp -i __TRACKED_VAR__/.ssh/id_rsa_oracle C:/tmp/fix_rr_check.js ubuntu@132.145.44.68:/tmp/fix_rr_check.js)"
     ],
     "additionalDirectories": [
-      "C:\\Users\\Tda-d\\job-scanner"
+      "C:\\Users\\Tda-d\\job-scanner",
+      "\\tmp"
     ]
   }
 }

@@ -78,7 +78,7 @@ async function restartChrome() {
 // ── Health: kill excess session_runner processes ──────────────────────────────
 function killExcessSessionRunners() {
   try {
-    const out = execSync('pgrep -f session_runner.mjs 2>/dev/null || true', { encoding: 'utf8' }).trim();
+    const out = execSync('ps -eo pid,comm,args | grep session_runner.mjs | grep -v timeout | grep -v grep | awk \'{print $1}\'  2>/dev/null || true', { encoding: 'utf8' }).trim();
     if (!out) return;
     const pids = out.split('\n').map(p => parseInt(p.trim(), 10)).filter(Boolean);
     if (pids.length <= 1) return;

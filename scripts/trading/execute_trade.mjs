@@ -342,6 +342,7 @@ export async function placeOrder({
   units,
   tpPrice,     // REQUIRED — take profit price level
   slPrice,     // REQUIRED — stop loss price level
+  minRR = 2.0, // minimum R:R at actual fill price — rejects if market has moved adversely
   screenshot = false,
 }) {
   if (!tpPrice || !slPrice) throw new Error('tpPrice and slPrice are required for every trade.');
@@ -367,6 +368,23 @@ export async function placeOrder({
   if (!ticket) throw new Error('Order ticket not found after retry. Is TradingView connected?');
 
   console.log(`  Ticket: bid=${ticket.sell} ask=${ticket.buy}`);
+
+  // R:R pre-flight: verify actual fill price hasn't degraded R:R below minimum
+  if (minRR > 0) {
+    const isBuyDir = direction === 'buy' || direction === 'long';
+    const fillPrice = isBuyDir ? ticket.buy : ticket.sell;
+    if (fillPrice) {
+      const actualRisk   = isBuyDir ? fillPrice - slPrice  : slPrice  - fillPrice;
+      const actualReward = isBuyDir ? tpPrice  - fillPrice : fillPrice - tpPrice;
+      const actualRR = actualReward / actualRisk;
+      if (actualRR < minRR) {
+        await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, keyCode: 27 }))`);
+        await sleep(300);
+        throw new Error(`R:R degraded to ${actualRR.toFixed(2)} at current price ${fillPrice} (min ${minRR}) — skipping`);
+      }
+      console.log(`  R:R check OK: ${actualRR.toFixed(2)} >= ${minRR} at fill ${fillPrice}`);
+    }
+  }
 
   // Set quantity
   await setQty(units);
