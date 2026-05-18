@@ -64,7 +64,7 @@ function releaseLock() {
 const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
 const PARAMS = existsSync(PARAMS_FILE)
   ? JSON.parse(readFileSync(PARAMS_FILE, 'utf8'))
-  : { scoreThreshold: 6, stopRuleLosses: 2, riskPct: [5.0, 3.5, 2.5], slAtrMult: 1.5, minRR: 2.0, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
+  : { scoreThreshold: 6, stopRuleLosses: 4, riskPct: [5.0, 3.5, 2.5], slAtrMult: 1.5, minRR: 2.0, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
 
 // Daily context written by morning_agent.mjs at 08:45 UTC — bias, skip flag, threshold override
 const DAILY_CONTEXT_FILE = join(DATA_ROOT, 'daily_context', `${new Date().toISOString().slice(0, 10)}.json`);
@@ -147,6 +147,20 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   } else if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC/.test(sym)) {
     contractSize = 1;
     pipSize      = 1.0;
+  } else if (/WTI|USOIL|CRUDE|OIL/.test(sym)) {
+    // WTI crude oil: $10 per $0.01/bbl move per lot (1 lot = 1000 bbl on most CFD brokers)
+    const pipValuePerLot = 10.0;
+    const slPips = slDist / 0.01;
+    let lots = riskAmt / (pipValuePerLot * slPips);
+    lots = Math.floor(lots / LOT_STEP) * LOT_STEP;
+    return Math.min(Math.max(lots, MIN_LOT), MAX_LOTS);
+  } else if (/GER40|UK100|DAX|FTSE/.test(sym)) {
+    // EU cash indices: ~$1 per point per lot
+    const pipValuePerLot = 1.0;
+    const slPips = slDist; // already in points
+    let lots = riskAmt / (pipValuePerLot * slPips);
+    lots = Math.floor(lots / LOT_STEP) * LOT_STEP;
+    return Math.min(Math.max(lots, MIN_LOT), MAX_LOTS);
   } else if (/JPY/.test(sym)) {
     // JPY pairs: pip = 0.01; pip value ≈ $0.07 per micro lot — use $6.50/pip per std lot estimate
     contractSize = 100000;
@@ -327,8 +341,8 @@ async function main() {
       .filter(l => l.startsWith(todayStr))
       .map(l => { const p = l.split(','); return { result: (p[10]||'').trim(), pnl: parseFloat(p[11]||0)||0, score: p[5], session: p[1], symbol: p[2] }; });
     const perf = analyzePerformance(trades);
-    if (perf.currentConsecLoss >= PARAMS.stopRuleLosses) {
-      log(`⚠ STOP RULE: ${perf.currentConsecLoss} consecutive losses today (limit: ${PARAMS.stopRuleLosses}). Skipping session.`);
+    if (perf.consecLossSameSymbol >= PARAMS.stopRuleLosses) {
+      log(`⚠ STOP RULE: ${perf.consecLossSameSymbol} consecutive losses on same instrument (limit: ${PARAMS.stopRuleLosses}). Skipping session.`);
       return;
     }
   }
@@ -508,12 +522,30 @@ async function main() {
   // 6. Place 2 orders per selected instrument (day-trade — EOD close at 20:00 UTC is the backstop)
   //    O1: 1/2 risk at 1.0R main target
   //    O2: 1/2 risk at 2.0R runner (closed at EOD if not hit — never overnight)
+  // Sanity check: expected price ranges per instrument — rejects corrupt scanner signals
+  const PRICE_RANGES = {
+    WTI: [40, 200], USOIL: [40, 200],
+    XAUUSD: [1000, 4000], XAGUSD: [10, 100],
+    GER40: [10000, 30000], UK100: [6000, 13000],
+    NAS100: [10000, 30000], US30: [25000, 55000], SPX500: [3000, 7000],
+    BTCUSD: [10000, 200000], ETHUSD: [500, 15000], SOLUSD: [10, 1000],
+    XRPUSD: [0.1, 20], BNBUSD: [100, 2000], LTCUSD: [20, 500],
+  };
+
   let totalPlaced = 0;
   for (const best of dedupedSelected) {
+    const sym = best.label;
+
+    // Guard against corrupt signal prices (e.g. scanner writing NAS100 prices into WTI)
+    const priceRange = PRICE_RANGES[sym.toUpperCase()];
+    if (priceRange && (best.entry < priceRange[0] || best.entry > priceRange[1])) {
+      log(`  ⚠ ${sym}: entry ${best.entry} outside expected range [${priceRange[0]}–${priceRange[1]}] — skipping corrupt signal`);
+      continue;
+    }
+
     const riskPct  = best.score >= 8 ? baseRisk + 0.5 : baseRisk;
     const totalLots = calcLots(best.label, riskPct, equity, best.entry, best.sl);
     const halfLots  = Math.max(0.01, Math.floor((totalLots / 2) / LOT_STEP) * LOT_STEP);
-    const sym       = best.label;
 
     log(`\n── ${best.label} ${best.dir.toUpperCase()} | Risk:${riskPct}% | ${halfLots}×2 lots ──`);
     log(`   O1(1.0R):${best.tp2} | O2(2.0R):${best.tp3} | SL:${best.sl}`);
@@ -562,5 +594,5 @@ async function main() {
 }
 
 main()
-  .catch(e => { console.error('Fatal:', e.message); process.exit(1); })
-  .finally(() => releaseLock());
+  .catch(e => { console.error('Fatal:', e.stack || e.message); process.exit(1); })
+  .finally(() => { releaseLock(); process.exit(0); });

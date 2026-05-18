@@ -393,6 +393,14 @@ export async function placeOrder({
   const tpslResult = await setTPSL(tpPrice, slPrice);
   console.log(`  TP/SL set: ${JSON.stringify(tpslResult)}`);
 
+  // Abort if TP/SL inputs were not found — means the ticket is on the wrong instrument
+  // or the BlackBull panel hasn't finished loading. Submitting without TP/SL is never safe.
+  if (tpslResult?.tpError || tpslResult?.slError) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, keyCode: 27 }))`);
+    await sleep(300);
+    throw new Error(`TP/SL inputs not found — wrong instrument or panel not loaded (${JSON.stringify(tpslResult)})`);
+  }
+
   // Submit
   const isBuy = direction === 'buy' || direction === 'long';
   const clickResult = isBuy ? await submitBuy() : await submitSell();

@@ -46,7 +46,7 @@ Oracle Cloud VM (ubuntu@132.145.44.68)
 |----------|------|--------|---------|
 | `*/15` | Mon–Fri | `session_runner.mjs` | Main scan cycle |
 | `*/15 22-23` | Sun | `session_runner.mjs` | Forex Sunday open (Asian session) |
-| `*/5` | Daily | `watchdog.mjs` | Keep TradingView + BlackBull alive |
+| `*/5` | Daily | `scripts/vm/watchdog.mjs` | Keep TradingView + BlackBull alive |
 | 09:00 | Mon–Fri | `run_jobs.sh` | Job pipeline |
 | 20:00 | Mon–Fri | `eod_close.mjs` | EOD force-close (first pass) |
 | 20:30 | Mon–Fri | `review_params.mjs` | Daily parameter review |

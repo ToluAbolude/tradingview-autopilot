@@ -64,17 +64,32 @@ export function analyzePerformance(trades) {
   }
 
   // Consecutive losses (for stop rule)
+  // curConsecLoss: total consecutive losses regardless of instrument
+  // consecLossSameSymbol: consecutive losses all on the SAME instrument (stop rule trigger)
   let maxConsecLoss = 0, curConsecLoss = 0;
   for (const t of [...completed].reverse()) {
     if (parseFloat(t.pnl) < 0) { curConsecLoss++; maxConsecLoss = Math.max(maxConsecLoss, curConsecLoss); }
     else break;
   }
 
+  // Count trailing same-symbol consecutive losses
+  let consecLossSameSymbol = 0;
+  if (curConsecLoss >= 2) {
+    const recent = [...completed].reverse().slice(0, curConsecLoss);
+    const firstSym = recent[0]?.symbol;
+    if (firstSym) {
+      for (const t of recent) {
+        if (t.symbol === firstSym && parseFloat(t.pnl) < 0) consecLossSameSymbol++;
+        else break;
+      }
+    }
+  }
+
   // Recommendations
   const recs = [];
   if (wr < 50 && completed.length >= 10) recs.push('WR below 50% — tighten entry criteria, require score ≥5');
   if (pf < 1.5 && completed.length >= 10) recs.push('PF below 1.5 — widen TP or tighten SL');
-  if (curConsecLoss >= 2) recs.push('⚠ 2+ consecutive losses — STOP TRADING this session');
+  if (consecLossSameSymbol >= 4) recs.push(`⚠ 4+ consecutive losses on ${completed.slice(-1)[0]?.symbol} — STOP TRADING this session`);
   if (bySession['ASIAN']?.total > 3 && bySession['ASIAN'].pnl < 0) recs.push('Asian session losing — skip it, focus on London-NY');
 
   return {
@@ -87,6 +102,7 @@ export function analyzePerformance(trades) {
     avgWin:   Math.round(avgWin  * 100) / 100,
     avgLoss:  Math.round(avgLoss * 100) / 100,
     currentConsecLoss: curConsecLoss,
+    consecLossSameSymbol,
     maxConsecLoss,
     byScore,
     bySession,
