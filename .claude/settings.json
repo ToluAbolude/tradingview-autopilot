@@ -111,7 +111,14 @@
       "Bash(grep -v \"evaluate\\\\`\\\\|//\\\\|textContent\\\\|innerHTML\\\\|\\\\.mjs:[0-9]*:.*\\\\`\")",
       "Bash(node --check \"c:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/session_runner.mjs\")",
       "Bash(node --check \"c:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/performance_tracker.mjs\")",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/session_runner.mjs\" \"c:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/performance_tracker.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/session_runner.mjs\" \"c:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/performance_tracker.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle \"C:/Users/Tda-d/tradingview-mcp-jackson/scripts/vm/watchdog.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/vm/watchdog.mjs)",
+      "Bash(scp -i C:/Users/Tda-d/.ssh/id_rsa_oracle \"C:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/execute_trade.mjs\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/execute_trade.mjs)",
+      "Bash('\\)'\\\\''\\); *)",
+      "Bash(git -C c:/Users/Tda-d/tradingview-mcp-jackson diff --stat)",
+      "Bash(git -C c:/Users/Tda-d/tradingview-mcp-jackson status)",
+      "Bash(git -C c:/Users/Tda-d/tradingview-mcp-jackson add scripts/trading/eod_agent.mjs scripts/trading/execute_trade.mjs scripts/trading/position_monitor.mjs scripts/trading/review_params.mjs scripts/trading/session_runner.mjs scripts/vm/watchdog.mjs scripts/vm/set_tpsl_positions.mjs)",
+      "Bash(git -C c:/Users/Tda-d/tradingview-mcp-jackson commit -m ' *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
