@@ -153,7 +153,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // sometimes returns too few bars (e.g. 60 instead of 300), making EMA-50/200 and
 // the weekly trend proxy (needs ~270 bars on 15M) completely inaccurate.
 // This polls until minRequired bars are available, retrying up to maxRetries times.
-async function waitForBars(count = 300, minRequired = 200, maxRetries = 4, retryMs = 600) {
+export async function waitForBars(count = 300, minRequired = 200, maxRetries = 4, retryMs = 600) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const bars = await getBars(count);
     if (bars && bars.length >= minRequired) return bars;
@@ -965,9 +965,24 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
   const results  = [];
   const skipped  = [];
 
+  // ── Load today's daily watchlist if available (written by daily_selector.mjs at 06:30 UTC) ──
+  const WATCHLIST_FILE = join(DATA_ROOT, 'daily_watchlist.json');
+  let scanList = FULL_SCAN_LIST;
+  try {
+    if (existsSync(WATCHLIST_FILE)) {
+      const wl = JSON.parse(readFileSync(WATCHLIST_FILE, 'utf8'));
+      const today = new Date().toISOString().slice(0, 10);
+      if (wl.date === today && Array.isArray(wl.instruments) && wl.instruments.length > 0) {
+        scanList = wl.instruments;
+        console.log(`  [daily_selector] Using today's watchlist: ${scanList.map(i => i.label).join(', ')}`);
+      }
+    }
+  } catch (_) {}
+
+  // Priority: put session-relevant symbols first, then the rest (preserving watchlist bias order)
   const ordered = [
-    ...FULL_SCAN_LIST.filter(i => priority.includes(i.label)),
-    ...FULL_SCAN_LIST.filter(i => !priority.includes(i.label)),
+    ...scanList.filter(i => priority.includes(i.label)),
+    ...scanList.filter(i => !priority.includes(i.label)),
   ];
 
   console.log(`\n  UTC ${utcHour}:xx — Priority symbols: ${priority.join(', ')}`);
