@@ -220,7 +220,8 @@ async function main() {
 
     // Ticks 2-3: give broker panel time to stabilise before acting on "not found"
     if (ticks <= 3 && !state.found && prevPositions && !prevPositions.found) {
-      log(`${SYMBOL} still not found on tick ${ticks} — exiting (order may have been rejected)`);
+      log(`${SYMBOL} still not found on tick ${ticks} — broker silently rejected order. Marking VOID.`);
+      updateLastTrade('VOID', 0, 'BROKER_SILENT_REJECT_not_in_positions');
       return;
     }
 

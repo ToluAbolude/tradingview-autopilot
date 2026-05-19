@@ -67,7 +67,7 @@ const PARAMS = existsSync(PARAMS_FILE)
   ? JSON.parse(readFileSync(PARAMS_FILE, 'utf8'))
   : { scoreThreshold: 6, stopRuleLosses: 4, riskPct: [5.0, 3.5, 2.5], slAtrMult: 1.5, minRR: 2.0, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
 
-// Daily context written by morning_agent.mjs at 08:45 UTC — bias, skip flag, threshold override
+// Daily context written by morning_agent.mjs at 06:45 UTC — bias, skip flag, threshold override
 const DAILY_CONTEXT_FILE = join(DATA_ROOT, 'daily_context', `${new Date().toISOString().slice(0, 10)}.json`);
 
 function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
@@ -89,15 +89,20 @@ function logTrade(entry) {
 }
 
 // Determine current session name
+// All boundaries in UTC. London is currently BST (UTC+1), so sessions are 1h earlier vs GMT.
+//   ASIAN:             00:00–07:00 UTC  (07:00–14:00 BST)
+//   LONDON:            07:00–12:00 UTC  (08:00–13:00 BST)
+//   LONDON-NY-OVERLAP: 12:00–16:00 UTC  (13:00–17:00 BST, NY opens 13:30 UTC in EDT)
+//   NY:                16:00–20:00 UTC  (17:00–21:00 BST)
 function currentSession() {
   const now = new Date();
   const h   = now.getUTCHours();
   const day = now.getUTCDay();
   if (day === 0 && h >= 22) return 'ASIAN'; // Sunday night market open
-  if (h >= 13 && h < 17) return 'LONDON-NY-OVERLAP';
-  if (h >= 8  && h < 13) return 'LONDON';
-  if (h >= 17 && h < 20) return 'NY';
-  if (h >= 0  && h < 8)  return 'ASIAN';
+  if (h >= 12 && h < 16) return 'LONDON-NY-OVERLAP';
+  if (h >= 7  && h < 12) return 'LONDON';
+  if (h >= 16 && h < 20) return 'NY';
+  if (h >= 0  && h < 7)  return 'ASIAN';
   return 'DEAD-ZONE';
 }
 
