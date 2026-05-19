@@ -248,16 +248,24 @@ async function getOpenSymbols() {
         var text = (row.innerText||'').replace(/\\s+/g,' ').trim();
         if (!/(Short|Long)/i.test(text) || text.length < 10) return;
         var m = text.match(/^([A-Z0-9]{3,10})/);
-        if (m) syms.push(m[1]);
+        if (m) {
+          var raw = m[1];
+          // Strip trailing S/L that gets merged when broker renders direction without whitespace
+          var sym = (raw.length > 6 && /^[SL]$/.test(raw.slice(-1))) ? raw.slice(0, -1) : raw;
+          syms.push(sym);
+        }
       });
       return JSON.stringify([...new Set(syms)]);
     })()`);
 
     const live = new Set(JSON.parse(json || '[]'));
+    // CDP succeeded — trust panel as ground truth even when empty
     if (live.size > 0) {
       log(`  Live positions from BlackBull: ${[...live].join(', ')}`);
-      return live;
+    } else {
+      log('  Live positions: 0 (panel confirms no open positions)');
     }
+    return live;
   } catch(e) {
     log(`  getOpenSymbols CDP error: ${e.message} — falling back to trades.csv`);
   }
