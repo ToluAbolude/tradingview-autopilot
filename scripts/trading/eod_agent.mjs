@@ -286,14 +286,8 @@ function staticFallback(trades, params) {
     recs.push({ param: 'blockedSymbolExpiry', current: expiry, proposed: newExpiry, reason: 'Remove expired entries', condition: 'companion' });
   }
 
-  const bySess   = computeBreakdown(trades, 'session');
-  const blockedS = [...(params.blockedSessions || [])];
-  for (const [sess, d] of Object.entries(bySess)) {
-    if (d.total >= 5 && d.wr < 35 && d.pnl < 0 && !blockedS.includes(sess)) {
-      blockedS.push(sess);
-      recs.push({ param: 'blockedSessions', current: params.blockedSessions, proposed: [...blockedS], reason: `${sess} WR ${d.wr}% < 35% and net PnL £${d.pnl}`, confidence: 'medium', condition: `${sess} WR=${d.wr}% PnL=${d.pnl}` });
-    }
-  }
+  // Session blocking disabled — losses were caused by missing TP/SL, not bad sessions.
+  // Blocking LONDON costs more than it saves. Symbol blocking handles persistent underperformers.
 
   return { analysis: `Static fallback: WR=${overall.wr}% PF=${overall.pf} over ${overall.total} trades.`, recommendations: recs, risk_flag: null };
 }

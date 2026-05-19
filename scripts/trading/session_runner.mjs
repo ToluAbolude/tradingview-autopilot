@@ -11,6 +11,7 @@
 import { fetchHighImpactNews, isSafeToTrade, filterForSymbol } from './news_checker.mjs';
 import { scanForSetups } from './setup_finder.mjs'; // fallback only — primary source is live_signals.json
 import { placeOrder, getEquity, closeAllPositions } from './execute_trade.mjs';
+import { evaluate } from '../../src/connection.js';
 import { fetchTwitterSignals, aggregateSignals } from './twitter_feed.mjs';
 import { analyzePerformance } from './performance_tracker.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync, unlinkSync } from 'fs';
@@ -226,7 +227,42 @@ function getRecentLossCooldowns() {
 }
 
 // Returns symbols that have an unresolved (no result recorded) trade in the CSV
-function getOpenSymbols() {
+// Read live open positions directly from the BlackBull panel — source of truth.
+// Falls back to trades.csv if CDP fails, to avoid skipping good entries on error.
+async function getOpenSymbols() {
+  // Click Positions tab and read rows
+  try {
+    await evaluate(`(function(){
+      var btns = document.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        if ((btns[i].textContent||'').trim() === 'Positions') { btns[i].click(); break; }
+      }
+    })()`);
+    await new Promise(r => setTimeout(r, 800));
+
+    const json = await evaluate(`(function(){
+      if (/there are no open po/i.test(document.body.innerText||'')) return '[]';
+      var rows = Array.from(document.querySelectorAll('tr'));
+      var syms = [];
+      rows.forEach(function(row) {
+        var text = (row.innerText||'').replace(/\\s+/g,' ').trim();
+        if (!/(Short|Long)/i.test(text) || text.length < 10) return;
+        var m = text.match(/^([A-Z0-9]{3,10})/);
+        if (m) syms.push(m[1]);
+      });
+      return JSON.stringify([...new Set(syms)]);
+    })()`);
+
+    const live = new Set(JSON.parse(json || '[]'));
+    if (live.size > 0) {
+      log(`  Live positions from BlackBull: ${[...live].join(', ')}`);
+      return live;
+    }
+  } catch(e) {
+    log(`  getOpenSymbols CDP error: ${e.message} — falling back to trades.csv`);
+  }
+
+  // Fallback: trades.csv (less reliable — monitor may have wrongly marked closed)
   if (!existsSync(LOG_FILE)) return new Set();
   const lines = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1);
   const open = new Set();
@@ -486,7 +522,7 @@ async function main() {
   selected.forEach((s, i) => log(`  ${i+1}. [${s.score}/16] ${s.label} ${s.tf}M ${s.dir.toUpperCase()} | Entry:${s.entry} SL:${s.sl} | ${s.reasons.slice(0,2).join(', ')}`));
 
   // 5. Deduplication — skip if same symbol OR a correlated-group member is already open
-  const openSymbols = getOpenSymbols();
+  const openSymbols = await getOpenSymbols();
   if (openSymbols.size > 0) log(`  Already open: ${[...openSymbols].join(', ')}`);
   const dedupedSelected = selected.filter(s => {
     if (openSymbols.has(s.label)) {

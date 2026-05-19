@@ -201,23 +201,8 @@ function generateRecommendations(trades, params) {
     });
   }
 
-  // ── 5. Per-session: block sessions with consistent losses ─────────────────
-  const bySession = computeBreakdown(trades, 'session');
-  const currentBlockedSessions = params.blockedSessions || [];
-
-  for (const [sess, d] of Object.entries(bySession)) {
-    if (d.total >= MIN_TRADES_SESSION && d.wr < 35 && d.pnl < 0
-        && !currentBlockedSessions.includes(sess)) {
-      const newBlockedSessions = [...currentBlockedSessions, sess];
-      recs.push({
-        param: 'blockedSessions',
-        current: currentBlockedSessions,
-        proposed: newBlockedSessions,
-        reason: `${sess} session: WR ${d.wr}% < 35% AND net PnL £${d.pnl} over ${d.total} trades`,
-        condition: `${sess} WR=${d.wr}% PnL=${d.pnl} over ${d.total} trades`,
-      });
-    }
-  }
+  // Session blocking disabled — losses were caused by missing TP/SL, not bad sessions.
+  // Symbol-level blocking already handles persistent underperformers.
 
   return recs;
 }

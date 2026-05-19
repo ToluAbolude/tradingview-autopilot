@@ -123,57 +123,79 @@ export async function setQty(units) {
 }
 
 // ── Set TP and SL prices in the order ticket ──
-// tpPrice and slPrice are absolute price levels
-// Split into two evaluate() calls: first enable checkboxes, then (after React re-renders)
-// re-query inputs and set values. Querying inputs before clicking checkboxes returns a
-// stale NodeList that misses fields TradingView conditionally renders on checkbox enable.
+// tpPrice and slPrice are absolute price levels.
+// Uses data-qa-id selectors so it works regardless of order type (market vs limit).
+// Checkbox activation uses the React-aware native property setter + change event —
+// plain .click() updates the DOM but bypasses React's synthetic event system, so
+// the conditional TP/SL input fields never render.
 export async function setTPSL(tpPrice, slPrice) {
-  // Pass 1 — enable TP and SL checkboxes if not already checked
+  // Pass 1 — enable TP and SL toggles if not already on, using React-compatible method
   await evaluate(`(function() {
     var ticket = document.querySelector('[class*="orderTicket"]');
     if (!ticket) return;
-    var checkboxes = ticket.querySelectorAll('input[type="checkbox"]');
-    if (checkboxes[0] && !checkboxes[0].checked) checkboxes[0].click();
-    if (checkboxes[1] && !checkboxes[1].checked) checkboxes[1].click();
+    var checkedSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+    var tpCb = ticket.querySelector('[data-qa-id="order-ticket-take-profit-checkbox-bracket"]');
+    var slCb = ticket.querySelector('[data-qa-id="order-ticket-stop-loss-checkbox-bracket"]');
+    if (tpCb && !tpCb.checked) {
+      checkedSetter.call(tpCb, true);
+      tpCb.dispatchEvent(new Event('change', { bubbles: true }));
+      tpCb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    }
+    if (slCb && !slCb.checked) {
+      checkedSetter.call(slCb, true);
+      slCb.dispatchEvent(new Event('change', { bubbles: true }));
+      slCb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    }
   })()`);
 
-  // Wait for React to re-render the TP/SL input fields
-  await sleep(600);
+  // Wait for React to render the TP/SL price input fields
+  await sleep(800);
 
-  // Pass 2 — re-query inputs now that TP/SL fields exist in the DOM, then set values
-  const result = await evaluate(`(function() {
-    var ticket = document.querySelector('[class*="orderTicket"]');
-    if (!ticket) return { error: 'no ticket' };
+  // Pass 2 — find inputs by data-qa-id and set values; retry up to 4× if not yet rendered
+  let result;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    result = await evaluate(`(function() {
+      var ticket = document.querySelector('[class*="orderTicket"]');
+      if (!ticket) return { error: 'no ticket' };
 
-    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    var textInputs = ticket.querySelectorAll('input[type="text"]');
-    // textInputs[0]=qty, textInputs[1]=TP price, textInputs[2]=SL price
-    var tpInput = textInputs[1] || null;
-    var slInput = textInputs[2] || null;
-    var results = {};
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      var tpInput = ticket.querySelector('[data-qa-id~="order-ticket-take-profit-input"]');
+      var slInput = ticket.querySelector('[data-qa-id~="order-ticket-stop-loss-input"]');
+      var results = {};
 
-    if (tpInput && ${tpPrice} > 0) {
-      setter.call(tpInput, '${tpPrice}');
-      tpInput.dispatchEvent(new Event('input',  { bubbles: true }));
-      tpInput.dispatchEvent(new Event('change', { bubbles: true }));
-      tpInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      results.tpSet = tpInput.value;
-    } else {
-      results.tpError = 'input not found (index 1 of ' + textInputs.length + ')';
-    }
+      function fillInput(el, val) {
+        el.focus();
+        el.select();
+        // execCommand('insertText') is the only method that fully propagates
+        // through React's synthetic event system in Chromium — native setter
+        // + dispatchEvent sets the DOM value but leaves React's state empty,
+        // so the field value is dropped when the order is submitted.
+        document.execCommand('selectAll', false, null);
+        document.execCommand('insertText', false, String(val));
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+        el.blur();
+      }
 
-    if (slInput && ${slPrice} > 0) {
-      setter.call(slInput, '${slPrice}');
-      slInput.dispatchEvent(new Event('input',  { bubbles: true }));
-      slInput.dispatchEvent(new Event('change', { bubbles: true }));
-      slInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      results.slSet = slInput.value;
-    } else {
-      results.slError = 'input not found (index 2 of ' + textInputs.length + ')';
-    }
+      if (tpInput && ${tpPrice} > 0) {
+        fillInput(tpInput, ${tpPrice});
+        results.tpSet = tpInput.value;
+      } else {
+        results.tpError = tpInput ? 'no tp price' : 'tp input not found';
+      }
 
-    return results;
-  })()`);
+      if (slInput && ${slPrice} > 0) {
+        fillInput(slInput, ${slPrice});
+        results.slSet = slInput.value;
+      } else {
+        results.slError = slInput ? 'no sl price' : 'sl input not found';
+      }
+
+      return results;
+    })()`);
+
+    if (!result?.tpError && !result?.slError) break;
+    if (attempt < 3) await sleep(700);
+  }
   await sleep(400);
   return result;
 }

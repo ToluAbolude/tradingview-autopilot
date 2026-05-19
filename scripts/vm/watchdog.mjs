@@ -110,6 +110,27 @@ function checkMemory() {
   } catch (_) { return 'ok'; }
 }
 
+// Navigate a crashed renderer tab back to TradingView
+async function recoverCrashedTab(tabId) {
+  const TV_URL = 'https://www.tradingview.com/chart/';
+  try {
+    await runCdpScript(`
+import CDP from '/home/ubuntu/cdp-tool/node_modules/chrome-remote-interface/index.js';
+const client = await CDP({target: '${tabId}', port: 9222});
+try {
+  await client.Page.enable();
+  await client.Page.navigate({url: '${TV_URL}'});
+  console.log('navigated');
+} catch(e) { console.log('nav error: ' + e.message); }
+await client.close();
+`);
+    log('Crashed tab navigated to TradingView');
+  } catch (e) {
+    log('recoverCrashedTab error: ' + e.message + ' — falling back to Chrome restart');
+    await restartChrome();
+  }
+}
+
 // Run a CDP command using the cdp-tool node_modules
 async function runCdpScript(script) {
   try {
@@ -151,7 +172,7 @@ async function _main() {
   let tabs;
   try {
     tabs = await cdpGet('/json');
-    if (!tabs || !Array.isArray(tabs)) throw new Error('invalid response');
+    if (!Array.isArray(tabs)) throw new Error('invalid response');
   } catch (e) {
     log('CDP unreachable: ' + e.message + ' — restarting Chrome');
     await restartChrome();
@@ -160,12 +181,26 @@ async function _main() {
 
   // 2. Check TradingView tab exists
   const tvTab = tabs.find(t => t.type === 'page' && t.url && t.url.includes('tradingview.com'));
-  if (!tvTab) {
+  const crashedTab = tabs.find(t => t.type === 'page' && t.url && (
+    t.url.startsWith('chrome-error://') || t.url === 'about:blank#crashed'
+  ));
+
+  if (crashedTab) {
+    log(`RENDERER CRASH detected on tab ${crashedTab.id} (${crashedTab.url}) — navigating to TradingView`);
+    await recoverCrashedTab(crashedTab.id);
+    await sleep(8000);
+    // Re-check tabs after recovery
+    try {
+      tabs = await cdpGet('/json');
+    } catch (_) {}
+  }
+
+  if (!tvTab && !crashedTab) {
     log('No TradingView tab — restarting Chrome');
     await restartChrome();
     return;
   }
-  log('TV tab OK: ' + tvTab.url.slice(0, 60));
+  if (tvTab) log('TV tab OK: ' + tvTab.url.slice(0, 60));
 
   // 3. Check for disconnected session + BlackBull status, auto-heal
   const CDP_MODULE = '/home/ubuntu/cdp-tool/node_modules/chrome-remote-interface/index.js';
