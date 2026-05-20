@@ -959,7 +959,7 @@ const DEFAULT_PROFILE = { slMode: 'sr', maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0
 //
 // One setup is emitted per instrument+direction, not per TF.
 // MTF bonus: +1 if 2 TFs agree, +2 if 3+ TFs agree.
-export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
+export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = null) {
   const utcHour  = new Date().getUTCHours();
   const priority = sessionSymbols(utcHour);
   const results  = [];
@@ -1207,6 +1207,12 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5) {
 
       results.push(setup);
       process.stdout.write(`\n  ✅ ${inst.label} 15M ${dir.toUpperCase()} [${finalScore}] | MTF:${tfList} | Entry:${setup.entry} SL:${setup.sl} TP:${setup.tp2}\n`);
+
+      // Inline trade callback — scanner pauses here while the trade is placed,
+      // then continues to the next instrument without waiting for the position to close.
+      if (onSetup) {
+        try { await onSetup(setup); } catch (e) { process.stdout.write(`  [inline_trader] ${e.message}\n`); }
+      }
     }
   }
 

@@ -18,6 +18,7 @@
  */
 
 import { scanForSetups } from './setup_finder.mjs';
+import { attemptInlineTrade, resetCycleState } from './inline_trader.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
@@ -69,9 +70,13 @@ async function runScan(state) {
   const scanNo = (state.meta.scan_count || 0) + 1;
   console.log(`\n[${scanTs}] Scan #${scanNo}...`);
 
+  // Reset per-cycle trade state so correlated-group and concurrent limits apply
+  // within each scan cycle independently.
+  resetCycleState();
+
   let fresh = [];
   try {
-    fresh = await scanForSetups(MIN_SCORE);
+    fresh = await scanForSetups(MIN_SCORE, 1.5, attemptInlineTrade);
   } catch (e) {
     console.error(`  Scan error: ${e.message}`);
     return state;
