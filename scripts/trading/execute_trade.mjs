@@ -129,27 +129,36 @@ export async function setQty(units) {
 // plain .click() updates the DOM but bypasses React's synthetic event system, so
 // the conditional TP/SL input fields never render.
 export async function setTPSL(tpPrice, slPrice) {
-  // Pass 1 — enable TP and SL toggles if not already on, using React-compatible method
+  // Pass 1 — always force-enable TP and SL toggles, regardless of current state.
+  // Skipping when "already checked" is unreliable: the broker panel retains the toggle
+  // state from the previous order, but React may not have rendered the input fields yet.
+  // We always fire the full activation sequence: native setter + change + click.
   await evaluate(`(function() {
     var ticket = document.querySelector('[class*="orderTicket"]');
     if (!ticket) return;
     var checkedSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+
+    function enableToggle(cb) {
+      if (!cb) return;
+      // If already checked, uncheck first so the click below reliably re-enables it
+      if (cb.checked) {
+        checkedSetter.call(cb, false);
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+        cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }
+      checkedSetter.call(cb, true);
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+      cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    }
+
     var tpCb = ticket.querySelector('[data-qa-id="order-ticket-take-profit-checkbox-bracket"]');
     var slCb = ticket.querySelector('[data-qa-id="order-ticket-stop-loss-checkbox-bracket"]');
-    if (tpCb && !tpCb.checked) {
-      checkedSetter.call(tpCb, true);
-      tpCb.dispatchEvent(new Event('change', { bubbles: true }));
-      tpCb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    }
-    if (slCb && !slCb.checked) {
-      checkedSetter.call(slCb, true);
-      slCb.dispatchEvent(new Event('change', { bubbles: true }));
-      slCb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    }
+    enableToggle(tpCb);
+    enableToggle(slCb);
   })()`);
 
-  // Wait for React to render the TP/SL price input fields
-  await sleep(800);
+  // Wait for React to render both TP and SL price input fields
+  await sleep(1200);
 
   // Pass 2 — find inputs by data-qa-id and set values; retry up to 4× if not yet rendered
   let result;
@@ -422,6 +431,26 @@ export async function placeOrder({
     await sleep(300);
     throw new Error(`TP/SL inputs not found — wrong instrument or panel not loaded (${JSON.stringify(tpslResult)})`);
   }
+
+  // Pre-submit verification — confirm both TP and SL are present in the ticket DOM
+  // before clicking the button. If either is missing, abort rather than submit naked.
+  const verify = await evaluate(`(function() {
+    var ticket = document.querySelector('[class*="orderTicket"]');
+    if (!ticket) return { ok: false, reason: 'no ticket' };
+    var tpInput = ticket.querySelector('[data-qa-id~="order-ticket-take-profit-input"]');
+    var slInput = ticket.querySelector('[data-qa-id~="order-ticket-stop-loss-input"]');
+    return {
+      ok:      !!tpInput && !!slInput && tpInput.value !== '' && slInput.value !== '',
+      tpValue: tpInput  ? tpInput.value  : null,
+      slValue: slInput  ? slInput.value  : null,
+    };
+  })()`);
+  if (!verify?.ok) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, keyCode: 27 }))`);
+    await sleep(300);
+    throw new Error(`Pre-submit check failed — TP/SL not confirmed in ticket (tp=${verify?.tpValue} sl=${verify?.slValue}). Order aborted.`);
+  }
+  console.log(`  Pre-submit OK: TP=${verify.tpValue} SL=${verify.slValue}`);
 
   // Submit
   const isBuy = direction === 'buy' || direction === 'long';
