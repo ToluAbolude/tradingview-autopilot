@@ -913,26 +913,26 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 // tpCap:    max TP1 distance as ATR multiple
 // tp3Cap:   max runner (TP2) distance as ATR multiple
 const INST_PROFILE = {
-  // Commodities: institutional FVG zones are reliable; structural SL needed for large swings
-  // Gold/Silver/Oil respect key daily/weekly levels strongly — FVG + S&R is ideal
-  XAUUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.50 },
-  XAGUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.50 },
-  WTI:    { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.50 },
+  // Commodities: FVG + S&R zones — wide SL to survive institutional sweeps before trend resumes
+  XAUUSD: { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
+  XAGUSD: { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
+  WTI:    { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
 
-  // Crypto: FVG + order block confluences dominate; price sweeps liquidity before moving
-  // Wider SL required to survive stop hunts below FVG / OB — tight SL = guaranteed stop-out
-  BTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.10, tpCap: 2.00, tp3Cap: 3.00 },
-  ETHUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.10, tpCap: 2.00, tp3Cap: 3.00 },
-  LTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.00 },
-  XRPUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.08, tpCap: 1.50, tp3Cap: 2.00 },
+  // Crypto: wide SL required — liquidity sweeps below OBs are routine before continuation
+  BTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.15, tpCap: 2.00, tp3Cap: 3.50 },
+  ETHUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.15, tpCap: 2.00, tp3Cap: 3.50 },
+  LTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.15, tpCap: 1.50, tp3Cap: 2.50 },
+  XRPUSD: { slMode: 'fvg_sr', maxSlAtr: 0.60, minSlAtr: 0.15, tpCap: 1.50, tp3Cap: 2.50 },
 
-  // Indices: momentum-driven; frequently gap THROUGH wick-to-body S&R zones at session open
-  // ATR-based SL is more reliable than zone snapping; tight TP for session burst capture
-  NAS100: { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
-  US30:   { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
-  SPX500: { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
-  GER40:  { slMode: 'atr',    maxSlAtr: 0.35, minSlAtr: 0.08, tpCap: 0.80, tp3Cap: 1.20 },
-  UK100:  { slMode: 'atr',    maxSlAtr: 0.30, minSlAtr: 0.08, tpCap: 0.70, tp3Cap: 1.10 },
+  // Indices: ATR-based SL — gap through zones at open; 0.30 was smaller than spread causing instant stops
+  NAS100: { slMode: 'atr',    maxSlAtr: 1.20, minSlAtr: 0.25, tpCap: 2.50, tp3Cap: 4.00 },
+  US30:   { slMode: 'atr',    maxSlAtr: 1.20, minSlAtr: 0.25, tpCap: 2.50, tp3Cap: 4.00 },
+  SPX500: { slMode: 'atr',    maxSlAtr: 1.20, minSlAtr: 0.25, tpCap: 2.50, tp3Cap: 4.00 },
+  GER40:  { slMode: 'atr',    maxSlAtr: 1.50, minSlAtr: 0.25, tpCap: 3.00, tp3Cap: 5.00 },
+  UK100:  { slMode: 'atr',    maxSlAtr: 1.20, minSlAtr: 0.25, tpCap: 2.50, tp3Cap: 4.00 },
+  AUS200: { slMode: 'atr',    maxSlAtr: 1.20, minSlAtr: 0.25, tpCap: 2.50, tp3Cap: 4.00 },
+  JP225:  { slMode: 'atr',    maxSlAtr: 1.50, minSlAtr: 0.25, tpCap: 3.00, tp3Cap: 5.00 },
+  HK50:   { slMode: 'atr',    maxSlAtr: 1.50, minSlAtr: 0.25, tpCap: 3.00, tp3Cap: 5.00 },
 
   // Forex majors: wick-to-body S&R zones are reliable; moderate ATR, tight intraday ranges
   EURUSD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 },
@@ -1203,6 +1203,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
         rr:         actualRR,
         rsi:        avgRsi,
         tier:       inst.tier,
+        mtfTFs:     cands.map(c => c.tf),
       };
 
       results.push(setup);

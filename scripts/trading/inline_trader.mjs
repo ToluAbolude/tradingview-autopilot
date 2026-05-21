@@ -70,7 +70,7 @@ async function getNews() {
 
 // ── Param loader — reads trading_params.json each call (hot-reload) ────────────
 function loadParams() {
-  if (!existsSync(PARAMS_FILE)) return { scoreThreshold: 6, stopRuleLosses: 4, riskPct: [6.0, 4.2, 3.0], maxConcurrent: 4, blockedSessions: [], blockedSymbols: [] };
+  if (!existsSync(PARAMS_FILE)) return { scoreThreshold: 8, stopRuleLosses: 4, riskPct: [6.0, 4.2, 3.0], maxConcurrent: 3, blockedSessions: [], blockedSymbols: [] };
   return JSON.parse(readFileSync(PARAMS_FILE, 'utf8'));
 }
 
@@ -86,7 +86,7 @@ function currentSession() {
   return 'DEAD-ZONE';
 }
 
-// ── Loss cooldown — 60 min per symbol+dir ─────────────────────────────────────
+// ── Loss cooldown — 60 min per symbol (both directions blocked after any loss) ──
 function getRecentLossCooldowns() {
   const cooldowns = new Set();
   if (!existsSync(LOG_FILE)) return cooldowns;
@@ -97,12 +97,44 @@ function getRecentLossCooldowns() {
     const cols   = line.split(',');
     const ts     = (cols[0] || '').trim();
     const symbol = (cols[2] || '').trim();
-    const dir    = (cols[4] || '').trim();
     const result = (cols[10] || '').trim();
-    if (!ts || !symbol || !dir || result !== 'L') continue;
-    try { if (new Date(ts).getTime() >= cutoff) cooldowns.add(`${symbol}:${dir}`); } catch (_) {}
+    if (!ts || !symbol || result !== 'L') continue;
+    try { if (new Date(ts).getTime() >= cutoff) cooldowns.add(symbol); } catch (_) {}
   }
   return cooldowns;
+}
+
+// ── Per-symbol daily trade count ───────────────────────────────────────────────
+function getDailySymbolCounts() {
+  const counts = {};
+  if (!existsSync(LOG_FILE)) return counts;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const lines = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1);
+  for (const line of lines) {
+    if (!line.trim() || !line.startsWith(todayStr)) continue;
+    const cols   = line.split(',');
+    const symbol = (cols[2] || '').trim();
+    const result = (cols[10] || '').trim();
+    // Only count placed trades (W or L), not VOID/?
+    if (!symbol || symbol === 'NONE' || !['W', 'L'].includes(result)) continue;
+    counts[symbol] = (counts[symbol] || 0) + 1;
+  }
+  return counts;
+}
+
+// ── Daily total trade count ────────────────────────────────────────────────────
+function getDailyTotalCount() {
+  if (!existsSync(LOG_FILE)) return 0;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const lines = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1);
+  let count = 0;
+  for (const line of lines) {
+    if (!line.trim() || !line.startsWith(todayStr)) continue;
+    const cols   = line.split(',');
+    const result = (cols[10] || '').trim();
+    if (['W', 'L'].includes(result)) count++;
+  }
+  return count;
 }
 
 // ── Open positions via BlackBull CDP panel ─────────────────────────────────────
@@ -238,8 +270,16 @@ export async function attemptInlineTrade(setup) {
   }
 
   // ── 3. Score gate ──────────────────────────────────────────────────────────
-  const threshold = PARAMS.scoreThreshold || 6;
+  const threshold = PARAMS.scoreThreshold || 8;
   if (setup.score < threshold) { log(`Score ${setup.score} < ${threshold}. Skip.`); return; }
+
+  // ── 3b. MTF depth gate — reject pure short-TF signals (15M/30M only) ───────
+  // A setup with no ≥1H confluence is a single-timeframe signal with no macro backing.
+  const SENIOR_TFS = new Set(['60', '240', 'D', 'W']);
+  const mtfTFs = setup.mtfTFs || [];
+  if (!mtfTFs.some(tf => SENIOR_TFS.has(tf))) {
+    log(`No ≥1H TF confluence — MTF TFs: [${mtfTFs.join(',') || 'none'}]. Skip.`); return;
+  }
 
   // ── 4. News safety ─────────────────────────────────────────────────────────
   let allNews = [];
@@ -262,10 +302,47 @@ export async function attemptInlineTrade(setup) {
     }
   }
 
+  // ── 5b. Per-symbol daily trade cap ────────────────────────────────────────
+  // Max 2 executed (W/L) trades per symbol per day — prevents overtrading one instrument.
+  const MAX_DAILY_PER_SYMBOL = PARAMS.maxDailyPerSymbol || 2;
+  const symbolCounts = getDailySymbolCounts();
+  if ((symbolCounts[setup.label] || 0) >= MAX_DAILY_PER_SYMBOL) {
+    log(`Daily cap: ${symbolCounts[setup.label]}/${MAX_DAILY_PER_SYMBOL} trades already taken on ${setup.label} today. Skip.`); return;
+  }
+
+  // ── 5c. Daily total trades cap ────────────────────────────────────────────
+  // Absolute ceiling on trades per day across all symbols.
+  const MAX_DAILY_TOTAL = PARAMS.maxDailyTotal || 5;
+  const dailyTotal = getDailyTotalCount();
+  if (dailyTotal >= MAX_DAILY_TOTAL) {
+    log(`Daily total cap reached (${dailyTotal}/${MAX_DAILY_TOTAL} trades today). Skip.`); return;
+  }
+
+  // ── 5d. Daily drawdown halt ───────────────────────────────────────────────
+  // If today's realised PnL is a loss worse than 3% of equity, halt for the day.
+  if (existsSync(LOG_FILE)) {
+    const todayStr = now.toISOString().slice(0, 10);
+    const todayPnl = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1)
+      .filter(l => l.startsWith(todayStr))
+      .reduce((sum, l) => {
+        const p = l.split(',');
+        const result = (p[10] || '').trim();
+        if (!['W', 'L'].includes(result)) return sum;
+        return sum + (parseFloat(p[11] || 0) || 0);
+      }, 0);
+    const equityData = await getEquity().catch(() => ({}));
+    const equity     = equityData.equity || equityData.balance || 10000;
+    const drawdownPct = (todayPnl / equity) * 100;
+    const MAX_DAILY_DRAWDOWN_PCT = PARAMS.maxDailyDrawdownPct || 3;
+    if (drawdownPct <= -MAX_DAILY_DRAWDOWN_PCT) {
+      log(`Daily drawdown halt: today P&L ${todayPnl.toFixed(0)} = ${drawdownPct.toFixed(1)}% (limit -${MAX_DAILY_DRAWDOWN_PCT}%). No more trades today.`); return;
+    }
+  }
+
   // ── 6. Loss cooldown ───────────────────────────────────────────────────────
   const cooldowns = getRecentLossCooldowns();
-  if (cooldowns.has(`${setup.label}:${setup.dir}`)) {
-    log(`60-min loss cooldown active for ${setup.label} ${setup.dir}. Skip.`); return;
+  if (cooldowns.has(setup.label)) {
+    log(`60-min loss cooldown active for ${setup.label} (any direction). Skip.`); return;
   }
 
   // ── 7. Blocked symbols ─────────────────────────────────────────────────────
