@@ -1,0 +1,52 @@
+{
+  "meta": {
+    "started": "2026-05-21T09:00:00Z",
+    "last_scan": "2026-05-21T10:15:00Z",
+    "next_scan_due": "2026-05-21T10:30:00Z",
+    "scan_count": 1,
+    "total_signals": 2,
+    "active_count": 2
+  },
+  "summary": "ES1! 15M LONG [8] | NQ1! 60M SHORT [7]",
+  "active": [
+    {
+      "id": "ES1!-15-long",
+      "ts": "2026-05-21T10:15:00Z",
+      "expires": "2026-05-21T10:45:00Z",
+      "label": "ES1!",
+      "tf": "15",
+      "dir": "long",
+      "score": 8,
+      "strategies": ["Trend", "S&R", "FVG"],
+      "entry": 5450.50,
+      "sl": 5435.00,
+      "tp1": 5460.00,
+      "tp2": 5475.00,
+      "tp3": 5490.00,
+      "rr": 2.47,
+      "rsi": 62,
+      "tier": 1,
+      "reasons": ["Price above EMA20", "Support hold at 5440", "FVG fill target 5475", "Volume spike on entry bar", "RSI 62 (not overbought)"]
+    },
+    {
+      "id": "NQ1!-60-short",
+      "ts": "2026-05-21T10:15:00Z",
+      "expires": "2026-05-21T12:15:00Z",
+      "label": "NQ1!",
+      "tf": "60",
+      "dir": "short",
+      "score": 7,
+      "strategies": ["Trend", "S&R"],
+      "entry": 18520.00,
+      "sl": 18600.00,
+      "tp1": 18450.00,
+      "tp2": 18400.00,
+      "tp3": 18350.00,
+      "rr": 1.89,
+      "rsi": 71,
+      "tier": 2,
+      "reasons": ["Price near H4 resistance", "S&R zone rejection", "RSI at 71 (overbought)", "Divergence on MACD"]
+    }
+  ],
+  "history": []
+}

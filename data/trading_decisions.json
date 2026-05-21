@@ -1,0 +1,58 @@
+{
+  "meta": {
+    "started": "2026-05-21T10:15:00Z",
+    "last_decision": "2026-05-21T10:20:00Z",
+    "total_decisions": 2,
+    "trades_approved": 1,
+    "trades_rejected": 1
+  },
+  "recent_decisions": [
+    {
+      "timestamp": "2026-05-21T10:20:00Z",
+      "decision": "TRADE",
+      "symbol": "ES1!",
+      "tf": "15",
+      "direction": "LONG",
+      "entry": 5450.50,
+      "sl": 5435.00,
+      "tp": 5475.00,
+      "rr": 2.47,
+      "score": 8,
+      "tier": 1,
+      "reasoning": "✅ Score 8 ≥ 6. ✅ R:R 2.47 ≥ 2:1. ✅ All strategies present (Trend+S&R+FVG). ✅ RSI 62 (healthy, not overbought). ✅ Price above EMA20, support holding. Entry on FVG fill target. Risk tier 1 (5% position).",
+      "validation": {
+        "score_check": "8 >= 6: PASS",
+        "rr_check": "2.47 >= 2:1: PASS",
+        "strategy_check": "Trend + S&R + FVG: PASS",
+        "rsi_check": "62 (not overbought): PASS"
+      },
+      "sources_checked": ["live_signals.json", "Strategy Overhaul rules"],
+      "sentiment_context": "Market context: Awaited macro data pending. Tech sector stabilizing after recent volatility. Risk on bias moderate.",
+      "action": "EXECUTE"
+    },
+    {
+      "timestamp": "2026-05-21T10:20:15Z",
+      "decision": "SKIP",
+      "symbol": "NQ1!",
+      "tf": "60",
+      "direction": "SHORT",
+      "entry": 18520.00,
+      "sl": 18600.00,
+      "tp": 18400.00,
+      "rr": 1.89,
+      "score": 7,
+      "tier": 2,
+      "reasoning": "❌ R:R 1.89 < 2:1 minimum threshold. Score 7 ≥ 6 (passes). Strategies present (Trend+S&R) but NO FVG. RSI 71 (overbought) supports short bias BUT rule violation on R:R makes this unsuitable. Rejected per Strategy Overhaul enforcement.",
+      "validation": {
+        "score_check": "7 >= 6: PASS",
+        "rr_check": "1.89 >= 2:1: FAIL ❌",
+        "strategy_check": "Trend + S&R (missing FVG): PARTIAL",
+        "rsi_check": "71 (overbought, valid for short): PASS"
+      },
+      "sources_checked": ["live_signals.json", "Strategy Overhaul rules"],
+      "rejection_reason": "R:R < 2:1 is non-negotiable. This fails the minimum threshold.",
+      "action": "DO_NOT_EXECUTE"
+    }
+  ],
+  "history": []
+}
