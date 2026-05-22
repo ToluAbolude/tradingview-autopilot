@@ -1,0 +1,12 @@
+{
+  "generatedAt": "2026-05-22T16:37:01.237Z",
+  "analysisWindow": "last 30 days",
+  "tradeCount": 0,
+  "overall": "insufficient data",
+  "bySymbol": {},
+  "bySession": {},
+  "recommendations": [],
+  "noChanges": true,
+  "applyCommand": "node scripts/trading/apply_params.mjs --apply",
+  "previewCommand": "node scripts/trading/apply_params.mjs --preview"
+}

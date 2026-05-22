@@ -1,0 +1,14 @@
+{
+  "_note": "Hermes-style goal definition. Reflection scores recent performance against these thresholds.",
+  "_lastUpdated": "2026-05-22",
+  "startingEquity": 26209,
+  "_startingEquity_note": "Denominator for return %/drawdown %. Should be equity at the START of the 30d window. Computed 2026-05-22 as current_balance($7499) - 30d_cum_pnl(-$18710). Current balance: $7499.",
+  "targetReturn30d": 0.05,
+  "maxDrawdown": 0.08,
+  "minSharpe": 1.2,
+  "minProfitFactor": 1.2,
+  "minWinRate": 0.40,
+  "failureBelow": -0.04,
+  "reflectionEvery": 5,
+  "oneVariableOnly": true
+}
