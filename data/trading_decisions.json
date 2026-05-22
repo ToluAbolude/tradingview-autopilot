@@ -1,10 +1,10 @@
 {
   "meta": {
     "started": "2026-05-21T10:15:00Z",
-    "last_decision": "2026-05-21T10:20:00Z",
-    "total_decisions": 2,
-    "trades_approved": 1,
-    "trades_rejected": 1
+    "last_decision": "2026-05-22T12:00:51.327Z",
+    "total_decisions": 4,
+    "trades_approved": 2,
+    "trades_rejected": 2
   },
   "recent_decisions": [
     {
@@ -13,9 +13,9 @@
       "symbol": "ES1!",
       "tf": "15",
       "direction": "LONG",
-      "entry": 5450.50,
-      "sl": 5435.00,
-      "tp": 5475.00,
+      "entry": 5450.5,
+      "sl": 5435,
+      "tp": 5475,
       "rr": 2.47,
       "score": 8,
       "tier": 1,
@@ -26,7 +26,10 @@
         "strategy_check": "Trend + S&R + FVG: PASS",
         "rsi_check": "62 (not overbought): PASS"
       },
-      "sources_checked": ["live_signals.json", "Strategy Overhaul rules"],
+      "sources_checked": [
+        "live_signals.json",
+        "Strategy Overhaul rules"
+      ],
       "sentiment_context": "Market context: Awaited macro data pending. Tech sector stabilizing after recent volatility. Risk on bias moderate.",
       "action": "EXECUTE"
     },
@@ -36,9 +39,9 @@
       "symbol": "NQ1!",
       "tf": "60",
       "direction": "SHORT",
-      "entry": 18520.00,
-      "sl": 18600.00,
-      "tp": 18400.00,
+      "entry": 18520,
+      "sl": 18600,
+      "tp": 18400,
       "rr": 1.89,
       "score": 7,
       "tier": 2,
@@ -49,8 +52,55 @@
         "strategy_check": "Trend + S&R (missing FVG): PARTIAL",
         "rsi_check": "71 (overbought, valid for short): PASS"
       },
-      "sources_checked": ["live_signals.json", "Strategy Overhaul rules"],
+      "sources_checked": [
+        "live_signals.json",
+        "Strategy Overhaul rules"
+      ],
       "rejection_reason": "R:R < 2:1 is non-negotiable. This fails the minimum threshold.",
+      "action": "DO_NOT_EXECUTE"
+    },
+    {
+      "timestamp": "2026-05-22T12:00:09.722Z",
+      "decision": "TRADE",
+      "symbol": "ES1!",
+      "tf": "15",
+      "direction": "LONG",
+      "entry": 5450.5,
+      "sl": 5435,
+      "tp": 5475,
+      "rr": 2.47,
+      "score": 8,
+      "tier": 1,
+      "trifecta": "0/3",
+      "confluence": "Trend:— | Level:— | Signal:—",
+      "reasoning": "✅ Score 8, R:R 2.47:1, Trifecta 0/3. Trend:— | Level:— | Signal:—. Execute tier-1 (5%).",
+      "validation": {
+        "score_check": "8 >= 6: PASS",
+        "rr_check": "2.47 >= 2:1: PASS",
+        "trifecta_check": "0/3 families (Trend:0, Level:0, Signal:0): WEAK"
+      },
+      "action": "EXECUTE"
+    },
+    {
+      "timestamp": "2026-05-22T12:00:51.332Z",
+      "decision": "SKIP",
+      "symbol": "ES1!",
+      "tf": "15",
+      "direction": "LONG",
+      "entry": 5450.5,
+      "sl": 5435,
+      "tp": 5475,
+      "rr": 2.47,
+      "score": 8,
+      "tier": 1,
+      "trifecta": "0/3",
+      "confluence": "Trend:— | Level:— | Signal:—",
+      "reasoning": "❌ Zero Trifecta families (no Trend/Level/Signal — Trend:— | Level:— | Signal:—)",
+      "validation": {
+        "score_check": "8 >= 6: PASS",
+        "rr_check": "2.47 >= 2:1: PASS",
+        "trifecta_check": "0/3 families (Trend:0, Level:0, Signal:0): WEAK"
+      },
       "action": "DO_NOT_EXECUTE"
     }
   ],

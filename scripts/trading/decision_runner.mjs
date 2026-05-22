@@ -3,25 +3,33 @@
  *
  * Runs every 15 minutes via systemd timer.
  * Reads live_signals.json from market scanner.
- * Validates against Strategy Overhaul rules.
+ * Validates against Strategy Overhaul rules + Trifecta confluence.
  * Writes trade/skip decisions to trading_decisions.json.
  *
  * Usage:
  *   node scripts/trading/decision_runner.mjs
+ *
+ * NOTE: This file LOGS decisions for monitoring/audit. The actual trade
+ * execution path is market_scanner → inline_trader (called inline during
+ * each scan). Keeping the rule set here in sync with inline_trader's gates
+ * makes the decision log a faithful mirror of what the executor will do.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
+import { familiesFor, hasTrifecta, describeConfluence, trifectaCount } from './confluence.mjs';
 
 const IS_LINUX = os.platform() === 'linux';
 const DATA_ROOT = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
 const SIGNALS_FILE = join(DATA_ROOT, 'live_signals.json');
 const DECISIONS_FILE = join(DATA_ROOT, 'trading_decisions.json');
+const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
 
-// Strategy Overhaul rules (non-negotiable)
-const MIN_SCORE = 6;
-const MIN_RR = 2.0;
+// Default rules (overridable via trading_params.json)
+const DEFAULT_MIN_SCORE = 6;
+const DEFAULT_MIN_RR    = 2.0;
+const DEFAULT_REQUIRE_TRIFECTA = false; // matches inline_trader default
 
 function load(filepath) {
   if (!existsSync(filepath)) return null;
@@ -34,22 +42,41 @@ function save(filepath, data) {
   writeFileSync(filepath, JSON.stringify(data, null, 2));
 }
 
-function validateSignal(sig) {
-  const issues = [];
-
-  if (sig.score < MIN_SCORE) issues.push(`Score ${sig.score} < ${MIN_SCORE}`);
-  if (sig.rr < MIN_RR) issues.push(`R:R ${sig.rr} < ${MIN_RR}:1`);
-
-  const hasAllStrategies = sig.strategies && sig.strategies.includes('Trend') &&
-                           sig.strategies.includes('S&R') &&
-                           sig.strategies.includes('FVG');
-  if (!hasAllStrategies) issues.push('Missing Trend/S&R/FVG');
-
-  return { valid: issues.length === 0, issues };
+function loadParams() {
+  const p = load(PARAMS_FILE) || {};
+  return {
+    minScore:        p.scoreThreshold ?? DEFAULT_MIN_SCORE,
+    minRR:           p.minRR ?? DEFAULT_MIN_RR,
+    requireTrifecta: p.requireTrifecta ?? DEFAULT_REQUIRE_TRIFECTA,
+    trifectaBonus:   p.trifectaScoreBonus ?? 1, // when missing Trifecta, require score + bonus
+  };
 }
 
-function makeDecision(sig) {
-  const { valid, issues } = validateSignal(sig);
+function validateSignal(sig, params) {
+  const issues = [];
+  const fams = familiesFor(sig.strategies || []);
+  const trif = trifectaCount(sig.strategies || []);
+
+  if (sig.score < params.minScore) issues.push(`Score ${sig.score} < ${params.minScore}`);
+  if (sig.rr < params.minRR)       issues.push(`R:R ${sig.rr} < ${params.minRR}:1`);
+
+  if (params.requireTrifecta && trif < 3) {
+    issues.push(`Missing Trifecta (${trif}/3 families — ${describeConfluence(sig.strategies)})`);
+  } else if (trif === 0) {
+    // No structure backing at all — never trade regardless of score
+    issues.push(`Zero Trifecta families (no Trend/Level/Signal — ${describeConfluence(sig.strategies)})`);
+  } else if (trif < 3) {
+    // Soft gate: partial Trifecta needs higher effective score (matches inline_trader)
+    const need = params.minScore + (trif === 2 ? 1 : 2);
+    if (sig.score < need) issues.push(`Partial Trifecta (${trif}/3) needs score ≥ ${need} (got ${sig.score})`);
+  }
+
+  return { valid: issues.length === 0, issues, fams, trif };
+}
+
+function makeDecision(sig, params) {
+  const { valid, issues, fams, trif } = validateSignal(sig, params);
+  const conf = describeConfluence(sig.strategies || []);
 
   return {
     timestamp: new Date().toISOString(),
@@ -63,13 +90,15 @@ function makeDecision(sig) {
     rr: sig.rr,
     score: sig.score,
     tier: sig.tier,
+    trifecta: `${trif}/3`,
+    confluence: conf,
     reasoning: valid
-      ? `✅ All rules met. Score ${sig.score}, R:R ${sig.rr}:1, strategies: ${sig.strategies.join('+')}. Execute tier-${sig.tier} (${[5, 3.5, 2.5][sig.tier - 1]}%).`
+      ? `✅ Score ${sig.score}, R:R ${sig.rr}:1, Trifecta ${trif}/3. ${conf}. Execute tier-${sig.tier} (${[5, 3.5, 2.5][sig.tier - 1]}%).`
       : `❌ ${issues.join('. ')}`,
     validation: {
-      score_check: `${sig.score} >= ${MIN_SCORE}: ${sig.score >= MIN_SCORE ? 'PASS' : 'FAIL'}`,
-      rr_check: `${sig.rr} >= ${MIN_RR}:1: ${sig.rr >= MIN_RR ? 'PASS' : 'FAIL'}`,
-      strategy_check: sig.strategies.join('+') + (validateSignal(sig).valid ? ': PASS' : ': FAIL'),
+      score_check:    `${sig.score} >= ${params.minScore}: ${sig.score >= params.minScore ? 'PASS' : 'FAIL'}`,
+      rr_check:       `${sig.rr} >= ${params.minRR}:1: ${sig.rr >= params.minRR ? 'PASS' : 'FAIL'}`,
+      trifecta_check: `${trif}/3 families (Trend:${fams.trend.length}, Level:${fams.level.length}, Signal:${fams.signal.length}): ${trif === 3 ? 'FULL' : trif === 2 ? 'PARTIAL' : 'WEAK'}`,
     },
     action: valid ? 'EXECUTE' : 'DO_NOT_EXECUTE'
   };
@@ -77,7 +106,8 @@ function makeDecision(sig) {
 
 async function runDecisionCycle() {
   const cycleTs = new Date().toISOString();
-  console.log(`\n[${cycleTs}] Decision cycle starting...`);
+  const params = loadParams();
+  console.log(`\n[${cycleTs}] Decision cycle starting... (minScore=${params.minScore} minRR=${params.minRR} requireTrifecta=${params.requireTrifecta})`);
 
   // Load signals
   const signalsData = load(SIGNALS_FILE);
@@ -95,10 +125,11 @@ async function runDecisionCycle() {
 
   // Process top signal (highest score)
   const topSignal = signalsData.active[0];
-  const decision = makeDecision(topSignal);
+  const decision = makeDecision(topSignal, params);
 
-  console.log(`  ${decision.decision} [${decision.symbol} ${decision.tf}M ${decision.direction}]`);
-  console.log(`  Reasoning: ${decision.reasoning.slice(0, 80)}...`);
+  console.log(`  ${decision.decision} [${decision.symbol} ${decision.tf}M ${decision.direction}] Trifecta=${decision.trifecta}`);
+  console.log(`  Confluence: ${decision.confluence}`);
+  console.log(`  Reasoning: ${decision.reasoning.slice(0, 120)}...`);
 
   // Update metadata
   decisionsData.meta.last_decision = cycleTs;

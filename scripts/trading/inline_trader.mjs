@@ -20,6 +20,8 @@ import { placeOrder, getEquity, closeAllPositions } from './execute_trade.mjs';
 import { evaluate } from '../../src/connection.js';
 import { fetchHighImpactNews, isSafeToTrade, filterForSymbol } from './news_checker.mjs';
 import { analyzePerformance } from './performance_tracker.mjs';
+import { trifectaCount, describeConfluence, hasTrifecta } from './confluence.mjs';
+import { verifyOrderLanded } from './broker_history.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -244,6 +246,42 @@ export function resetCycleState() {
   _cyclePlacedCount = 0;
 }
 
+// ── Broker-reject temporary block list ─────────────────────────────────────────
+// When verifyOrderLanded reports MISSING for a symbol, that symbol is added here
+// for BROKER_BLOCK_TTL_MS so we stop spamming submit clicks the broker drops.
+// Persisted to disk so the block survives scanner restarts.
+const BROKER_BLOCK_FILE   = join(DATA_ROOT, 'broker_rejects.json');
+const BROKER_BLOCK_TTL_MS = 4 * 60 * 60 * 1000;  // 4 hours — long enough to outlast a transient session/liquidity issue
+
+function loadBrokerBlocks() {
+  if (!existsSync(BROKER_BLOCK_FILE)) return {};
+  try { return JSON.parse(readFileSync(BROKER_BLOCK_FILE, 'utf8')); }
+  catch (_) { return {}; }
+}
+
+function saveBrokerBlocks(map) {
+  try { writeFileSync(BROKER_BLOCK_FILE, JSON.stringify(map, null, 2)); } catch (_) {}
+}
+
+function blockSymbolTemporarily(symbol, reason) {
+  const blocks = loadBrokerBlocks();
+  blocks[symbol] = { until: Date.now() + BROKER_BLOCK_TTL_MS, reason, blockedAt: new Date().toISOString() };
+  saveBrokerBlocks(blocks);
+}
+
+function isBrokerBlocked(symbol) {
+  const blocks = loadBrokerBlocks();
+  const rec = blocks[symbol];
+  if (!rec) return null;
+  if (Date.now() >= rec.until) {
+    // Expired — clean up
+    delete blocks[symbol];
+    saveBrokerBlocks(blocks);
+    return null;
+  }
+  return rec;
+}
+
 // ── Main entry — called inline by scanForSetups for each qualifying setup ─────
 export async function attemptInlineTrade(setup) {
   const tag = `[inline_trader][${setup.label}]`;
@@ -269,9 +307,43 @@ export async function attemptInlineTrade(setup) {
     log(`Session '${session}' is blocked. Skip.`); return;
   }
 
-  // ── 3. Score gate ──────────────────────────────────────────────────────────
+  // ── 2b. Broker-reject temporary block ──────────────────────────────────────
+  // If this symbol's last submit was silently dropped by BlackBull, skip it
+  // until the TTL expires (default 4h). Prevents the kind of 6-WTI-VOIDs-in-a-row
+  // scenario seen on 2026-05-22.
+  const brokerBlock = isBrokerBlocked(setup.label);
+  if (brokerBlock) {
+    const minsLeft = Math.round((brokerBlock.until - Date.now()) / 60000);
+    log(`Broker-rejecting cooldown active for ${setup.label} (${brokerBlock.reason}, ${minsLeft}m left). Skip.`);
+    return;
+  }
+
+  // ── 3. Score gate — Trifecta-aware ─────────────────────────────────────────
+  // Trifecta: Trend + Level + Signal families (see confluence.mjs).
+  //   3/3 (full)     → standard score threshold applies
+  //   2/3 (partial)  → +1 score required (compensate the missing leg)
+  //   1/3 (weak)     → +2 score required (almost always reject)
+  //   0/3            → reject unconditionally (no structure backing)
+  //
+  // requireTrifecta=true in params forces a hard reject of anything < 3/3.
   const threshold = PARAMS.scoreThreshold || 8;
-  if (setup.score < threshold) { log(`Score ${setup.score} < ${threshold}. Skip.`); return; }
+  const trif = trifectaCount(setup.strategies || []);
+  const conf = describeConfluence(setup.strategies || []);
+
+  if (PARAMS.requireTrifecta && trif < 3) {
+    log(`Trifecta required but only ${trif}/3 (${conf}). Skip.`); return;
+  }
+
+  // Soft Trifecta gate — adjust effective threshold based on family coverage
+  const effectiveThreshold =
+    trif === 3 ? threshold :
+    trif === 2 ? threshold + (PARAMS.trifectaPartialBonus ?? 1) :
+    trif === 1 ? threshold + (PARAMS.trifectaWeakBonus    ?? 2) :
+                 Infinity; // no families → cannot meet threshold, reject
+
+  if (setup.score < effectiveThreshold) {
+    log(`Score ${setup.score} < ${effectiveThreshold} (Trifecta ${trif}/3 → ${conf}). Skip.`); return;
+  }
 
   // ── 3b. MTF depth gate — reject pure short-TF signals (15M/30M only) ───────
   // A setup with no ≥1H confluence is a single-timeframe signal with no macro backing.
@@ -385,7 +457,7 @@ export async function attemptInlineTrade(setup) {
   }
 
   // ── ALL GUARDS PASSED — place trade ───────────────────────────────────────
-  log(`✅ All guards passed. Placing trade (score=${setup.score} dir=${setup.dir.toUpperCase()})`);
+  log(`✅ All guards passed. Placing trade (score=${setup.score} dir=${setup.dir.toUpperCase()} Trifecta=${trif}/3 ${conf})`);
 
   const equityData = await getEquity().catch(() => ({}));
   const equity     = equityData.equity || equityData.balance || 10000;
@@ -421,35 +493,61 @@ export async function attemptInlineTrade(setup) {
     _cyclePlacedCount++;
     if (groupIdx !== -1) _cycleUsedGroups.add(groupIdx);
 
-    const tradeTime = logTrade({
-      session,
-      symbol: setup.label,
-      tf: setup.tf,
-      direction: setup.dir,
-      score: setup.score,
-      entry: setup.entry,
-      sl: setup.sl,
-      tp: `${setup.tp2}/${setup.tp3}`,
-      rr: setup.rr,
-      notes: (setup.reasons || []).join(';') + ` lots=${halfLots}x2 placed=${placed} inline`,
-    });
+    // ── Post-submit broker verification ──
+    // The TradingView submit click can silently fail to route to BlackBull
+    // (observed on WTI 2026-05-22: bot logged ✓ placed but broker never received).
+    // Wait briefly for the order to propagate, then check the broker's actual
+    // Order history. If absent → mark VOID and add to a temporary block list so
+    // we stop spamming the same symbol.
+    const submitTs = new Date().toISOString();
+    let brokerOk = null;  // null = check skipped/errored, true = found, false = missing
+    try {
+      // Give the broker 4 seconds to register the order
+      await new Promise(r => setTimeout(r, 4000));
+      brokerOk = await verifyOrderLanded(setup.label, setup.dir, submitTs, 120);
+      log(`Broker verify: ${brokerOk ? '✓ order found in broker history' : '✗ order MISSING from broker history (silent reject)'}`);
+    } catch (e) {
+      log(`Broker verify error: ${e.message} (treating as inconclusive)`);
+    }
 
-    // Launch position monitor (detached — runs independently until position closes)
-    const monitorPath = join(__dirname, 'position_monitor.mjs');
-    const monitorLog  = join(DATA_ROOT, `monitor_${setup.label}.log`);
-    const logFd = openSync(monitorLog, 'a');
-    const monitor = spawn(process.execPath, [
-      monitorPath,
-      `--entry=${setup.entry}`,
-      `--tp1=${setup.tp2}`,
-      `--tp2=${setup.tp3}`,
-      `--tp3=${setup.tp3}`,
-      `--symbol=${setup.label}`,
-      `--numOrders=${placed}`,
-      `--tradeTime=${tradeTime}`,
-    ], { detached: true, stdio: ['ignore', logFd, logFd] });
-    monitor.unref();
-    log(`Monitor launched (pid ${monitor.pid})`);
+    if (brokerOk === false) {
+      // Silent reject — record VOID, do NOT launch monitor, block symbol short-term
+      logTrade({
+        session, symbol: setup.label, tf: setup.tf, direction: setup.dir,
+        score: setup.score, entry: setup.entry, sl: setup.sl,
+        tp: `${setup.tp2}/${setup.tp3}`, rr: setup.rr,
+        result: 'VOID', pnl: 0,
+        notes: (setup.reasons || []).join(';') + ` lots=${halfLots}x2 placed=${placed} inline Trifecta=${trif}/3 [${conf}] BROKER_SILENT_REJECT_verified`,
+      });
+      blockSymbolTemporarily(setup.label, 'broker silent reject');
+      _cyclePlacedCount--; // rollback — this trade didn't actually open
+      if (groupIdx !== -1) _cycleUsedGroups.delete(groupIdx);
+    } else {
+      // Either verified OK or check inconclusive — treat as live trade
+      const tradeTime = logTrade({
+        session, symbol: setup.label, tf: setup.tf, direction: setup.dir,
+        score: setup.score, entry: setup.entry, sl: setup.sl,
+        tp: `${setup.tp2}/${setup.tp3}`, rr: setup.rr,
+        notes: (setup.reasons || []).join(';') + ` lots=${halfLots}x2 placed=${placed} inline Trifecta=${trif}/3 [${conf}] verify=${brokerOk === true ? 'ok' : 'skipped'}`,
+      });
+
+      // Launch position monitor (detached — runs independently until position closes)
+      const monitorPath = join(__dirname, 'position_monitor.mjs');
+      const monitorLog  = join(DATA_ROOT, `monitor_${setup.label}.log`);
+      const logFd = openSync(monitorLog, 'a');
+      const monitor = spawn(process.execPath, [
+        monitorPath,
+        `--entry=${setup.entry}`,
+        `--tp1=${setup.tp2}`,
+        `--tp2=${setup.tp3}`,
+        `--tp3=${setup.tp3}`,
+        `--symbol=${setup.label}`,
+        `--numOrders=${placed}`,
+        `--tradeTime=${tradeTime}`,
+      ], { detached: true, stdio: ['ignore', logFd, logFd] });
+      monitor.unref();
+      log(`Monitor launched (pid ${monitor.pid})`);
+    }
   }
 
   // Brief pause so the broker panel settles before the next instrument is scanned

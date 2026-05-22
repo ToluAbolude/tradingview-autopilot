@@ -18,6 +18,7 @@ import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
+import { detectChartPatterns } from './bulkowski_patterns.mjs';
 
 // ── Load tunable config (auto-updated weekly by weekly_review_agent) ──────────
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -624,7 +625,16 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   }
 
   // ── C. S/R Zone (wick-to-body) — price inside supply/demand zone ──
+  //    Strict (C): price currently inside the wick-to-body zone — full score.
+  //    Near  (C-near): price reversed within 0.4×ATR of a fresh/retested zone
+  //      without entering it. This captures the Candlestick-Bible scenario where
+  //      sellers/buyers front-run the zone (banks defending the level early).
+  //      Awarded smaller score so it can't replace a strict touch but it stops
+  //      the algo from being blind to S/R that is visibly respected on chart.
   {
+    const atrLast = atr[n] || 0;
+    const nearThresh = atrLast * (SC.C_near_atr ?? 0.4);
+
     const activeZone = srZones.active.find(z => {
       if (z.type === 'support'    && dir === 'long')  return last.c >= z.wickTip    && last.c <= z.bodyLevel;
       if (z.type === 'resistance' && dir === 'short') return last.c >= z.bodyLevel  && last.c <= z.wickTip;
@@ -636,6 +646,26 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       score += pts;
       reasons.push(`S/R zone (${activeZone.type}) wick=${activeZone.wickTip.toFixed(4)} body=${activeZone.bodyLevel.toFixed(4)} ${strength}`);
       strats.push('C');
+    } else if (nearThresh > 0) {
+      // No strict zone touch — check proximity to recent zone instead.
+      // Support for longs: zone wickTip is below entry, gap ≤ nearThresh.
+      // Resistance for shorts: zone wickTip is above entry, gap ≤ nearThresh.
+      const nearZone = srZones.active
+        .filter(z => {
+          if (z.type === 'support'    && dir === 'long')  return last.l <= z.bodyLevel + nearThresh && last.l > z.wickTip - nearThresh;
+          if (z.type === 'resistance' && dir === 'short') return last.h >= z.bodyLevel - nearThresh && last.h < z.wickTip + nearThresh;
+          return false;
+        })
+        .sort((a, b) => Math.abs(last.c - a.wickTip) - Math.abs(last.c - b.wickTip))[0];
+
+      if (nearZone) {
+        const pts = nearZone.retests > 0 ? (SC.C_near_retested ?? 2) : (SC.C_near_fresh ?? 1);
+        const strength = nearZone.retests > 0 ? `${nearZone.retests}-retest` : 'fresh';
+        score += pts;
+        const dist = Math.abs(last.c - nearZone.wickTip);
+        reasons.push(`Near S/R (${nearZone.type}) ${dist.toFixed(4)} from wick=${nearZone.wickTip.toFixed(4)} ${strength}`);
+        strats.push('C-near');
+      }
     }
   }
 
@@ -898,6 +928,19 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
         score += (SC.BB_squeeze ?? 1);
         reasons.push('BB squeeze (breakout pending)'); strats.push('BB');
       }
+    }
+  }
+
+  // ── Bulkowski chart patterns — only score CONFIRMED breakouts ──
+  //   Triple Top/Bottom, Head & Shoulders (both), High & Tight Flag
+  //   Each scores +2; the pattern itself implies Level + Signal confluence
+  //   (see families in confluence.mjs — TB/TT and HS/IHS land in both families).
+  {
+    const pattern = detectChartPatterns(bars, atr, dir);
+    if (pattern) {
+      score += (SC.X_pattern_break ?? 2);
+      reasons.push(`${pattern.name} [${pattern.confidence}] neck=${pattern.neckline} tgt=${pattern.target}`);
+      strats.push(pattern.code);
     }
   }
 
