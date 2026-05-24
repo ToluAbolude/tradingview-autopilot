@@ -1022,6 +1022,30 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
     }
   } catch (_) {}
 
+  // ── Drop scan list down by blockedSymbols + broker_rejects ───────────────────
+  // No point scanning symbols we can't trade — wastes ~8 chart switches per inst.
+  // WTI in particular was killing scans with CDP timeouts (2026-05-24).
+  let scanBlocked = new Set();
+  try {
+    const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
+    if (existsSync(PARAMS_FILE)) {
+      const p = JSON.parse(readFileSync(PARAMS_FILE, 'utf8'));
+      (p.blockedSymbols || []).forEach(s => scanBlocked.add(s));
+    }
+    const REJECT_FILE = join(DATA_ROOT, 'broker_rejects.json');
+    if (existsSync(REJECT_FILE)) {
+      const r = JSON.parse(readFileSync(REJECT_FILE, 'utf8'));
+      const now = Date.now();
+      for (const [sym, rec] of Object.entries(r)) {
+        if (rec && rec.until && rec.until > now) scanBlocked.add(sym);
+      }
+    }
+  } catch (_) {}
+  if (scanBlocked.size > 0) {
+    scanList = scanList.filter(i => !scanBlocked.has(i.label));
+    console.log(`  [scan-block] Skipping ${[...scanBlocked].join(',')} (blockedSymbols / broker_rejects)`);
+  }
+
   // Priority: put session-relevant symbols first, then the rest (preserving watchlist bias order)
   const ordered = [
     ...scanList.filter(i => priority.includes(i.label)),
@@ -1037,12 +1061,25 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
     // ── Pass 1: scan every TF, collect any that pass threshold ──────────────
     process.stdout.write(`  [T${inst.tier}] ${inst.label} `);
 
+    let instrumentBroken = false;
     for (const tf of inst.tfs) {
+      if (instrumentBroken) break;
       process.stdout.write(`${TF_LABEL[tf]||tf}:`);
-      await setChart(inst.sym, tf);
-      // Require ≥250 bars. 500-bar request gives 15M ~450 bars (4.7 days → near-weekly T gate),
-      // 30M/1H/4H full-week coverage, D/W trivially covered. Retries 4× with 600ms gaps.
-      const bars = await waitForBars(500, 250);
+      // Isolate per-TF errors so a single CDP timeout (e.g. Runtime.enable
+      // exceeded 8000ms) doesn't kill the entire scan cycle. Skip the rest of
+      // this instrument and move on.
+      let bars = null;
+      try {
+        await setChart(inst.sym, tf);
+        // Require ≥250 bars. 500-bar request gives 15M ~450 bars (4.7 days → near-weekly T gate),
+        // 30M/1H/4H full-week coverage, D/W trivially covered. Retries 4× with 600ms gaps.
+        bars = await waitForBars(500, 250);
+      } catch (e) {
+        process.stdout.write(`!${(e.message || 'err').slice(0, 12)} `);
+        skipped.push(`${inst.label}/${tf}/${e.message}`);
+        instrumentBroken = true;
+        continue;
+      }
 
       if (!bars) {
         process.stdout.write(`? `);
