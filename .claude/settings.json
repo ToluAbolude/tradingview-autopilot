@@ -134,7 +134,13 @@
       "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/probe_wti_row_html.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
       "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/close_wti_test.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
       "PowerShell(node --check scripts/trading/naked_position_guard.mjs)",
-      "PowerShell(\"OK\")"
+      "PowerShell(\"OK\")",
+      "PowerShell(node --check scripts/trading/setup_finder.mjs)",
+      "PowerShell(node --check scripts/trading/confluence.mjs)",
+      "PowerShell(\"Syntax OK\")",
+      "PowerShell(node --check scripts/trading/scale_risk_to_goal.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/scale_risk_to_goal.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68:/home/ubuntu/trading-data/trading_params.json data/trading_params.json)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",

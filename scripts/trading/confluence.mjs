@@ -17,10 +17,10 @@
  */
 
 export const FAMILIES = {
-  TREND:  ['A', 'T', 'B', 'L', 'FL'],                              // SmartTrail, Weekly, EMA stack, Trendline, Flag (continuation)
-  LEVEL:  ['C', 'C-near', 'U', 'F', 'O', 'BB', 'TB', 'TT'],       // S/R zone, PDH/PDL, FVG, OTE Fib, BB; Triple Top/Bottom (3 touches define a level)
-  SIGNAL: ['K', 'H', 'HS', 'IHS', 'TB', 'TT'],                    // Candle pattern, HA pullback; chart-pattern reversals (H&S, Inverse H&S, Triple Top/Bottom)
-  BONUS:  ['V', 'P', 'R', 'D'],                                    // Volume, Prime session, RSI extreme, Daily bias
+  TREND:  ['A', 'T', 'B', 'L', 'FL'],                                    // SmartTrail, Weekly, EMA stack, Trendline, Flag (continuation)
+  LEVEL:  ['C', 'C-near', 'U', 'F', 'O', 'BB', 'TB', 'TT', 'OR'],       // S/R zone, PDH/PDL, FVG, OTE Fib, BB; Triple Top/Bottom; Opening Range boundary
+  SIGNAL: ['K', 'H', 'HS', 'IHS', 'TB', 'TT', 'OR'],                    // Candle pattern, HA pullback; chart-pattern reversals; OR breakout candle
+  BONUS:  ['V', 'P', 'R', 'D'],                                          // Volume, Prime session, RSI extreme, Daily bias
 };
 
 /**

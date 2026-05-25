@@ -591,6 +591,62 @@ function buildDailyContext(bars) {
 //
 //  Max score = 8, threshold = 6.
 // ────────────────────────────────────────────────────────────────
+
+// ── Opening Range Breakout (Crabel-style) ───────────────────────────────────
+// Session start times (UTC) per instrument — when the "opening range" begins.
+// Crypto is omitted: 24/7 markets have no canonical session open.
+const ORB_SESSION_OPEN_UTC = {
+  NAS100: '13:30', US30: '13:30', SPX500: '13:30',
+  GER40: '07:00', UK100: '07:00', EUSTX50: '07:00',
+  AUS200: '00:00', JP225: '00:00', HK50: '01:00',
+  XAUUSD: '07:00', XAGUSD: '07:00', BRENT: '07:00', WTI: '13:00',
+  EURUSD: '07:00', GBPUSD: '07:00', USDCHF: '07:00',
+  EURGBP: '07:00', EURJPY: '07:00', GBPJPY: '07:00',
+  AUDUSD: '00:00', NZDUSD: '00:00', USDJPY: '00:00', AUDJPY: '00:00',
+  USDCAD: '13:30',
+};
+const ORB_DURATION_MIN = 30;
+
+// Returns { boundary, orHigh, orLow } if the latest bar is the FIRST close
+// beyond the session's opening range in `dir`; null otherwise.
+function detectORB(bars, label, tf, dir) {
+  const start = ORB_SESSION_OPEN_UTC[(label || '').toUpperCase()];
+  if (!start) return null;
+  const tfMin = parseInt(tf, 10);
+  if (!tfMin || tfMin > 60) return null;       // skip 4H/D/W
+
+  const nBarsInOR = Math.max(1, Math.ceil(ORB_DURATION_MIN / tfMin));
+  const lastBar   = bars[bars.length - 1];
+  if (!lastBar || !lastBar.t) return null;
+
+  const d = new Date(lastBar.t);
+  const [oh, om] = start.split(':').map(Number);
+  const sessionStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), oh, om);
+  const orEnd        = sessionStart + ORB_DURATION_MIN * 60 * 1000;
+
+  if (lastBar.t < orEnd) return null;          // OR window not yet closed
+
+  const orBars = bars.filter(b => b.t >= sessionStart && b.t < orEnd);
+  if (orBars.length < nBarsInOR) return null;  // bars missing — wait
+
+  const orHigh = Math.max(...orBars.map(b => b.h));
+  const orLow  = Math.min(...orBars.map(b => b.l));
+
+  const postOR = bars.filter(b => b.t >= orEnd);
+  if (postOR.length === 0) return null;
+
+  const prev = postOR.slice(0, -1);
+  const last = postOR[postOR.length - 1];
+
+  if (dir === 'long'  && last.c > orHigh && !prev.some(b => b.c > orHigh)) {
+    return { boundary: 'high', orHigh, orLow };
+  }
+  if (dir === 'short' && last.c < orLow  && !prev.some(b => b.c < orLow)) {
+    return { boundary: 'low',  orHigh, orLow };
+  }
+  return null;
+}
+
 export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
   const atr    = calcATR(bars);
@@ -928,6 +984,19 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
         score += (SC.BB_squeeze ?? 1);
         reasons.push('BB squeeze (breakout pending)'); strats.push('BB');
       }
+    }
+  }
+
+  // ── OR. Opening Range Breakout — first close beyond session OR-high/OR-low ──
+  // The OR boundary itself is a structural level (LEVEL family) and the breakout
+  // candle is the trigger (SIGNAL family). High-edge setup — scored at +2.
+  {
+    const orb = detectORB(bars, label, tf, dir);
+    if (orb) {
+      score += (SC.OR_breakout ?? 2);
+      const level = orb.boundary === 'high' ? orb.orHigh.toFixed(4) : orb.orLow.toFixed(4);
+      reasons.push(`ORB ${dir} break of ${orb.boundary} @${level} (range ${orb.orLow.toFixed(4)}-${orb.orHigh.toFixed(4)})`);
+      strats.push('OR');
     }
   }
 
