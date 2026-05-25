@@ -214,9 +214,13 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
     lots = Math.min(lots, maxLots);
     return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
   } else if (/WTI|USOIL|CRUDE|OIL/.test(sym)) {
+    // WTI on BlackBull: broker silently rejects below 1.0 lot per submit. The bot
+    // halves total into two legs (O1+O2), so total must be >=2.0 to keep each leg >=1.0.
+    const WTI_MIN_TOTAL_LOTS = 2.0;
     const slPips = slDist / 0.01;
     let lots = riskAmt / (10.0 * slPips);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    lots = Math.floor(lots / LOT_STEP) * LOT_STEP;
+    return Math.min(Math.max(lots, WTI_MIN_TOTAL_LOTS), MAX_LOTS);
   } else if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) {
     let lots = riskAmt / slDist;
     return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);

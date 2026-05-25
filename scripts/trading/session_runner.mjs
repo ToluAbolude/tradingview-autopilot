@@ -154,12 +154,14 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
     contractSize = 1;
     pipSize      = 1.0;
   } else if (/WTI|USOIL|CRUDE|OIL/.test(sym)) {
-    // WTI crude oil: $10 per $0.01/bbl move per lot (1 lot = 1000 bbl on most CFD brokers)
+    // WTI on BlackBull: broker silently rejects below 1.0 lot per submit. Bot
+    // halves total into two legs, so total must be >=2.0 to keep each leg >=1.0.
+    const WTI_MIN_TOTAL_LOTS = 2.0;
     const pipValuePerLot = 10.0;
     const slPips = slDist / 0.01;
     let lots = riskAmt / (pipValuePerLot * slPips);
     lots = Math.floor(lots / LOT_STEP) * LOT_STEP;
-    return Math.min(Math.max(lots, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(lots, WTI_MIN_TOTAL_LOTS), MAX_LOTS);
   } else if (/GER40|UK100|DAX|FTSE/.test(sym)) {
     // EU cash indices: ~$1 per point per lot
     const pipValuePerLot = 1.0;

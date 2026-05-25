@@ -130,7 +130,11 @@
       "PowerShell(node --version)",
       "PowerShell(ls data/trade_log/, data/knowledge_base/; \\(Get-Content scripts/trading/review_params.mjs | Measure-Object -Line\\).Lines; \\(Get-Content scripts/trading/performance_tracker.mjs | Measure-Object -Line\\).Lines; \\(Get-Content scripts/trading/weekly_review.mjs | Measure-Object -Line\\).Lines)",
       "PowerShell(node scripts/trading/hermes_reflect.mjs --dry-run)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/hermes_reflect.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/hermes_reflect.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/probe_wti_row_html.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/close_wti_test.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "PowerShell(node --check scripts/trading/naked_position_guard.mjs)",
+      "PowerShell(\"OK\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",

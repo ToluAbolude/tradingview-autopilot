@@ -1,6 +1,6 @@
 {
   "_note": "Tunable trading parameters. Apply changes via: node scripts/trading/apply_params.mjs --apply",
-  "_lastUpdated": "2026-05-22",
+  "_lastUpdated": "2026-05-25",
   "_updatedBy": "manual",
   "scoreThreshold": 6,
   "stopRuleLosses": 2,
@@ -11,8 +11,8 @@
   "minRR": 2.0,
   "maxConcurrent": 4,
   "blockedSessions": [],
-  "_blockedSymbols_note": "WTI confirmed unsupported by BlackBull broker integration on this account 2026-05-22 — chart shows symbol but Trade panel renders no Buy/Sell buttons, 0/177 lifetime orders.",
-  "blockedSymbols": ["WTI"],
+  "_blockedSymbols_note": "Empty as of 2026-05-25. WTI re-enabled after operator confirmed BlackBull Trade panel now renders Buy/Sell buttons for WTI (prior 2026-05-22 unsupported finding was stale). LTCUSD/XAGUSD/BTCUSD all show split bracket routing to <SYMBOL>2026 dated-contract sibling — handled at runtime by naked_position_guard.mjs which re-attaches SL/TP from trades.csv intent on detection. WTI will be auto-repaired the same way if the bracket-strip behaviour applies to it.",
+  "blockedSymbols": [],
   "blockedSymbolExpiry": {},
   "_confluence_note": "Trifecta = Trend + Level + Signal families (see scripts/trading/confluence.mjs). Soft gate raises effective score threshold when families are missing. Set requireTrifecta=true to hard-reject anything <3/3.",
   "requireTrifecta": false,
