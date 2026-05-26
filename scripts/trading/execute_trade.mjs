@@ -288,38 +288,71 @@ async function confirmCloseDialog() {
 
 // ── Close all open positions ──
 export async function closeAllPositions() {
-  // Click Positions tab first
+  // Click Positions tab first so the close icons are mounted
   await evaluate(`(function() {
     var tabs = document.querySelectorAll('button');
     for (var i = 0; i < tabs.length; i++) {
       if ((tabs[i].textContent||'').trim() === 'Positions') { tabs[i].click(); return; }
     }
   })()`);
-  await sleep(600);
+  await sleep(800);
 
-  // Look for close buttons on each position row
-  const result = await evaluate(`(function() {
-    var closed = 0;
-    var closeBtns = document.querySelectorAll('[class*="closeButton"], [aria-label*="Close"], [title*="Close position"]');
-    for (var i = 0; i < closeBtns.length; i++) {
-      if (closeBtns[i].offsetParent) { closeBtns[i].click(); closed++; }
-    }
-    if (closed > 0) return 'clicked ' + closed + ' close button(s)';
+  // Verified 2026-05-26: BlackBull's position-row × button is data-name=
+  // "close-settings-cell-button". Plain .click() doesn't trigger the popup
+  // reliably — full mouse-event sequence is required. After the × opens the
+  // popup, click "Close position" (also via full mouse events). Repeat per
+  // remaining row — each pass closes exactly one position.
+  const countOpen = async () => evaluate(
+    `Array.from(document.querySelectorAll('tr')).filter(r => /(Long|Short)/i.test((r.innerText||''))).length`
+  );
 
-    // Fallback: find "Close" button text
-    var btns = document.querySelectorAll('button');
-    for (var i = 0; i < btns.length; i++) {
-      if (!btns[i].offsetParent) continue;
-      var t = (btns[i].textContent || '').trim().toLowerCase();
-      if (t === 'close' || t === 'close all') { btns[i].click(); closed++; }
-    }
-    return closed > 0 ? 'clicked ' + closed : 'no close buttons found';
-  })()`);
+  const clickFully = (selectorScopeJs) => `(function(){
+    var b = ${selectorScopeJs};
+    if (!b || !b.offsetParent) return 'no_btn';
+    var rect = b.getBoundingClientRect();
+    var x = rect.left + rect.width/2, y = rect.top + rect.height/2;
+    ['mouseover','mousedown','mouseup','click'].forEach(function(t){
+      b.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
+    });
+    return 'clicked';
+  })()`;
 
-  // Confirm the modal dialog that TradingView shows after clicking close
-  const confirmed = await confirmCloseDialog();
-  await sleep(500);
-  return `${result} → ${confirmed}`;
+  let totalClosed = 0;
+  for (let pass = 1; pass <= 12; pass++) {
+    const remaining = await countOpen();
+    if (remaining === 0) break;
+
+    const xResult = await evaluate(clickFully(`document.querySelector('[data-name="close-settings-cell-button"]')`));
+    if (xResult === 'no_btn') break;
+    await sleep(900);
+
+    // Click "Close position" inside the popup (scoped to dialog/popup elements
+    // so we don't accidentally click the unrelated "Close position" tab/header).
+    await evaluate(`(function(){
+      var dialogs = document.querySelectorAll('[role=dialog], [class*=dialog], [class*=Dialog], [class*=modal], [class*=Modal], [class*=popup], [class*=Popup]');
+      for (var i=0; i<dialogs.length; i++) {
+        if (!dialogs[i].offsetParent) continue;
+        var btns = dialogs[i].querySelectorAll('button');
+        for (var j=0; j<btns.length; j++) {
+          if ((btns[j].textContent||'').trim() === 'Close position') {
+            var rect = btns[j].getBoundingClientRect();
+            var x = rect.left + rect.width/2, y = rect.top + rect.height/2;
+            ['mouseover','mousedown','mouseup','click'].forEach(function(e){
+              btns[j].dispatchEvent(new MouseEvent(e, {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
+            });
+            return;
+          }
+        }
+      }
+    })()`);
+    await sleep(1500);
+
+    const after = await countOpen();
+    if (after < remaining) totalClosed += (remaining - after);
+  }
+
+  const finalOpen = await countOpen();
+  return `closed=${totalClosed} remaining=${finalOpen}`;
 }
 
 // ── Get account equity ──
