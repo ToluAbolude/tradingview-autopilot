@@ -153,15 +153,17 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   } else if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC/.test(sym)) {
     contractSize = 1;
     pipSize      = 1.0;
-  } else if (/WTI|USOIL|CRUDE|OIL/.test(sym)) {
-    // WTI on BlackBull: broker silently rejects below 1.0 lot per submit. Bot
-    // halves total into two legs, so total must be >=2.0 to keep each leg >=1.0.
-    const WTI_MIN_TOTAL_LOTS = 2.0;
+  } else if (/WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym)) {
+    // BlackBull oil contracts (WTI + BRENT) require WHOLE-NUMBER lots, min 1.0
+    // per submit. Bot halves total → total must be >=2.0 and even-integer so each
+    // leg is an integer >= 1.0. Sub-integer lots silently reject.
+    const OIL_MIN_TOTAL_LOTS = 2.0;
+    const OIL_LOT_STEP       = 2.0;
     const pipValuePerLot = 10.0;
     const slPips = slDist / 0.01;
     let lots = riskAmt / (pipValuePerLot * slPips);
-    lots = Math.floor(lots / LOT_STEP) * LOT_STEP;
-    return Math.min(Math.max(lots, WTI_MIN_TOTAL_LOTS), MAX_LOTS);
+    lots = Math.floor(lots / OIL_LOT_STEP) * OIL_LOT_STEP;
+    return Math.min(Math.max(lots, OIL_MIN_TOTAL_LOTS), MAX_LOTS);
   } else if (/GER40|UK100|DAX|FTSE/.test(sym)) {
     // EU cash indices: ~$1 per point per lot
     const pipValuePerLot = 1.0;

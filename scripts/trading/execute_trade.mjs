@@ -374,6 +374,7 @@ export async function placeOrder({
   tpPrice,     // REQUIRED — take profit price level
   slPrice,     // REQUIRED — stop loss price level
   minRR = 2.0, // minimum R:R at actual fill price — rejects if market has moved adversely
+  reanchorTpAtMinRR = false, // if true and R:R has degraded, recompute TP from current fill instead of rejecting
   screenshot = false,
 }) {
   if (!tpPrice || !slPrice) throw new Error('tpPrice and slPrice are required for every trade.');
@@ -409,9 +410,18 @@ export async function placeOrder({
       const actualReward = isBuyDir ? tpPrice  - fillPrice : fillPrice - tpPrice;
       const actualRR = actualReward / actualRisk;
       if (actualRR < minRR) {
-        await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, keyCode: 27 }))`);
-        await sleep(300);
-        throw new Error(`R:R degraded to ${actualRR.toFixed(2)} at current price ${fillPrice} (min ${minRR}) — skipping`);
+        if (reanchorTpAtMinRR) {
+          // Re-anchor TP to give exactly minRR from the current fill price, keeping SL fixed.
+          // Used for later legs of a multi-leg ladder so the runner still places even after
+          // price has moved against the original entry.
+          const slDist = Math.abs(fillPrice - slPrice);
+          tpPrice = isBuyDir ? fillPrice + slDist * minRR : fillPrice - slDist * minRR;
+          console.log(`  R:R degraded (${actualRR.toFixed(2)}) → reanchored TP to ${tpPrice} (fill ${fillPrice}, slDist ${slDist.toFixed(4)})`);
+        } else {
+          await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, keyCode: 27 }))`);
+          await sleep(300);
+          throw new Error(`R:R degraded to ${actualRR.toFixed(2)} at current price ${fillPrice} (min ${minRR}) — skipping`);
+        }
       }
       console.log(`  R:R check OK: ${actualRR.toFixed(2)} >= ${minRR} at fill ${fillPrice}`);
     }

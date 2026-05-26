@@ -231,8 +231,27 @@ async function main() {
       const currCount = state.positions.length;
       if (currCount < prevCount) {
         tp1Triggered = true;
-        log(`⚡ TP1 HIT (${prevCount} → ${currCount} positions for ${SYMBOL})`);
-        if (ENTRY_PRICE) log(`⚡ Consider moving SL to breakeven (${ENTRY_PRICE})`);
+        log(`⚡ TP1 HIT (${prevCount} → ${currCount} positions for ${SYMBOL}) — synthetic BE armed`);
+      }
+    }
+
+    // Synthetic breakeven (added 2026-05-26): after TP1 has hit, watch the live
+    // profit on the remaining legs. If aggregate profit drops back to ≤ BE_TOLERANCE,
+    // close out manually to lock the gain — no broker-side SL modification needed.
+    // The original broker SL still backstops worst case.
+    if (tp1Triggered && state.found) {
+      const BE_TOLERANCE = -5;  // USD — small buffer to avoid spread-noise triggers
+      const aggProfit = state.positions.reduce((s, p) => s + (p.profit || 0), 0);
+      if (aggProfit <= BE_TOLERANCE) {
+        log(`🛡 SYNTHETIC BE — remaining profit ${aggProfit} ≤ ${BE_TOLERANCE}, closing ${state.positions.length} leg(s)`);
+        try { await closeAllPositions(); log('Synthetic BE close executed.'); }
+        catch(e) { log(`Synthetic BE close error: ${e.message}`); }
+        await sleep(3000);
+        const bal = await getBalance().catch(() => null);
+        const pnl = bal != null && baseBalance != null
+          ? Math.round((bal - baseBalance) * 100) / 100 : null;
+        updateLastTrade(pnl != null ? (pnl >= 0 ? 'W' : 'L') : '?', pnl, 'synthetic_be_close');
+        return;
       }
     }
 

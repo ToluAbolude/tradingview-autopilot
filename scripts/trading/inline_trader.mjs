@@ -213,14 +213,16 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
     const maxLots = Math.floor((maxRisk / slDist) / LOT_STEP) * LOT_STEP;
     lots = Math.min(lots, maxLots);
     return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
-  } else if (/WTI|USOIL|CRUDE|OIL/.test(sym)) {
-    // WTI on BlackBull: broker silently rejects below 1.0 lot per submit. The bot
-    // halves total into two legs (O1+O2), so total must be >=2.0 to keep each leg >=1.0.
-    const WTI_MIN_TOTAL_LOTS = 2.0;
+  } else if (/WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym)) {
+    // BlackBull oil contracts (WTI + BRENT) accept WHOLE-NUMBER lots only, min 1.0
+    // per submit. Bot now thirds total into three legs (O1+O2+O3), so total must
+    // be >=3.0 and divisible by 3 so each leg is an integer >= 1.0.
+    const OIL_MIN_TOTAL_LOTS = 3.0;
+    const OIL_LOT_STEP       = 3.0;   // step in 3s so each third is an integer
     const slPips = slDist / 0.01;
     let lots = riskAmt / (10.0 * slPips);
-    lots = Math.floor(lots / LOT_STEP) * LOT_STEP;
-    return Math.min(Math.max(lots, WTI_MIN_TOTAL_LOTS), MAX_LOTS);
+    lots = Math.floor(lots / OIL_LOT_STEP) * OIL_LOT_STEP;
+    return Math.min(Math.max(lots, OIL_MIN_TOTAL_LOTS), MAX_LOTS);
   } else if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) {
     let lots = riskAmt / slDist;
     return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
@@ -472,26 +474,58 @@ export async function attemptInlineTrade(setup) {
   const baseRisk = alreadyPlaced === 0 ? r1 : alreadyPlaced === 1 ? r2 : r3;
   const riskPct  = setup.score >= 8 ? baseRisk + 0.5 : baseRisk;
 
-  const LOT_STEP  = 0.01;
+  // Per-broker minimum lot per leg. Oil contracts require whole integers ≥ 1.0;
+  // everything else accepts 0.01 micro. A leg below its min is silently rejected,
+  // so we round UP to the floor rather than down.
+  const sym = setup.label.toUpperCase();
+  const perLegMin = /WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym) ? 1.0 : 0.01;
+  const legStep   = perLegMin;
   const totalLots = calcLots(setup.label, riskPct, equity, setup.entry, setup.sl);
-  const halfLots  = Math.max(0.01, Math.floor((totalLots / 2) / LOT_STEP) * LOT_STEP);
+  // Split into 3 equal legs, each rounded to symbol's leg step and at least perLegMin.
+  const legLotsRaw = totalLots / 3;
+  const thirdLots  = Math.max(perLegMin, Math.floor(legLotsRaw / legStep) * legStep);
 
-  log(`Risk:${riskPct}% | Equity:${equity} | ${halfLots}×2 lots | O1:${setup.tp2} O2:${setup.tp3} SL:${setup.sl}`);
+  // tp1 = ~1R near scalp (added 2026-05-26 to restore 3-leg ladder)
+  // tp2 = first opposing S/R zone, ≥2R (existing logic)
+  // tp3 = far runner cap; placed as a safety-net TP until chandelier trailing ships
+  log(`Risk:${riskPct}% | Equity:${equity} | ${thirdLots}×3 lots | TP1:${setup.tp1} TP2:${setup.tp2} TP3:${setup.tp3} SL:${setup.sl}`);
+
+  const legs = [
+    { name: 'O1', tp: setup.tp1, minRR: 1.0, reanchor: false, screenshot: false },
+    { name: 'O2', tp: setup.tp2, minRR: 2.0, reanchor: true,  screenshot: false },
+    { name: 'O3', tp: setup.tp3, minRR: 2.0, reanchor: true,  screenshot: true  },
+  ];
 
   let placed = 0;
-  try {
-    await placeOrder({ symbol: setup.label, direction: setup.dir, units: halfLots,
-      tpPrice: setup.tp2, slPrice: setup.sl, screenshot: false });
-    log(`✓ O1 placed (TP=${setup.tp2} SL=${setup.sl})`);
-    placed++;
-  } catch(e) { log(`✗ O1 error: ${e.message}`); }
-
-  try {
-    await placeOrder({ symbol: setup.label, direction: setup.dir, units: halfLots,
-      tpPrice: setup.tp3, slPrice: setup.sl, screenshot: true });
-    log(`✓ O2 placed (TP=${setup.tp3} SL=${setup.sl})`);
-    placed++;
-  } catch(e) { log(`✗ O2 error: ${e.message}`); }
+  for (const leg of legs) {
+    if (!leg.tp) { log(`⚠ ${leg.name} skipped — no TP value`); continue; }
+    try {
+      await placeOrder({
+        symbol: setup.label, direction: setup.dir, units: thirdLots,
+        tpPrice: leg.tp, slPrice: setup.sl,
+        minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
+        screenshot: leg.screenshot,
+      });
+      log(`✓ ${leg.name} placed (TP=${leg.tp} SL=${setup.sl})`);
+      placed++;
+    } catch(e) {
+      log(`✗ ${leg.name} error: ${e.message}`);
+      // One retry after a short pause — covers transient ticket/DOM hiccups.
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        await placeOrder({
+          symbol: setup.label, direction: setup.dir, units: thirdLots,
+          tpPrice: leg.tp, slPrice: setup.sl,
+          minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
+          screenshot: false,
+        });
+        log(`✓ ${leg.name} placed on retry (TP=${leg.tp} SL=${setup.sl})`);
+        placed++;
+      } catch(e2) {
+        log(`✗ ${leg.name} retry also failed: ${e2.message}`);
+      }
+    }
+  }
 
   if (placed > 0) {
     _cyclePlacedCount++;
@@ -519,9 +553,9 @@ export async function attemptInlineTrade(setup) {
       logTrade({
         session, symbol: setup.label, tf: setup.tf, direction: setup.dir,
         score: setup.score, entry: setup.entry, sl: setup.sl,
-        tp: `${setup.tp2}/${setup.tp3}`, rr: setup.rr,
+        tp: `${setup.tp1}/${setup.tp2}/${setup.tp3}`, rr: setup.rr,
         result: 'VOID', pnl: 0,
-        notes: (setup.reasons || []).join(';') + ` lots=${halfLots}x2 placed=${placed} inline Trifecta=${trif}/3 [${conf}] BROKER_SILENT_REJECT_verified`,
+        notes: (setup.reasons || []).join(';') + ` lots=${thirdLots}x3 placed=${placed} inline Trifecta=${trif}/3 [${conf}] BROKER_SILENT_REJECT_verified`,
       });
       blockSymbolTemporarily(setup.label, 'broker silent reject');
       _cyclePlacedCount--; // rollback — this trade didn't actually open
@@ -531,8 +565,8 @@ export async function attemptInlineTrade(setup) {
       const tradeTime = logTrade({
         session, symbol: setup.label, tf: setup.tf, direction: setup.dir,
         score: setup.score, entry: setup.entry, sl: setup.sl,
-        tp: `${setup.tp2}/${setup.tp3}`, rr: setup.rr,
-        notes: (setup.reasons || []).join(';') + ` lots=${halfLots}x2 placed=${placed} inline Trifecta=${trif}/3 [${conf}] verify=${brokerOk === true ? 'ok' : 'skipped'}`,
+        tp: `${setup.tp1}/${setup.tp2}/${setup.tp3}`, rr: setup.rr,
+        notes: (setup.reasons || []).join(';') + ` lots=${thirdLots}x3 placed=${placed} inline Trifecta=${trif}/3 [${conf}] verify=${brokerOk === true ? 'ok' : 'skipped'}`,
       });
 
       // Launch position monitor (detached — runs independently until position closes)
@@ -542,8 +576,8 @@ export async function attemptInlineTrade(setup) {
       const monitor = spawn(process.execPath, [
         monitorPath,
         `--entry=${setup.entry}`,
-        `--tp1=${setup.tp2}`,
-        `--tp2=${setup.tp3}`,
+        `--tp1=${setup.tp1}`,
+        `--tp2=${setup.tp2}`,
         `--tp3=${setup.tp3}`,
         `--symbol=${setup.label}`,
         `--numOrders=${placed}`,

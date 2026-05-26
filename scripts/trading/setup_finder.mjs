@@ -1347,6 +1347,20 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
         entry:      Math.round(entry   * 10000) / 10000,
         sl:         Math.round(sl      * 10000) / 10000,
         tpQuick:    Math.round((dir === 'long' ? entry + slDist * 0.5 : entry - slDist * 0.5) * 10000) / 10000,
+        // tp1 = 1R take-profit for the near scalp leg of the 3-leg ladder.
+        // Snaps to the nearest opposing zone within 1.5R if one exists; else exactly 1R.
+        tp1:        (function(){
+          const r1 = dir === 'long' ? entry + slDist * 1.0 : entry - slDist * 1.0;
+          const nearby = sr15.active.filter(z =>
+            (dir === 'long'  && z.type === 'resistance' && z.wickTip > entry && z.wickTip - entry <= slDist * 1.5) ||
+            (dir === 'short' && z.type === 'support'    && z.wickTip < entry && entry - z.wickTip <= slDist * 1.5)
+          );
+          if (nearby.length) {
+            nearby.sort((a,b) => dir === 'long' ? a.wickTip - b.wickTip : b.wickTip - a.wickTip);
+            return Math.round(nearby[0].wickTip * 10000) / 10000;
+          }
+          return Math.round(r1 * 10000) / 10000;
+        })(),
         tp2:        Math.round(tp2     * 10000) / 10000,
         tp3:        Math.round(tp3     * 10000) / 10000,
         rr:         actualRR,

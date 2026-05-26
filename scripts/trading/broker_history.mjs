@@ -202,9 +202,17 @@ export async function verifyOrderLanded(symbol, dir, nearTs, windowSec = 90) {
   const rawRows = await getOrderHistoryRows();
   const parsed  = rawRows.map(parseRow).filter(Boolean);
 
+  // Broker sometimes shows futures contract names with a trailing year (e.g.
+  // ETHUSD2026, LTCUSD2026, XAGUSD2026) while the scanner uses the spot label
+  // (ETHUSD, LTCUSD, XAGUSD). Normalise both sides before comparing — without
+  // this, valid fills get marked BROKER_SILENT_REJECT (observed 2026-05-26:
+  // ETHUSD/LTCUSD/US30 all filled but flagged void, masking a real win).
+  const stripSuffix = s => (s || '').replace(/20\d{2}$/, '');
+  const wantSym = stripSuffix(symbol);
+
   const target  = new Date(nearTs).getTime();
   for (const r of parsed) {
-    if (r.symbol !== symbol) continue;
+    if (stripSuffix(r.symbol) !== wantSym) continue;
     if (r.type !== 'Market') continue;
     if (r.side !== wantSide) continue;
     // BlackBull timestamps appear as broker-local UTC (matches our scanner clock)
