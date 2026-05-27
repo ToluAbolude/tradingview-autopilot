@@ -203,6 +203,7 @@ async function main() {
   let tp1Triggered  = false;
   let baseBalance   = null;
   let prevPositions = null;
+  let initialCtraderVol = null;   // captured on first cTrader poll; volume shrinkage → TP1 detection
 
   while (true) {
     ticks++;
@@ -254,7 +255,7 @@ async function main() {
       return;
     }
 
-    // TP1 partial close detection: one fewer position than before for this symbol
+    // TP1 partial-close detection (Approach A path): one fewer position than before
     if (NUM_ORDERS >= 2 && !tp1Triggered && prevPositions?.found && state.found) {
       const prevCount = prevPositions.positions.length;
       const currCount = state.positions.length;
@@ -262,6 +263,23 @@ async function main() {
         tp1Triggered = true;
         log(`⚡ TP1 HIT (${prevCount} → ${currCount} positions for ${SYMBOL}) — synthetic BE armed`);
       }
+    }
+
+    // TP1 partial-close detection (Approach B path): single position SHRINKS in
+    // volume as each TP limit fills. Compare current cTrader volume to first
+    // poll's volume; any drop means a partial close fired.
+    if (USE_CTRADER && !tp1Triggered) {
+      try {
+        const bridge = await import('./broker_ctrader.mjs');
+        const currentVol = await bridge.getOpenVolumeForSymbol(SYMBOL);
+        if (initialCtraderVol === null && currentVol > 0) {
+          initialCtraderVol = currentVol;
+          log(`cTrader initial volume for ${SYMBOL}: ${currentVol}`);
+        } else if (initialCtraderVol != null && currentVol < initialCtraderVol) {
+          tp1Triggered = true;
+          log(`⚡ TP1 HIT via cTrader volume shrink ${initialCtraderVol} → ${currentVol} — synthetic BE armed`);
+        }
+      } catch (e) { log(`cTrader volume check failed: ${e.message}`); }
     }
 
     // Synthetic breakeven (added 2026-05-26): after TP1 has hit, watch the live

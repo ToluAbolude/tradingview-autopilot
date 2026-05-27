@@ -297,6 +297,83 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   return orderRes;
 }
 
+/**
+ * Approach B — open ONE market position with the full volume and SL, then place
+ * N LIMIT orders on the opposite side at each TP, each closing 1/N of the volume
+ * (linked to the parent positionId so they reduce the position instead of opening
+ * new hedged ones).
+ *
+ * The advantages over N separate positions (Approach A):
+ *   - one position on the books, one SL to manage (synthetic BE = 1 modify call)
+ *   - one entry fill in deal history (cleaner PnL attribution)
+ *   - position list view is uncluttered
+ *
+ * Caller passes:
+ *   symbol, direction ('long'|'short'|'buy'|'sell')
+ *   totalUnits   — total lots across all legs (e.g. 0.03 for 3 legs of 0.01)
+ *   entry        — expected entry price (for relative SL)
+ *   slPrice      — absolute SL price
+ *   tpPrices     — array of N absolute TP prices, ordered nearest→furthest
+ *
+ * Returns: { positionId, openRes, tpOrderIds: [N], failedTps: [...] }
+ */
+export async function placeMultiTpPosition({ symbol, direction, totalUnits, entry, slPrice, tpPrices }) {
+  await connect();
+  if (!slPrice) throw new Error('slPrice required.');
+  if (!Array.isArray(tpPrices) || tpPrices.length === 0) throw new Error('tpPrices must be a non-empty array.');
+
+  const meta = await _symbolMetaFor(symbol);
+  const tradeSide  = (direction === 'long' || direction === 'buy') ? 1 : 2;  // BUY | SELL
+  const closeSide  = tradeSide === 1 ? 2 : 1;
+  const totalVol   = Math.round(totalUnits * meta.lotSize);
+
+  // Per-leg volume = totalVol / N. cTrader requires integer cents; if division
+  // isn't exact, give the last leg the remainder so all volume gets a TP.
+  const N = tpPrices.length;
+  const perLeg = Math.floor(totalVol / N);
+  const legVols = Array(N).fill(perLeg);
+  legVols[N - 1] = totalVol - perLeg * (N - 1);
+
+  // ── 1. Open the parent position ──
+  // MARKET order with relativeStopLoss (no TP — the limit orders below handle exits).
+  const slDist = Math.round(Math.abs(entry - slPrice) * 100_000);
+  const openRes = await send('ProtoOANewOrderReq', {
+    ctidTraderAccountId: _accountId,
+    symbolId:    meta.id,
+    orderType:   1,                   // MARKET
+    tradeSide,
+    volume:      totalVol,
+    relativeStopLoss: slDist,
+    timeInForce: 3,                   // IMMEDIATE_OR_CANCEL
+  });
+  const positionId = _toNum(openRes?.position?.positionId);
+  if (!positionId) throw new Error(`placeMultiTpPosition: open did not return positionId — ${JSON.stringify(openRes).slice(0,200)}`);
+
+  // ── 2. Place N partial-close LIMIT orders ──
+  const tpOrderIds = [];
+  const failedTps  = [];
+  for (let i = 0; i < N; i++) {
+    try {
+      const r = await send('ProtoOANewOrderReq', {
+        ctidTraderAccountId: _accountId,
+        symbolId:    meta.id,
+        orderType:   2,                   // LIMIT
+        tradeSide:   closeSide,
+        volume:      legVols[i],
+        limitPrice:  tpPrices[i],
+        positionId,                       // ← links exit to parent position
+        timeInForce: 1,                   // GOOD_TILL_CANCEL
+      });
+      tpOrderIds.push(_toNum(r?.order?.orderId));
+    } catch (e) {
+      console.error(`[cTrader] partial-close limit ${i + 1}/${N} at ${tpPrices[i]} failed: ${e.message}`);
+      failedTps.push({ tpPrice: tpPrices[i], legVol: legVols[i], error: e.message });
+    }
+  }
+
+  return { positionId, openRes, tpOrderIds, failedTps };
+}
+
 /** Close a position. `volumeCents` defaults to the position's current full volume. */
 export async function closePosition(positionId, volumeCents = null) {
   await connect();
@@ -363,6 +440,19 @@ export async function getPositions() {
     swap:        _toNum(p.swap),
     commission:  _toNum(p.commission),
   }));
+}
+
+/**
+ * Sum of open volume (in cents) for all positions on the given symbol name.
+ * Used by position_monitor's synthetic-BE detection on the Approach B path:
+ * a single position shrinks in volume as each TP limit fills, so we watch
+ * for volume reduction instead of position-count drop.
+ */
+export async function getOpenVolumeForSymbol(symbolName) {
+  await connect();
+  const meta = await _symbolMetaFor(symbolName);
+  const positions = await getPositions();
+  return positions.filter(p => p.symbolId === meta.id).reduce((s, p) => s + p.volumeCents, 0);
 }
 
 export async function getEquity() {

@@ -497,34 +497,63 @@ export async function attemptInlineTrade(setup) {
   ];
 
   let placed = 0;
-  for (const leg of legs) {
-    if (!leg.tp) { log(`⚠ ${leg.name} skipped — no TP value`); continue; }
+
+  // ── cTrader path (Approach B) — 1 position + N limit-close orders ──────────
+  // Switched from Approach A (3 separate positions) so we have a single SL/PnL
+  // surface to manage. Cleaner deal history, simpler synthetic-BE (one modify
+  // call instead of three).
+  if (process.env.BROKER_PROVIDER === 'ctrader') {
     try {
-      await placeOrder({
-        symbol: setup.label, direction: setup.dir, units: thirdLots,
-        entry: setup.entry,   // cTrader path uses this for relative SL/TP; TV path ignores
-        tpPrice: leg.tp, slPrice: setup.sl,
-        minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
-        screenshot: leg.screenshot,
+      const bridge = await import('./broker_ctrader.mjs');
+      const validTps = legs.filter(l => l.tp).map(l => l.tp);
+      const totalUnits = thirdLots * legs.length;  // = thirdLots × 3
+      const r = await bridge.placeMultiTpPosition({
+        symbol:    setup.label,
+        direction: setup.dir,
+        totalUnits,
+        entry:     setup.entry,
+        slPrice:   setup.sl,
+        tpPrices:  validTps,
       });
-      log(`✓ ${leg.name} placed (TP=${leg.tp} SL=${setup.sl})`);
-      placed++;
-    } catch(e) {
-      log(`✗ ${leg.name} error: ${e.message}`);
-      // One retry after a short pause — covers transient ticket/DOM hiccups.
-      await new Promise(r => setTimeout(r, 2000));
+      placed = validTps.length - r.failedTps.length;
+      log(`✓ cTrader Approach B: position ${r.positionId} (${totalUnits} lots, SL=${setup.sl}) + ${r.tpOrderIds.length}/${validTps.length} TP limits placed at ${validTps.join(', ')}`);
+      if (r.failedTps.length) log(`⚠ failed TP limits: ${r.failedTps.map(f => `${f.tpPrice}(${f.error})`).join('; ')}`);
+    } catch (e) {
+      log(`✗ cTrader Approach B failed (${e.message}) — falling back to per-leg loop`);
+      // fall through to per-leg loop below
+    }
+  }
+
+  // ── Per-leg loop (TV-DOM path, or cTrader fallback) ────────────────────────
+  if (placed === 0) {
+    for (const leg of legs) {
+      if (!leg.tp) { log(`⚠ ${leg.name} skipped — no TP value`); continue; }
       try {
         await placeOrder({
           symbol: setup.label, direction: setup.dir, units: thirdLots,
           entry: setup.entry,
           tpPrice: leg.tp, slPrice: setup.sl,
           minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
-          screenshot: false,
+          screenshot: leg.screenshot,
         });
-        log(`✓ ${leg.name} placed on retry (TP=${leg.tp} SL=${setup.sl})`);
+        log(`✓ ${leg.name} placed (TP=${leg.tp} SL=${setup.sl})`);
         placed++;
-      } catch(e2) {
-        log(`✗ ${leg.name} retry also failed: ${e2.message}`);
+      } catch(e) {
+        log(`✗ ${leg.name} error: ${e.message}`);
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          await placeOrder({
+            symbol: setup.label, direction: setup.dir, units: thirdLots,
+            entry: setup.entry,
+            tpPrice: leg.tp, slPrice: setup.sl,
+            minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
+            screenshot: false,
+          });
+          log(`✓ ${leg.name} placed on retry (TP=${leg.tp} SL=${setup.sl})`);
+          placed++;
+        } catch(e2) {
+          log(`✗ ${leg.name} retry also failed: ${e2.message}`);
+        }
       }
     }
   }
