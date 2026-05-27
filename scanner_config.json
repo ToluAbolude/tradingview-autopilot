@@ -23,7 +23,8 @@
     "V_volume_spike":     1,
     "BB_band_touch":      1,
     "BB_squeeze":         1,
-    "bias_penalty":       1
+    "bias_penalty":       1,
+    "setup_type_boost":   3
   },
 
   "thresholds": {

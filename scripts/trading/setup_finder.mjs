@@ -647,6 +647,109 @@ function detectORB(bars, label, tf, dir) {
   return null;
 }
 
+// ── Opportunity-type classifier ────────────────────────────────────────────
+// Looks at the current bars + indicators and decides which kind of setup is
+// in front of us. Returns null when none of the four types match cleanly,
+// in which case scoring falls back to the generic strategy sum (legacy).
+//
+// Types:
+//   'continuation' — trend is clearly directional AND price pulled back to
+//                    dynamic support (EMA21/50 or trendline) before resuming.
+//   'breakout'     — price spent the last N bars in a tight range (low ATR
+//                    relative to recent), and the current bar closes outside
+//                    that range with above-average volume.
+//   'reversal'     — RSI divergence vs price OR pin/engulf at PDH/PDL/FVG with
+//                    the bar showing rejection (long wick into the zone,
+//                    closing back). Trend may oppose — that's the point.
+//   'retest'       — price broke a swing-high (for shorts) or swing-low (for
+//                    longs) within the last 5 bars, then returned to the
+//                    broken level and rejected (S→R or R→S flip).
+//
+// The classifier is conservative — only fires when conditions are clear, so
+// many setups will return null and use the legacy scoring untouched.
+export function classifySetup(bars, dir, ema8, ema21, ema50, rsi, atr) {
+  const n = bars.length - 1;
+  if (n < 30) return null;
+  const last = bars[n];
+  const recent = bars.slice(Math.max(0, n - 20), n + 1);
+
+  // ── 1. CONTINUATION — trend strong + pullback to EMA ─────────────────────
+  // EMA stack ordered AND price within 0.3 ATR of EMA21 (pullback zone).
+  const emaSpread = Math.abs(ema8[n] - ema50[n]);
+  const trendDirected = emaSpread / ema50[n] > 0.003;  // EMAs spread > 0.3% of price
+  const stackUp   = ema8[n] > ema21[n] && ema21[n] > ema50[n];
+  const stackDown = ema50[n] > ema21[n] && ema21[n] > ema8[n];
+  const inPullback = Math.abs(last.c - ema21[n]) <= atr[n] * 0.3;
+  if (trendDirected && inPullback &&
+      ((dir === 'long' && stackUp) || (dir === 'short' && stackDown))) {
+    return 'continuation';
+  }
+
+  // ── 2. BREAKOUT — recent range + this bar breaks out with volume ─────────
+  const rangeBars = bars.slice(Math.max(0, n - 10), n);   // prior 10 bars
+  if (rangeBars.length >= 8) {
+    const rangeHigh = Math.max(...rangeBars.map(b => b.h));
+    const rangeLow  = Math.min(...rangeBars.map(b => b.l));
+    const rangeATR  = (rangeHigh - rangeLow) / atr[n];
+    const tight     = rangeATR < 2.0;  // 10-bar range is < 2 ATR = consolidation
+    const avgVol    = rangeBars.reduce((s, b) => s + (b.v || 0), 0) / rangeBars.length;
+    const volSpike  = last.v && avgVol > 0 && last.v > avgVol * 1.4;
+    const brokeUp   = dir === 'long'  && last.c > rangeHigh;
+    const brokeDown = dir === 'short' && last.c < rangeLow;
+    if (tight && volSpike && (brokeUp || brokeDown)) return 'breakout';
+  }
+
+  // ── 3. REVERSAL — RSI divergence OR pin/engulf rejection at zone ─────────
+  // RSI divergence: price prints new extreme but RSI fails to confirm.
+  if (n >= 20) {
+    const window = bars.slice(n - 20, n + 1);
+    const rsiWin = rsi.slice(n - 20, n + 1);
+    if (dir === 'short') {
+      // Bearish divergence: price higher high, RSI lower high
+      const prevHighIdx = window.slice(0, -3).reduce((mx, b, i) => b.h > window[mx].h ? i : mx, 0);
+      if (last.h > window[prevHighIdx].h && rsiWin[rsiWin.length - 1] < rsiWin[prevHighIdx] - 5) {
+        return 'reversal';
+      }
+    } else {
+      // Bullish divergence: price lower low, RSI higher low
+      const prevLowIdx = window.slice(0, -3).reduce((mn, b, i) => b.l < window[mn].l ? i : mn, 0);
+      if (last.l < window[prevLowIdx].l && rsiWin[rsiWin.length - 1] > rsiWin[prevLowIdx] + 5) {
+        return 'reversal';
+      }
+    }
+  }
+  // Pin-at-extreme-of-range
+  const range = last.h - last.l;
+  if (range > 0) {
+    const body = Math.abs(last.c - last.o);
+    const upperWick = last.h - Math.max(last.c, last.o);
+    const lowerWick = Math.min(last.c, last.o) - last.l;
+    const swingH = Math.max(...recent.slice(0, -1).map(b => b.h));
+    const swingL = Math.min(...recent.slice(0, -1).map(b => b.l));
+    if (dir === 'short' && upperWick > 2 * body && last.h >= swingH) return 'reversal';
+    if (dir === 'long'  && lowerWick > 2 * body && last.l <= swingL) return 'reversal';
+  }
+
+  // ── 4. RETEST — broke a swing level within last 5 bars, returned and rejected ─
+  if (n >= 10) {
+    const tail = bars.slice(n - 5, n + 1);
+    if (dir === 'long') {
+      const recentHigh = Math.max(...bars.slice(n - 15, n - 5).map(b => b.h));
+      // Did we break above recentHigh, then come back to test it?
+      const brokeAbove = tail.slice(0, -1).some(b => b.h > recentHigh);
+      const retestedAndHeld = last.l <= recentHigh * 1.002 && last.c > recentHigh;
+      if (brokeAbove && retestedAndHeld) return 'retest';
+    } else {
+      const recentLow = Math.min(...bars.slice(n - 15, n - 5).map(b => b.l));
+      const brokeBelow = tail.slice(0, -1).some(b => b.l < recentLow);
+      const retestedAndHeld = last.h >= recentLow * 0.998 && last.c < recentLow;
+      if (brokeBelow && retestedAndHeld) return 'retest';
+    }
+  }
+
+  return null;
+}
+
 export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
   const atr    = calcATR(bars);
@@ -1013,7 +1116,46 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     }
   }
 
-  return { score, reasons, strategies: [...new Set(strats)], rsi: rsi[n], atrVal: atr[n], activeFVG };
+  // ── Opportunity-type classifier + type-specific boost ────────────────────
+  // Detect which kind of setup this is (continuation/breakout/reversal/retest)
+  // and add a bonus when the strategies that fired actually match that type.
+  // No type is preferred over another — we trade whichever opportunity
+  // currently has the cleanest signature.
+  //
+  // For reversal and breakout setups the daily-bias penalty is refunded:
+  // those types are EXPECTED to go against the prevailing daily bias, so
+  // penalising for it is a category error.
+  const setupType = classifySetup(bars, dir, ema8, ema21, ema50, rsi, atr);
+  if (setupType) {
+    const TYPE_BOOST = SC.setup_type_boost ?? 3;
+    const typeStrategies = {
+      continuation: ['A','B','T','L','H'],
+      breakout:     ['OR','BB','V','L'],
+      reversal:     ['K','H','R','F','U','BB','C','C-near'],
+      retest:       ['C','C-near','F','U','K','H'],
+    }[setupType] || [];
+    const matched = [...new Set(strats)].filter(s => typeStrategies.includes(s));
+
+    // Refund daily-bias penalty for setups that go against the bias (reversal / breakout).
+    if (setupType === 'reversal' || setupType === 'breakout') {
+      const penaltyMsg = reasons.findIndex(r => /counter-trend, -/.test(r));
+      if (penaltyMsg >= 0) {
+        score += (SC.bias_penalty ?? 1);
+        reasons[penaltyMsg] = reasons[penaltyMsg] + ' (refunded — ' + setupType + ' setup)';
+      }
+    }
+
+    // Add type-fit bonus only when at least 2 strategies of that family fired.
+    if (matched.length >= 2) {
+      score += TYPE_BOOST;
+      reasons.push(`Setup type: ${setupType} (+${TYPE_BOOST} — ${matched.length} matching: ${matched.join(',')})`);
+      strats.push(`TYPE_${setupType.toUpperCase()}`);
+    } else {
+      reasons.push(`Setup type: ${setupType} (no boost — only ${matched.length} matching strategies)`);
+    }
+  }
+
+  return { score, reasons, strategies: [...new Set(strats)], setupType, rsi: rsi[n], atrVal: atr[n], activeFVG };
 }
 
 // ── Per-instrument SL/TP profiles ───────────────────────────────────────────
@@ -1385,7 +1527,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
   return results;
 }
 
-if (process.argv[1].endsWith('setup_finder.mjs')) {
+if (process.argv[1]?.endsWith('setup_finder.mjs')) {
   const setups = await scanForSetups();
   for (const s of setups) {
     console.log(`  [${s.score}/9][T${s.tier}] ${s.label} ${s.tf}M ${s.dir.toUpperCase()} | Entry:${s.entry} SL:${s.sl} TP1:${s.tpQuick}/TP2:${s.tp2}/TP3:${s.tp3} RR:${s.rr} | ${s.strategies.join(',')} | ${s.reasons.slice(0,4).join(', ')}`);
