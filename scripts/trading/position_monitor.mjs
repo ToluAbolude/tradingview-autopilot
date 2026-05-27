@@ -30,6 +30,9 @@ const SYMBOL     = (args.symbol || '').toUpperCase();
 const ENTRY_PRICE = parseFloat(args.entry) || null;
 const NUM_ORDERS  = parseInt(args.numOrders) || 1;
 const TRADE_TIME  = args.tradeTime || null;
+const MONITOR_START_MS = Date.now();   // for cTrader deal-history filtering
+
+const USE_CTRADER = process.env.BROKER_PROVIDER === 'ctrader';
 
 try { mkdirSync(join(DATA_ROOT, 'trade_log'), { recursive: true }); } catch(_) {}
 
@@ -119,6 +122,34 @@ async function getBalance() {
   })()`);
 }
 
+// ── PnL resolution ──────────────────────────────────────────────────────────
+// Truth-source PnL via cTrader Open API when BROKER_PROVIDER=ctrader.
+// Falls back to TV balance-delta on any error (still better than nothing,
+// even with its known cross-trade attribution bug).
+//
+// This is the fix for last night's wrong trades.csv rows: balance-delta over
+// a window pollutes one trade's PnL with another concurrent trade's outcome.
+// cTrader's deal history gives the EXACT close price and grossProfit per
+// position, so we sum only the closing deals for THIS monitor's symbol that
+// occurred during the monitor's lifetime.
+async function resolvePnl(_reason) {
+  if (USE_CTRADER) {
+    try {
+      const bridge = await import('./broker_ctrader.mjs');
+      const r = await bridge.getRecentClosePnl(SYMBOL, MONITOR_START_MS - 5000);
+      log(`PnL via cTrader: net=${r.netPnl} from ${r.count} closing deal(s)`);
+      if (r.count > 0) return r.netPnl;
+      // No deals found yet → fall through to balance-delta as a backstop
+    } catch (e) {
+      log(`PnL cTrader lookup failed: ${e.message} — falling back to balance-delta`);
+    }
+  }
+  const bal = await getBalance().catch(() => null);
+  return bal != null && baseBalance != null
+    ? Math.round((bal - baseBalance) * 100) / 100
+    : null;
+}
+
 // ── Update the trade row in CSV ──
 function updateLastTrade(result, pnl, note) {
   if (!existsSync(TRADES_CSV)) { log(`CSV not found: ${TRADES_CSV}`); return false; }
@@ -187,9 +218,7 @@ async function main() {
         catch(e) { log(`EOD close error: ${e.message}`); }
         await sleep(3000);
       }
-      const bal = await getBalance().catch(() => null);
-      const pnl = bal != null && baseBalance != null
-        ? Math.round((bal - baseBalance) * 100) / 100 : null;
+      const pnl = await resolvePnl('eod_close');
       updateLastTrade(pnl != null ? (pnl >= 0 ? 'W' : 'L') : '?', pnl, 'eod_close');
       log('EOD done. Exiting.');
       return;
@@ -247,9 +276,7 @@ async function main() {
         try { await closeAllPositions(); log('Synthetic BE close executed.'); }
         catch(e) { log(`Synthetic BE close error: ${e.message}`); }
         await sleep(3000);
-        const bal = await getBalance().catch(() => null);
-        const pnl = bal != null && baseBalance != null
-          ? Math.round((bal - baseBalance) * 100) / 100 : null;
+        const pnl = await resolvePnl('synthetic_be_close');
         updateLastTrade(pnl != null ? (pnl >= 0 ? 'W' : 'L') : '?', pnl, 'synthetic_be_close');
         return;
       }
@@ -257,9 +284,7 @@ async function main() {
 
     // Position closed: was open, now gone
     if (prevPositions?.found && !state.found) {
-      const bal = await getBalance().catch(() => null);
-      const pnl = bal != null && baseBalance != null
-        ? Math.round((bal - baseBalance) * 100) / 100 : null;
+      const pnl = await resolvePnl('closed');
       const result = pnl != null ? (pnl >= 0 ? 'W' : 'L') : '?';
       log(`POSITION CLOSED → result=${result} pnl=${pnl}`);
       updateLastTrade(result, pnl, 'closed');

@@ -376,6 +376,54 @@ export async function getEquity() {
   };
 }
 
+/**
+ * Sum REAL net PnL of all closing deals for `symbolName` since `fromMs` (unix ms).
+ * grossProfit/commission/swap are int64 cents; if `moneyDigits` is set on the
+ * deal, divide by 10^moneyDigits (cTrader's high-precision currency encoding).
+ *
+ * Returns: { netPnl, count, deals: [...] } — netPnl in account currency.
+ * Replaces position_monitor's balance-delta computation, which mis-attributes
+ * one trade's win to another when multiple trades close near each other.
+ */
+export async function getRecentClosePnl(symbolName, fromMs, toMs = Date.now()) {
+  await connect();
+  const meta = await _symbolMetaFor(symbolName);
+  const res = await send('ProtoOADealListReq', {
+    ctidTraderAccountId: _accountId,
+    fromTimestamp: fromMs,
+    toTimestamp:   toMs,
+    maxRows: 1000,
+  });
+
+  const matching = [];
+  for (const d of (res.deal || [])) {
+    if (_toNum(d.symbolId) !== meta.id) continue;
+    if (!d.closePositionDetail) continue;     // only closing deals carry realised PnL
+    const dealStatus = _toNum(d.dealStatus);
+    if (dealStatus !== 2 && dealStatus !== 3) continue;  // FILLED or PARTIALLY_FILLED
+
+    const cpd = d.closePositionDetail;
+    const md  = _toNum(cpd.moneyDigits) || 2;            // default cents (×100)
+    const scale = Math.pow(10, md);
+    const gross = _toNum(cpd.grossProfit) / scale;
+    const comm  = _toNum(cpd.commission)  / scale;
+    const swap  = _toNum(cpd.swap)        / scale;
+    const net   = gross + comm + swap;
+
+    matching.push({
+      dealId:     _toNum(d.dealId),
+      positionId: _toNum(d.positionId),
+      execTs:     _toNum(d.executionTimestamp),
+      execPrice:  d.executionPrice,
+      tradeSide:  d.tradeSide === 1 ? 'buy' : 'sell',
+      gross, comm, swap, net,
+    });
+  }
+
+  const netPnl = matching.reduce((s, d) => s + d.net, 0);
+  return { netPnl: Math.round(netPnl * 100) / 100, count: matching.length, deals: matching };
+}
+
 export function onPositionEvent(handler) {
   on('ProtoOAExecutionEvent', (evt) => {
     if (!evt?.position) return;
