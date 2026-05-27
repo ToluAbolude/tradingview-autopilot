@@ -145,7 +145,12 @@
       "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/setup_finder.mjs scripts/trading/execute_trade.mjs scripts/trading/inline_trader.mjs scripts/trading/position_monitor.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
       "PowerShell(ssh -i $env:USERPROFILE\\\\.ssh\\\\id_rsa_oracle ubuntu@132.145.44.68 \"PIDS=`$\\(pgrep -f market_scanner.mjs\\); echo OLD=`$PIDS; for p in `$PIDS; do kill `$p; done; sleep 6; rm -f /home/ubuntu/trading-data/market_scanner.lock; cd /home/ubuntu/tradingview-mcp-jackson && nohup node scripts/trading/market_scanner.mjs >> /home/ubuntu/trading-data/scanner.log 2>&1 & disown; sleep 8; echo NEW=`$\\(pgrep -f market_scanner.mjs\\); ps -o pid,lstart,cmd -p `$\\(pgrep -f market_scanner.mjs | head -1\\)\")",
       "Bash(git commit -m ' *)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle c:/tmp/force_close.mjs ubuntu@132.145.44.68:/home/ubuntu/force_close.mjs)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle c:/tmp/force_close.mjs ubuntu@132.145.44.68:/home/ubuntu/force_close.mjs)",
+      "Bash(awk '/strats\\\\.push/{p=NR-12; for\\(i=p;i<NR;i++\\) if\\(lines[i]~/\\\\/\\\\//\\) print lines[i]; print \">>>\", $0; lines[NR]=\"\"} {lines[NR]=$0}' scripts/trading/setup_finder.mjs)",
+      "Bash(grep -E \"// .{5,80}|>>>\")",
+      "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"echo CONNECTED; date -u; pgrep -fa market_scanner.mjs | grep -v 'bash -c' | head -3\")",
+      "Bash(powershell -NoProfile -Command \"Test-NetConnection -ComputerName 132.145.44.68 -Port 22 -InformationLevel Quiet -WarningAction SilentlyContinue\")",
+      "Bash(powershell -NoProfile -Command \"Test-NetConnection -ComputerName 132.145.44.68 -Port 9222 -InformationLevel Quiet -WarningAction SilentlyContinue\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
