@@ -1,80 +1,151 @@
 /**
- * broker_ctrader.mjs — cTrader Open API bridge.
+ * broker_ctrader.mjs — cTrader Open API v2 bridge (TCP/TLS + protobuf).
  *
- * Exposes the same surface as execute_trade.mjs so consumers (inline_trader,
- * position_monitor, naked_position_guard, eod_close) can be switched from
- * TradingView DOM scraping to authoritative broker API calls.
+ * Direct connection to BlackBull's cTrader backend. Replaces the fragile
+ * TradingView-DOM execution path. Every UI-scraping bug class (silent close,
+ * balance-delta PnL, sub-min-lot reject, suffix-strip mismatch, close-bracket
+ * TYPE confusion) disappears here because cTrader is the source of truth.
  *
- * Architecture: a singleton long-lived TLS connection to Spotware's cTrader
- * infrastructure (BlackBull is hosted on Spotware). Auth chain on connect:
- *   ProtoOAApplicationAuthReq → ProtoOAGetAccountListByAccessTokenReq → ProtoOAAccountAuthReq
+ * Wire protocol:
+ *   - TLS connect to {demo,live}.ctraderapi.com:5035
+ *   - Each message: 4-byte big-endian length prefix + ProtoMessage protobuf
+ *   - ProtoMessage = { payloadType (uint32), payload (bytes), clientMsgId (string) }
+ *   - Responses match outgoing requests by clientMsgId
  *
- * Why we need this:
- *   - Truth-source PnL (cTrader knows the exact close price, no balance-delta noise)
- *   - Native modify-SL (replaces the broken closeAllPositions DOM dance)
- *   - Reliable bracket/OCO orders (no sub-min-lot silent rejects)
- *   - Per-position events stream → position_monitor becomes a thin event consumer
+ * Auth chain (v2):
+ *   ProtoOAApplicationAuthReq -> ProtoOAGetAccountListByAccessTokenReq -> ProtoOAAccountAuthReq
  *
  * Credentials live in /home/ubuntu/.ctrader.env (NOT committed):
- *   CTRADER_CLIENT_ID=...
- *   CTRADER_CLIENT_SECRET=...
- *   CTRADER_ACCESS_TOKEN=...   (from OAuth flow — see ctrader_oauth_helper.mjs)
- *   CTRADER_REFRESH_TOKEN=...
- *   CTRADER_ACCOUNT_ID=2118552 (BlackBull live account)
+ *   CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET (from openapi.ctrader.com/apps)
+ *   CTRADER_ACCESS_TOKEN, CTRADER_REFRESH_TOKEN (from ctrader_oauth_helper.mjs)
+ *   CTRADER_ACCOUNT_ID=2118552  (BlackBull live account)
  *   CTRADER_ENV=demo|live
  *
- * Status: skeleton. Auth + connection are implemented but UNTESTED until
- * credentials are provisioned. See docs/CTRADER_SETUP.md for the credential
- * walkthrough.
+ * Uses protobufjs (modern) + node tls. No Spotware npm packages — those are
+ * v1-only and abandoned. Proto files vendored from spotware/ctrader-open-api-v2-java-example.
  */
+import tls from 'tls';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
+const protobuf = require('protobufjs');
 
-const ProtoMessages = require('connect-protobuf-messages');
-const AdapterTLS    = require('connect-js-adapter-tls');
-const EncodeDecode  = require('connect-js-encode-decode');
-const Connect       = require('connect-js-api');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROTO_DIR = path.join(__dirname, '..', '..', 'vendor', 'ctrader-protos');
 
-// ── Endpoints ───────────────────────────────────────────────────────────────
 const ENDPOINTS = {
-  demo: { host: 'demo.ctraderapi.com',  port: 5035 },
-  live: { host: 'live.ctraderapi.com',  port: 5035 },
-  // Spotware's own sandbox used by the official samples (kept as fallback):
-  spotware_sandbox: { host: 'sandbox-tradeapi.spotware.com', port: 5032 },
+  demo: { host: 'demo.ctraderapi.com', port: 5035 },
+  live: { host: 'live.ctraderapi.com', port: 5035 },
 };
 
 const ENV = process.env.CTRADER_ENV || 'demo';
 const endpoint = ENDPOINTS[ENV] || ENDPOINTS.demo;
 
-// ── Protocol setup ──────────────────────────────────────────────────────────
-const path = require('path');
-const protoRoot = path.join(
-  path.dirname(require.resolve('connect-protobuf-messages/package.json')),
-  'src/main/protobuf'
-);
-
-const protocol = new ProtoMessages([
-  { file: path.join(protoRoot, 'CommonMessages.proto') },
-  { file: path.join(protoRoot, 'OpenApiMessages.proto') },
+// ── Load protos ─────────────────────────────────────────────────────────────
+const root = await protobuf.load([
+  path.join(PROTO_DIR, 'OpenApiCommonModelMessages.proto'),
+  path.join(PROTO_DIR, 'OpenApiCommonMessages.proto'),
+  path.join(PROTO_DIR, 'OpenApiModelMessages.proto'),
+  path.join(PROTO_DIR, 'OpenApiMessages.proto'),
 ]);
-protocol.load();
-protocol.build();
+
+const ProtoMessage = root.lookupType('ProtoMessage');
+
+// Build name <-> payloadType maps from the proto enums.
+// In v2 every request/response has a `payloadType` field with a default of
+// the enum value, so we can pre-build the lookup table.
+const _nameToType = {};
+const _typeToName = {};
+function indexMessage(type) {
+  const f = type.fields?.payloadType;
+  if (!f || !Number.isInteger(f.defaultValue)) return;
+  _nameToType[type.name] = f.defaultValue;
+  _typeToName[f.defaultValue] = type.name;
+}
+function walk(ns) {
+  if (ns.nested) for (const k of Object.keys(ns.nested)) walk(ns.nested[k]);
+  if (typeof ns.fields === 'object') indexMessage(ns);
+}
+walk(root);
+
+const lookupType = (name) => {
+  const t = root.lookupType(name);
+  if (!t) throw new Error(`Proto type not found: ${name}`);
+  return t;
+};
 
 // ── Connection singleton ────────────────────────────────────────────────────
-let _connect = null;
-let _ready   = false;
+let _socket   = null;
+let _ready    = false;
 let _readyPromise = null;
-let _accountId = null;  // ctidTraderAccountId (the numeric API-side ID, NOT the user's account number)
+let _accountId = null;
+let _msgCounter = 0;
+const _pending = new Map();   // clientMsgId -> { resolve, reject, timer }
+const _eventHandlers = new Map();  // payloadName -> [handler, ...]
 
-function payloadType(name) { return protocol.getPayloadTypeByName(name); }
-
-function send(name, payload) {
-  if (!_connect) throw new Error('cTrader not connected. Call connect() first.');
-  return _connect.sendGuaranteedCommand(name, payload || {});
+function _frame(buf) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(buf.length, 0);
+  return Buffer.concat([len, buf]);
 }
 
-function on(name, handler) {
-  _connect.on(payloadType(name), handler);
+function _sendRaw(payloadType, payloadObj, clientMsgId) {
+  const name = _typeToName[payloadType];
+  const T = lookupType(name);
+  const errMsg = T.verify(payloadObj);
+  if (errMsg) throw new Error(`Verify failed for ${name}: ${errMsg}`);
+  const payload = T.encode(T.create(payloadObj)).finish();
+  const wrap = ProtoMessage.encode(ProtoMessage.create({ payloadType, payload, clientMsgId })).finish();
+  _socket.write(_frame(wrap));
+}
+
+function send(name, payload, { timeoutMs = 10_000 } = {}) {
+  if (!_socket) throw new Error('cTrader not connected. Call connect() first.');
+  const payloadType = _nameToType[name];
+  if (payloadType == null) throw new Error(`Unknown cTrader request: ${name}`);
+  const clientMsgId = `m${++_msgCounter}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      _pending.delete(clientMsgId);
+      reject(new Error(`${name} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    _pending.set(clientMsgId, { resolve, reject, timer });
+    try { _sendRaw(payloadType, payload || {}, clientMsgId); }
+    catch (e) { clearTimeout(timer); _pending.delete(clientMsgId); reject(e); }
+  });
+}
+
+function _handleIncoming(wrap) {
+  const name = _typeToName[wrap.payloadType] || `Unknown(${wrap.payloadType})`;
+  let decoded = null;
+  try {
+    const T = lookupType(name);
+    decoded = T.decode(wrap.payload);
+  } catch (_) { /* unknown type — leave decoded null */ }
+
+  // Match to pending request by clientMsgId
+  if (wrap.clientMsgId && _pending.has(wrap.clientMsgId)) {
+    const { resolve, reject, timer } = _pending.get(wrap.clientMsgId);
+    clearTimeout(timer);
+    _pending.delete(wrap.clientMsgId);
+    if (name === 'ProtoOAErrorRes' || name === 'ProtoErrorRes') {
+      reject(new Error(`cTrader error: ${decoded?.errorCode} ${decoded?.description || ''}`));
+    } else {
+      resolve(decoded);
+    }
+    return;
+  }
+
+  // Otherwise treat as an event
+  const handlers = _eventHandlers.get(name) || [];
+  for (const h of handlers) { try { h(decoded); } catch (e) { console.error(`[cTrader] handler ${name}:`, e); } }
+}
+
+export function on(name, handler) {
+  const arr = _eventHandlers.get(name) || [];
+  arr.push(handler);
+  _eventHandlers.set(name, arr);
 }
 
 export async function connect() {
@@ -84,7 +155,7 @@ export async function connect() {
   const clientId     = process.env.CTRADER_CLIENT_ID;
   const clientSecret = process.env.CTRADER_CLIENT_SECRET;
   const accessToken  = process.env.CTRADER_ACCESS_TOKEN;
-  const accountNum   = process.env.CTRADER_ACCOUNT_ID;  // user-facing account number e.g. 2118552
+  const accountNum   = process.env.CTRADER_ACCOUNT_ID;
 
   if (!clientId || !clientSecret || !accessToken || !accountNum) {
     throw new Error('Missing CTRADER_* env vars. See docs/CTRADER_SETUP.md');
@@ -92,84 +163,91 @@ export async function connect() {
 
   console.log(`[cTrader] Connecting to ${endpoint.host}:${endpoint.port} (env=${ENV})`);
 
-  const adapter      = new AdapterTLS({ host: endpoint.host, port: endpoint.port });
-  const encodeDecode = new EncodeDecode();
-  _connect = new Connect({ adapter, encodeDecode, protocol });
-
   _readyPromise = new Promise((resolve, reject) => {
-    _connect.onConnect = async () => {
-      try {
-        // Heartbeat
-        setInterval(() => send('ProtoOAVersionReq'), 25_000).unref();
+    _socket = tls.connect(endpoint.port, endpoint.host, { servername: endpoint.host });
 
-        // Step 1: app auth
+    let recvBuf = Buffer.alloc(0);
+    _socket.on('data', (chunk) => {
+      recvBuf = Buffer.concat([recvBuf, chunk]);
+      while (recvBuf.length >= 4) {
+        const len = recvBuf.readUInt32BE(0);
+        if (recvBuf.length < 4 + len) break;
+        const payload = recvBuf.subarray(4, 4 + len);
+        recvBuf = recvBuf.subarray(4 + len);
+        try { _handleIncoming(ProtoMessage.decode(payload)); }
+        catch (e) { console.error('[cTrader] decode error:', e.message); }
+      }
+    });
+
+    _socket.on('error', (e) => { console.error('[cTrader] socket error:', e.message); if (!_ready) reject(e); });
+    _socket.on('end',   ()  => { console.log('[cTrader] connection ended'); _ready = false; _socket = null; _readyPromise = null; });
+
+    _socket.on('secureConnect', async () => {
+      try {
+        // Heartbeat every 25s
+        setInterval(() => { try { _sendRaw(_nameToType['ProtoHeartbeatEvent'], {}, ''); } catch (_) {} }, 25_000).unref();
+
         await send('ProtoOAApplicationAuthReq', { clientId, clientSecret });
         console.log('[cTrader] App auth OK');
 
-        // Step 2: list accounts to find ctidTraderAccountId for our account number
         const accountsRes = await send('ProtoOAGetAccountListByAccessTokenReq', { accessToken });
-        const match = (accountsRes.ctidTraderAccount || []).find(
-          a => String(a.traderLogin) === String(accountNum)
-        );
+        const accounts = accountsRes?.ctidTraderAccount || [];
+        const match = accounts.find(a => String(a.traderLogin) === String(accountNum));
         if (!match) {
-          throw new Error(`Account ${accountNum} not in OAuth-granted list. Re-grant scope=trading.`);
+          throw new Error(`Account ${accountNum} not in OAuth-granted list (got: ${accounts.map(a=>a.traderLogin).join(', ')}). Re-grant scope=trading.`);
         }
-        _accountId = match.ctidTraderAccountId;
-        console.log(`[cTrader] Account ${accountNum} → ctidTraderAccountId=${_accountId}`);
+        _accountId = Number(match.ctidTraderAccountId);
+        console.log(`[cTrader] Account ${accountNum} -> ctidTraderAccountId=${_accountId}`);
 
-        // Step 3: authorize account for trading
         await send('ProtoOAAccountAuthReq', { ctidTraderAccountId: _accountId, accessToken });
-        console.log('[cTrader] Account auth OK — ready for trading');
-
+        console.log('[cTrader] Account auth OK — ready');
         _ready = true;
         resolve();
       } catch (e) { reject(e); }
-    };
-
-    _connect.onEnd   = () => { _ready = false; _connect = null; _readyPromise = null; console.log('[cTrader] Connection ended'); };
-    _connect.onError = (e) => { console.error('[cTrader] error:', e); reject(e); };
-
-    _connect.start();
+    });
   });
 
   return _readyPromise;
 }
 
-// ── Public API — same shape as execute_trade.mjs ──────────────────────────
+// ── Public API (matches execute_trade.mjs surface) ──────────────────────────
 
-/** Open a position. Returns { positionId, entryPrice, lots }. */
+const _symbolCache = new Map();
+async function _symbolNameToId(name) {
+  if (_symbolCache.size === 0) {
+    const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId });
+    for (const s of (res.symbol || [])) _symbolCache.set(s.symbolName, Number(s.symbolId));
+  }
+  if (!_symbolCache.has(name)) throw new Error(`cTrader: symbol "${name}" not found in account.`);
+  return _symbolCache.get(name);
+}
+
 export async function placeOrder({ symbol, direction, units, tpPrice, slPrice }) {
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
   const symbolId = await _symbolNameToId(symbol);
-  const tradeSide = (direction === 'long' || direction === 'buy') ? 1 /*BUY*/ : 2 /*SELL*/;
-
+  const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
   const res = await send('ProtoOANewOrderReq', {
     ctidTraderAccountId: _accountId,
     symbolId,
-    orderType:    1,         // MARKET
+    orderType:   1,                                  // MARKET
     tradeSide,
-    volume:       Math.round(units * 100),  // cTrader uses cents/lots×100
-    stopLoss:     slPrice,
-    takeProfit:   tpPrice,
-    timeInForce:  3,         // IMMEDIATE_OR_CANCEL
+    volume:      Math.round(units * 100),            // cTrader uses lots * 100
+    stopLoss:    slPrice,
+    takeProfit:  tpPrice,
+    timeInForce: 3,                                  // IMMEDIATE_OR_CANCEL
   });
-  return { positionId: res?.position?.positionId, raw: res };
+  return res;
 }
 
-/** Close one position by id. */
-export async function closePosition(positionId) {
+export async function closePosition(positionId, volume = 0) {
   await connect();
   return send('ProtoOAClosePositionReq', {
-    ctidTraderAccountId: _accountId,
-    positionId,
-    volume: 0,  // 0 = close full
+    ctidTraderAccountId: _accountId, positionId, volume,
   });
 }
 
-/** Close every open position (replaces the broken DOM closeAllPositions). */
 export async function closeAllPositions() {
-  await connect();
   const positions = await getPositions();
   let closed = 0;
   for (const p of positions) {
@@ -179,7 +257,6 @@ export async function closeAllPositions() {
   return { closed, remaining: positions.length - closed };
 }
 
-/** Modify SL and/or TP on an open position. Enables real synthetic-BE. */
 export async function modifyPosition(positionId, { stopLoss, takeProfit }) {
   await connect();
   return send('ProtoOAAmendPositionSLTPReq', {
@@ -190,15 +267,14 @@ export async function modifyPosition(positionId, { stopLoss, takeProfit }) {
   });
 }
 
-/** Get all open positions for the account. */
 export async function getPositions() {
   await connect();
   const res = await send('ProtoOAReconcileReq', { ctidTraderAccountId: _accountId });
   return (res.position || []).map(p => ({
-    positionId:  p.positionId,
-    symbolId:    p.tradeData?.symbolId,
+    positionId:  Number(p.positionId),
+    symbolId:    Number(p.tradeData?.symbolId),
     direction:   p.tradeData?.tradeSide === 1 ? 'long' : 'short',
-    volume:      p.tradeData?.volume / 100,
+    volume:      Number(p.tradeData?.volume || 0) / 100,
     entryPrice:  p.price,
     stopLoss:    p.stopLoss,
     takeProfit:  p.takeProfit,
@@ -207,58 +283,38 @@ export async function getPositions() {
   }));
 }
 
-/** Account equity + balance — replaces DOM-scraped getEquity(). */
 export async function getEquity() {
   await connect();
   const res = await send('ProtoOATraderReq', { ctidTraderAccountId: _accountId });
+  const t = res.trader || {};
   return {
-    balance: (res.trader?.balance || 0) / 100,
-    equity:  (res.trader?.balance || 0) / 100,  // exact equity requires reconcile + mark-to-market
-    currency: res.trader?.depositAssetId,
+    balance:  Number(t.balance || 0) / 100,
+    equity:   Number(t.balance || 0) / 100,
+    currency: t.depositAssetId,
   };
 }
 
-/** Subscribe to position events (opened/closed/modified). Stream replaces polling. */
 export function onPositionEvent(handler) {
-  on('ProtoOAExecutionEvent', evt => {
-    if (!evt.position) return;
+  on('ProtoOAExecutionEvent', (evt) => {
+    if (!evt?.position) return;
     handler({
-      type:        ['', 'ORDER_ACCEPTED', 'ORDER_FILLED', 'ORDER_REPLACED', 'ORDER_CANCELLED', 'ORDER_EXPIRED', 'ORDER_REJECTED', 'SWAP', 'DEPOSIT_WITHDRAW', 'ORDER_PARTIAL_FILL', 'BONUS_DEPOSIT_WITHDRAW'][evt.executionType] || 'UNKNOWN',
-      positionId:  evt.position.positionId,
-      raw:         evt,
+      executionType: evt.executionType,
+      positionId:    Number(evt.position.positionId),
+      raw:           evt,
     });
   });
 }
 
-// ── Internal: cache symbol-name → symbolId lookups ─────────────────────────
-const _symbolCache = new Map();
-async function _symbolNameToId(name) {
-  if (_symbolCache.has(name)) return _symbolCache.get(name);
-  const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId });
-  for (const s of (res.symbol || [])) {
-    _symbolCache.set(s.symbolName, s.symbolId);
-  }
-  if (!_symbolCache.has(name)) throw new Error(`cTrader: symbol "${name}" not found in account symbol list.`);
-  return _symbolCache.get(name);
-}
-
-// ── Smoke-test entry point ─────────────────────────────────────────────────
+// ── Smoke test ─────────────────────────────────────────────────────────────
 if (process.argv[1]?.endsWith('broker_ctrader.mjs')) {
-  const args = process.argv.slice(2);
   (async () => {
+    const args = process.argv.slice(2);
     try {
       await connect();
-      if (args.includes('--equity')) {
-        console.log('Equity:', await getEquity());
-      } else if (args.includes('--positions')) {
-        console.log('Positions:', JSON.stringify(await getPositions(), null, 2));
-      } else {
-        console.log('OK — connected + authed. Try --equity or --positions');
-      }
+      if (args.includes('--equity'))     console.log('Equity:',    JSON.stringify(await getEquity(),    null, 2));
+      else if (args.includes('--positions')) console.log('Positions:', JSON.stringify(await getPositions(), null, 2));
+      else console.log('OK — connected. Try --equity / --positions.');
       process.exit(0);
-    } catch (e) {
-      console.error('Smoke test failed:', e);
-      process.exit(1);
-    }
+    } catch (e) { console.error('Smoke test FAILED:', e.message); process.exit(1); }
   })();
 }
