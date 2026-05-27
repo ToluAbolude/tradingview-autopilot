@@ -502,6 +502,7 @@ export async function attemptInlineTrade(setup) {
     try {
       await placeOrder({
         symbol: setup.label, direction: setup.dir, units: thirdLots,
+        entry: setup.entry,   // cTrader path uses this for relative SL/TP; TV path ignores
         tpPrice: leg.tp, slPrice: setup.sl,
         minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
         screenshot: leg.screenshot,
@@ -515,6 +516,7 @@ export async function attemptInlineTrade(setup) {
       try {
         await placeOrder({
           symbol: setup.label, direction: setup.dir, units: thirdLots,
+          entry: setup.entry,
           tpPrice: leg.tp, slPrice: setup.sl,
           minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
           screenshot: false,
@@ -531,21 +533,25 @@ export async function attemptInlineTrade(setup) {
     _cyclePlacedCount++;
     if (groupIdx !== -1) _cycleUsedGroups.add(groupIdx);
 
-    // ── Post-submit broker verification ──
+    // ── Post-submit broker verification (TV-DOM path only) ──
     // The TradingView submit click can silently fail to route to BlackBull
     // (observed on WTI 2026-05-22: bot logged ✓ placed but broker never received).
-    // Wait briefly for the order to propagate, then check the broker's actual
-    // Order history. If absent → mark VOID and add to a temporary block list so
-    // we stop spamming the same symbol.
+    // We scrape Order History to detect silent rejects.
+    // When BROKER_PROVIDER=ctrader, the cTrader API returns synchronous accept/
+    // reject — the scrape is redundant AND wrong (it may miss the just-placed
+    // order if TV's panel hasn't synced yet, then false-mark VOID).
     const submitTs = new Date().toISOString();
-    let brokerOk = null;  // null = check skipped/errored, true = found, false = missing
-    try {
-      // Give the broker 4 seconds to register the order
-      await new Promise(r => setTimeout(r, 4000));
-      brokerOk = await verifyOrderLanded(setup.label, setup.dir, submitTs, 120);
-      log(`Broker verify: ${brokerOk ? '✓ order found in broker history' : '✗ order MISSING from broker history (silent reject)'}`);
-    } catch (e) {
-      log(`Broker verify error: ${e.message} (treating as inconclusive)`);
+    let brokerOk = process.env.BROKER_PROVIDER === 'ctrader' ? true : null;
+    if (process.env.BROKER_PROVIDER !== 'ctrader') {
+      try {
+        await new Promise(r => setTimeout(r, 4000));
+        brokerOk = await verifyOrderLanded(setup.label, setup.dir, submitTs, 120);
+        log(`Broker verify: ${brokerOk ? '✓ order found in broker history' : '✗ order MISSING from broker history (silent reject)'}`);
+      } catch (e) {
+        log(`Broker verify error: ${e.message} (treating as inconclusive)`);
+      }
+    } else {
+      log(`Broker verify: ✓ skipped (cTrader synchronous confirm covers this)`);
     }
 
     if (brokerOk === false) {

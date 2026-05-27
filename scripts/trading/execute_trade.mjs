@@ -417,6 +417,7 @@ export async function placeOrder({
   symbol,
   direction,   // 'buy' | 'sell'
   units,
+  entry,       // expected entry price — required for cTrader path (relative SL/TP); ignored by TV path
   tpPrice,     // REQUIRED — take profit price level
   slPrice,     // REQUIRED — stop loss price level
   minRR = 2.0, // minimum R:R at actual fill price — rejects if market has moved adversely
@@ -424,6 +425,23 @@ export async function placeOrder({
   screenshot = false,
 }) {
   if (!tpPrice || !slPrice) throw new Error('tpPrice and slPrice are required for every trade.');
+
+  // Provider dispatch (PR-C): route to cTrader Open API when BROKER_PROVIDER=ctrader.
+  // cTrader's relativeStopLoss / relativeTakeProfit naturally preserve R:R from
+  // the original entry regardless of fill slippage, so minRR / reanchor are not
+  // needed on this path. Defensive fallback to TV-DOM on any cTrader failure.
+  if (process.env.BROKER_PROVIDER === 'ctrader') {
+    try {
+      const m = await import('./broker_ctrader.mjs');
+      const res = await m.placeOrder({ symbol, direction, units, entry, tpPrice, slPrice });
+      const posId = res?.position?.positionId;
+      console.log(`  ✓ cTrader: ${direction.toUpperCase()} ${units} ${symbol} | TP:${tpPrice} SL:${slPrice} | positionId=${posId}`);
+      return { provider: 'ctrader', positionId: posId, raw: res };
+    } catch (e) {
+      console.error(`  ✗ cTrader placeOrder failed (${e.message}) — falling back to TV-DOM`);
+      // intentional fallthrough
+    }
+  }
 
   const side = (direction === 'buy' || direction === 'long') ? 'LONG' : 'SHORT';
   console.log(`  → ${side} ${units} ${symbol} | TP:${tpPrice} SL:${slPrice}`);
