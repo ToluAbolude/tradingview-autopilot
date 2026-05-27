@@ -288,6 +288,19 @@ async function confirmCloseDialog() {
 
 // ── Close all open positions ──
 export async function closeAllPositions() {
+  // Provider dispatch: prefer cTrader Open API when BROKER_PROVIDER=ctrader.
+  // Falls back to TV DOM path on any error (defensive — TV path is still here).
+  if (process.env.BROKER_PROVIDER === 'ctrader') {
+    try {
+      const m = await import('./broker_ctrader.mjs');
+      const r = await m.closeAllPositions();
+      return `cTrader: closed=${r.closed} remaining=${r.remaining}`;
+    } catch (e) {
+      console.error(`[execute_trade] cTrader closeAll failed, falling back to TV: ${e.message}`);
+      // intentional fallthrough to TV DOM path below
+    }
+  }
+
   // Click Positions tab first so the close icons are mounted
   await evaluate(`(function() {
     var tabs = document.querySelectorAll('button');

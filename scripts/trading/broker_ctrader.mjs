@@ -212,38 +212,103 @@ export async function connect() {
 
 // ── Public API (matches execute_trade.mjs surface) ──────────────────────────
 
-const _symbolCache = new Map();
-async function _symbolNameToId(name) {
-  if (_symbolCache.size === 0) {
-    const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId });
-    for (const s of (res.symbol || [])) _symbolCache.set(s.symbolName, Number(s.symbolId));
-  }
-  if (!_symbolCache.has(name)) throw new Error(`cTrader: symbol "${name}" not found in account.`);
-  return _symbolCache.get(name);
+// Symbol metadata cache.
+//   id      = numeric symbolId
+//   lotSize = base currency units per 1.0 lot, in CENTS (cTrader convention).
+//             EURUSD typically returns 10_000_000  (= 100_000 EUR × 100 cents).
+//             volume field on ProtoOANewOrderReq is also in CENTS, so:
+//                volume = round(units_in_lots * lotSize)
+// ProtoOASymbolsListReq returns ProtoOALightSymbol (no lotSize). We then call
+// ProtoOASymbolByIdReq to fetch the full ProtoOASymbol for each id we need.
+const _symbolMeta  = new Map();   // name -> { id, lotSize, minVolume, stepVolume }
+const _symbolIdMap = new Map();   // name -> id (populated from light list)
+
+async function _loadSymbolList() {
+  if (_symbolIdMap.size > 0) return;
+  const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId });
+  for (const s of (res.symbol || [])) _symbolIdMap.set(s.symbolName, Number(s.symbolId));
 }
 
-export async function placeOrder({ symbol, direction, units, tpPrice, slPrice }) {
+async function _symbolMetaFor(name) {
+  if (_symbolMeta.has(name)) return _symbolMeta.get(name);
+  await _loadSymbolList();
+  const id = _symbolIdMap.get(name);
+  if (id == null) throw new Error(`cTrader: symbol "${name}" not in account symbol list.`);
+  const res = await send('ProtoOASymbolByIdReq', { ctidTraderAccountId: _accountId, symbolId: [id] });
+  const full = (res.symbol || [])[0];
+  if (!full) throw new Error(`cTrader: ProtoOASymbolByIdReq returned no symbol for ${name} (id=${id}).`);
+  const meta = {
+    id,
+    lotSize:    Number(full.lotSize    || 0),
+    minVolume:  Number(full.minVolume  || 0),
+    stepVolume: Number(full.stepVolume || 0),
+  };
+  _symbolMeta.set(name, meta);
+  return meta;
+}
+
+/**
+ * Place a market order.
+ *   entry  = expected entry price (used to convert absolute slPrice/tpPrice
+ *            into the relativeStopLoss / relativeTakeProfit that cTrader
+ *            requires for MARKET orders). If omitted, falls back to a two-step
+ *            place-then-amend flow.
+ *   tpPrice, slPrice = absolute price targets matching the existing
+ *                      execute_trade.placeOrder API.
+ */
+export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice }) {
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
-  const symbolId = await _symbolNameToId(symbol);
+  const meta = await _symbolMetaFor(symbol);
   const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
-  const res = await send('ProtoOANewOrderReq', {
+  const volume = Math.round(units * meta.lotSize);
+
+  const req = {
     ctidTraderAccountId: _accountId,
-    symbolId,
+    symbolId:    meta.id,
     orderType:   1,                                  // MARKET
     tradeSide,
-    volume:      Math.round(units * 100),            // cTrader uses lots * 100
-    stopLoss:    slPrice,
-    takeProfit:  tpPrice,
+    volume,
     timeInForce: 3,                                  // IMMEDIATE_OR_CANCEL
-  });
-  return res;
+  };
+
+  if (entry != null) {
+    // Convert absolute prices → relative distances (in 1/100000 of price units).
+    // For BUY: SL is below entry, TP is above. For SELL: reversed.
+    const slDist = Math.round(Math.abs(entry - slPrice) * 100_000);
+    const tpDist = Math.round(Math.abs(tpPrice - entry) * 100_000);
+    req.relativeStopLoss   = slDist;
+    req.relativeTakeProfit = tpDist;
+    return send('ProtoOANewOrderReq', req);
+  }
+
+  // Two-step fallback: open naked, then amend with absolute SL/TP after fill.
+  const orderRes = await send('ProtoOANewOrderReq', req);
+  const posId = Number(orderRes?.position?.positionId);
+  if (!posId) return orderRes;
+  try {
+    await send('ProtoOAAmendPositionSLTPReq', {
+      ctidTraderAccountId: _accountId, positionId: posId,
+      stopLoss: slPrice, takeProfit: tpPrice,
+    });
+  } catch (e) {
+    console.error(`[cTrader] placeOrder: amend SL/TP failed for ${posId}: ${e.message}`);
+  }
+  return orderRes;
 }
 
-export async function closePosition(positionId, volume = 0) {
+/** Close a position. `volumeCents` defaults to the position's current full volume. */
+export async function closePosition(positionId, volumeCents = null) {
   await connect();
+  if (volumeCents == null) {
+    const positions = await getPositions();
+    const p = positions.find(x => x.positionId === Number(positionId));
+    if (!p) throw new Error(`closePosition: positionId ${positionId} not open`);
+    volumeCents = p.volumeCents;
+  }
+  if (!volumeCents) throw new Error('closePosition: volumeCents must be > 0');
   return send('ProtoOAClosePositionReq', {
-    ctidTraderAccountId: _accountId, positionId, volume,
+    ctidTraderAccountId: _accountId, positionId: Number(positionId), volume: volumeCents,
   });
 }
 
@@ -251,8 +316,14 @@ export async function closeAllPositions() {
   const positions = await getPositions();
   let closed = 0;
   for (const p of positions) {
-    try { await closePosition(p.positionId); closed++; }
-    catch (e) { console.error(`[cTrader] close ${p.positionId} failed: ${e.message}`); }
+    try {
+      await send('ProtoOAClosePositionReq', {
+        ctidTraderAccountId: _accountId,
+        positionId: p.positionId,
+        volume:     p.volumeCents,
+      });
+      closed++;
+    } catch (e) { console.error(`[cTrader] close ${p.positionId} failed: ${e.message}`); }
   }
   return { closed, remaining: positions.length - closed };
 }
@@ -267,19 +338,30 @@ export async function modifyPosition(positionId, { stopLoss, takeProfit }) {
   });
 }
 
+// Helper — protobufjs returns int64 as either a JS number, a Long object
+// { low, high }, or a string depending on options. Normalise to JS Number.
+function _toNum(v) {
+  if (v == null) return 0;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') return Number(v);
+  if (typeof v.toNumber === 'function') return v.toNumber();
+  if (typeof v.low === 'number') return v.low + (v.high || 0) * 0x100000000;
+  return Number(v);
+}
+
 export async function getPositions() {
   await connect();
   const res = await send('ProtoOAReconcileReq', { ctidTraderAccountId: _accountId });
   return (res.position || []).map(p => ({
-    positionId:  Number(p.positionId),
-    symbolId:    Number(p.tradeData?.symbolId),
+    positionId:  _toNum(p.positionId),
+    symbolId:    _toNum(p.tradeData?.symbolId),
     direction:   p.tradeData?.tradeSide === 1 ? 'long' : 'short',
-    volume:      Number(p.tradeData?.volume || 0) / 100,
+    volumeCents: _toNum(p.tradeData?.volume),   // raw cTrader volume (cents)
     entryPrice:  p.price,
     stopLoss:    p.stopLoss,
     takeProfit:  p.takeProfit,
-    swap:        p.swap,
-    commission:  p.commission,
+    swap:        _toNum(p.swap),
+    commission:  _toNum(p.commission),
   }));
 }
 
