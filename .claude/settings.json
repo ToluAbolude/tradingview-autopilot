@@ -156,7 +156,8 @@
       "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"echo '--- installed binaries ---'; which x11vnc tigervncserver websockify novnc_proxy noVNC 2>/dev/null; ls /usr/share/novnc 2>/dev/null | head -5; echo '--- check for old startup scripts in home ---'; ls ~/start_vnc* ~/*vnc* 2>/dev/null; echo '--- systemd unit files for vnc ---'; ls /etc/systemd/system/ | grep -iE 'vnc|websock|novnc' 2>/dev/null\")",
       "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"echo '--- service file ---'; sudo cat /etc/systemd/system/tradingview-vnc.service; echo; echo '--- starting ---'; sudo systemctl start tradingview-vnc; sleep 3; echo '--- status ---'; systemctl is-active tradingview-vnc; sudo systemctl status tradingview-vnc --no-pager -l 2>&1 | head -15; echo '--- listening ports now ---'; ss -tlnp 2>/dev/null | grep -E ':\\(58|59|60|68|92\\)'\")",
       "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"sudo systemctl enable tradingview-vnc 2>&1 | tail -3; echo '---'; systemctl is-enabled tradingview-vnc\")",
-      "Bash(grep -nE \"\\(\\\\\\\\bsl\\\\\\\\s*[:=]|ATR|atr|stopLoss|computeSL\\)\" scripts/trading/setup_finder.mjs)"
+      "Bash(grep -nE \"\\(\\\\\\\\bsl\\\\\\\\s*[:=]|ATR|atr|stopLoss|computeSL\\)\" scripts/trading/setup_finder.mjs)",
+      "Bash(node --check scripts/trading/scale_risk_to_goal.mjs)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",

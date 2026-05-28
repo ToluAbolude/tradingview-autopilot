@@ -36,7 +36,7 @@ const HISTORY_DIR   = join(DATA_ROOT, 'params_history');
 const RISK_LOG      = join(DATA_ROOT, 'risk_scaling.jsonl');
 
 const LOOKBACK_DAYS       = 30;
-const RISK_FLOOR_PCT      = 1.0;
+const RISK_FLOOR_PCT      = 5.0;   // raised 1.0 → 5.0 on 2026-05-28 at user direction (restore April sizing)
 const RISK_CAP_PCT_TIER1  = 10.0;
 const TIER2_RATIO         = 0.7;
 const TIER3_RATIO         = 0.5;
@@ -47,7 +47,9 @@ function loadJson(path, fallback) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-function parseTrades() {
+// Fallback: parse trades.csv. Known to over-attribute losses via the
+// balance-delta bug — use only when cTrader source unavailable.
+function parseTradesCsv() {
   if (!existsSync(TRADES_CSV)) return [];
   const cutoff = new Date(); cutoff.setUTCDate(cutoff.getUTCDate() - LOOKBACK_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
@@ -62,6 +64,63 @@ function parseTrades() {
       };
     })
     .filter(t => t.result && t.pnl !== 0);
+}
+
+// Authoritative source: cTrader's deal history. Aggregates all closing deals
+// per position into one synthetic "trade" row (W/L based on net sign) so the
+// edge math stays apples-to-apples with the csv path.
+async function parseTradesFromCtrader() {
+  const bridge = await import('./broker_ctrader.mjs');
+  const fromMs = Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  // Symbols we've actually traded — covers all instruments in any current or
+  // recent watchlist. Each call is a single API roundtrip; cached after the
+  // first hit so cost stays low.
+  const symbols = [
+    'WTI','XAUUSD','XAGUSD','BTCUSD','ETHUSD','XRPUSD','SOLUSD','ADAUSD','LTCUSD',
+    'NAS100','US30','SPX500','GER30','UK100','JPN225','AUS200',
+    'EURUSD','GBPUSD','AUDUSD','NZDUSD','USDJPY','EURJPY','GBPJPY','AUDJPY','USDCAD','USDCHF',
+    'BRENT','COPPER','BNBUSD','DOTUSD','AVAXUSD','NZDCAD',
+  ];
+  // Group closing deals by positionId so each trade contributes one row.
+  const byPos = new Map(); // positionId -> { date, net }
+  for (const sym of symbols) {
+    try {
+      const r = await bridge.getRecentClosePnl(sym, fromMs);
+      for (const d of (r.deals || [])) {
+        const pid = d.positionId;
+        const cur = byPos.get(pid) || { date: new Date(d.execTs).toISOString().slice(0, 10), net: 0 };
+        cur.net += d.net;
+        // keep earliest close date for the position
+        if (new Date(d.execTs).toISOString().slice(0, 10) < cur.date) cur.date = new Date(d.execTs).toISOString().slice(0, 10);
+        byPos.set(pid, cur);
+      }
+    } catch (_) { /* symbol not in account or no deals; skip */ }
+  }
+  return [...byPos.values()]
+    .filter(t => t.net !== 0)
+    .map(t => ({ date: t.date, result: t.net > 0 ? 'W' : 'L', pnl: t.net }));
+}
+
+// Picks the source. Default = ctrader; --source=csv falls back to the legacy parser.
+async function parseTrades() {
+  const srcArg = (process.argv.find(a => a.startsWith('--source=')) || '').split('=')[1];
+  const useCsv = srcArg === 'csv';
+  if (useCsv) {
+    console.log('Source: trades.csv (legacy; balance-delta attribution bug)');
+    return parseTradesCsv();
+  }
+  try {
+    console.log('Source: cTrader deal history (authoritative)');
+    const t = await parseTradesFromCtrader();
+    if (t.length === 0) {
+      console.log('cTrader returned 0 trades — falling back to trades.csv');
+      return parseTradesCsv();
+    }
+    return t;
+  } catch (e) {
+    console.error('cTrader source failed:', e.message, '— falling back to trades.csv');
+    return parseTradesCsv();
+  }
 }
 
 function computeEdge(trades, riskPctTier1, equity) {
@@ -98,11 +157,11 @@ function nextVersionTag() {
   return 'v' + String(next).padStart(4, '0');
 }
 
-function main() {
+async function main() {
   console.log('=== SCALE RISK TO GOAL ===');
   const goal = loadJson(GOAL_FILE, {});
   const params = loadJson(PARAMS_FILE, {});
-  const trades = parseTrades();
+  const trades = await parseTrades();
 
   if (!goal.targetAbsolute || !goal.targetByDate || !goal.startingEquity) {
     console.error('goal.json missing one of: targetAbsolute, targetByDate, startingEquity');
@@ -172,4 +231,4 @@ function main() {
   }) + '\n');
 }
 
-main();
+main().catch(e => { console.error('FATAL:', e.message); process.exit(1); });
