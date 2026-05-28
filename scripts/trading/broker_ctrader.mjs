@@ -317,7 +317,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
  *
  * Returns: { positionId, openRes, tpOrderIds: [N], failedTps: [...] }
  */
-export async function placeMultiTpPosition({ symbol, direction, totalUnits, entry, slPrice, tpPrices }) {
+export async function placeMultiTpPosition({ symbol, direction, totalUnits, legUnits, entry, slPrice, tpPrices }) {
   await connect();
   if (!slPrice) throw new Error('slPrice required.');
   if (!Array.isArray(tpPrices) || tpPrices.length === 0) throw new Error('tpPrices must be a non-empty array.');
@@ -327,12 +327,21 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, entr
   const closeSide  = tradeSide === 1 ? 2 : 1;
   const totalVol   = Math.round(totalUnits * meta.lotSize);
 
-  // Per-leg volume = totalVol / N. cTrader requires integer cents; if division
-  // isn't exact, give the last leg the remainder so all volume gets a TP.
+  // Per-leg volume. If caller supplied legUnits (used for oil's uneven int split
+  // e.g. 5 → [1,2,2]), honor it exactly. Otherwise divide evenly and put the
+  // remainder on the last leg.
   const N = tpPrices.length;
-  const perLeg = Math.floor(totalVol / N);
-  const legVols = Array(N).fill(perLeg);
-  legVols[N - 1] = totalVol - perLeg * (N - 1);
+  let legVols;
+  if (Array.isArray(legUnits) && legUnits.length === N) {
+    legVols = legUnits.map(u => Math.round(u * meta.lotSize));
+    const sum = legVols.reduce((a, b) => a + b, 0);
+    // Patch any rounding drift onto the last leg so totals reconcile exactly.
+    if (sum !== totalVol) legVols[N - 1] += (totalVol - sum);
+  } else {
+    const perLeg = Math.floor(totalVol / N);
+    legVols = Array(N).fill(perLeg);
+    legVols[N - 1] = totalVol - perLeg * (N - 1);
+  }
 
   // ── 1. Open the parent position ──
   // MARKET order with relativeStopLoss (no TP — the limit orders below handle exits).
@@ -405,14 +414,33 @@ export async function closeAllPositions() {
   return { closed, remaining: positions.length - closed };
 }
 
-export async function modifyPosition(positionId, { stopLoss, takeProfit }) {
+export async function modifyPosition(positionId, { stopLoss, takeProfit, trailingStopLoss }) {
   await connect();
   return send('ProtoOAAmendPositionSLTPReq', {
     ctidTraderAccountId: _accountId,
-    positionId,
-    ...(stopLoss   != null && { stopLoss }),
-    ...(takeProfit != null && { takeProfit }),
+    positionId: Number(positionId),
+    ...(stopLoss         != null && { stopLoss }),
+    ...(takeProfit       != null && { takeProfit }),
+    ...(trailingStopLoss != null && { trailingStopLoss }),
   });
+}
+
+/**
+ * Move broker-side SL of a position to its entry price (true breakeven).
+ * Survives bot crashes — once set, the broker enforces it server-side.
+ */
+export async function setBreakeven(positionId, entryPrice) {
+  return modifyPosition(positionId, { stopLoss: entryPrice });
+}
+
+/**
+ * Enable cTrader trailing stop on a position. The trailing distance is implicit:
+ * cTrader trails at whatever the current SL distance is from the entry/current
+ * price. So call setBreakeven() (or modifyPosition with a tightened stopLoss)
+ * BEFORE enabling trailing to lock the trail distance in.
+ */
+export async function enableTrailingStop(positionId) {
+  return modifyPosition(positionId, { trailingStopLoss: true });
 }
 
 // Helper — protobufjs returns int64 as either a JS number, a Long object

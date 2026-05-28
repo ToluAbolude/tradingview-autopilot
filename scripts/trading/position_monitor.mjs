@@ -201,9 +201,12 @@ async function main() {
 
   let ticks         = 0;
   let tp1Triggered  = false;
+  let tp2Triggered  = false;
   let baseBalance   = null;
   let prevPositions = null;
-  let initialCtraderVol = null;   // captured on first cTrader poll; volume shrinkage → TP1 detection
+  let initialCtraderVol = null;   // captured on first cTrader poll
+  let volAfterTp1       = null;   // captured when first shrink seen; next shrink = TP2
+  let cTraderPositionId = null;   // remembered after first cTrader read; needed for SL modify
 
   while (true) {
     ticks++;
@@ -265,19 +268,57 @@ async function main() {
       }
     }
 
-    // TP1 partial-close detection (Approach B path): single position SHRINKS in
-    // volume as each TP limit fills. Compare current cTrader volume to first
-    // poll's volume; any drop means a partial close fired.
-    if (USE_CTRADER && !tp1Triggered) {
+    // cTrader Approach B path: single position shrinks in volume as each TP
+    // limit fills. We watch for two shrink events:
+    //   1st shrink = TP1 → move broker SL to entry (true broker-side breakeven)
+    //   2nd shrink = TP2 → enable cTrader trailing stop on the remaining runner
+    if (USE_CTRADER) {
       try {
         const bridge = await import('./broker_ctrader.mjs');
         const currentVol = await bridge.getOpenVolumeForSymbol(SYMBOL);
+
+        // First poll — snapshot baseline and capture positionId for SL modifies
         if (initialCtraderVol === null && currentVol > 0) {
           initialCtraderVol = currentVol;
           log(`cTrader initial volume for ${SYMBOL}: ${currentVol}`);
-        } else if (initialCtraderVol != null && currentVol < initialCtraderVol) {
+          try {
+            // Pick the most recently opened position whose volume matches our
+            // baseline. The bot only runs one position per symbol at a time,
+            // so the largest positionId with matching volume is ours.
+            const positions = await bridge.getPositions();
+            const candidates = positions
+              .filter(p => p.volumeCents === initialCtraderVol)
+              .sort((a, b) => b.positionId - a.positionId);
+            if (candidates.length > 0) cTraderPositionId = candidates[0].positionId;
+            log(`cTrader positionId captured: ${cTraderPositionId} (from ${positions.length} open)`);
+          } catch (e) { log(`positionId capture failed: ${e.message}`); }
+        }
+
+        // TP1: first volume shrink → move SL to entry (broker-side BE)
+        else if (!tp1Triggered && initialCtraderVol != null && currentVol > 0 && currentVol < initialCtraderVol) {
           tp1Triggered = true;
-          log(`⚡ TP1 HIT via cTrader volume shrink ${initialCtraderVol} → ${currentVol} — synthetic BE armed`);
+          volAfterTp1 = currentVol;
+          log(`⚡ TP1 HIT via cTrader volume shrink ${initialCtraderVol} → ${currentVol}`);
+          if (cTraderPositionId && ENTRY_PRICE) {
+            try {
+              await bridge.setBreakeven(cTraderPositionId, ENTRY_PRICE);
+              log(`🛡 Broker SL moved to entry ${ENTRY_PRICE} (true breakeven)`);
+            } catch (e) { log(`setBreakeven failed: ${e.message} — synthetic BE remains as fallback`); }
+          } else {
+            log(`⚠ No positionId or entry — broker BE skipped; synthetic BE fallback only`);
+          }
+        }
+
+        // TP2: second volume shrink → enable cTrader trailing stop on the runner
+        else if (tp1Triggered && !tp2Triggered && volAfterTp1 != null && currentVol > 0 && currentVol < volAfterTp1) {
+          tp2Triggered = true;
+          log(`⚡ TP2 HIT via cTrader volume shrink ${volAfterTp1} → ${currentVol}`);
+          if (cTraderPositionId) {
+            try {
+              await bridge.enableTrailingStop(cTraderPositionId);
+              log(`📈 cTrader trailing SL enabled — runner now trails at current SL distance`);
+            } catch (e) { log(`enableTrailingStop failed: ${e.message}`); }
+          }
         }
       } catch (e) { log(`cTrader volume check failed: ${e.message}`); }
     }

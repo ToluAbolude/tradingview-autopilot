@@ -1170,7 +1170,10 @@ const INST_PROFILE = {
   // Commodities: FVG + S&R zones — wide SL to survive institutional sweeps before trend resumes
   XAUUSD: { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
   XAGUSD: { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
-  WTI:    { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
+  // WTI: ASIAN-session chop was clipping 0.2×ATR stops (4W/16L over recent
+  // weeks, 13 of 16 losses in ASIAN). Force SL ≥1×ATR(15m) so noise can't
+  // reap the stop on the retrace; lot sizing compensates by shrinking volume.
+  WTI:    { slMode: 'fvg_sr', maxSlAtr: 2.00, minSlAtr: 1.00, tpCap: 3.50, tp3Cap: 6.00, tp1FloorR: 1.5 },
 
   // Crypto: wide SL required — liquidity sweeps below OBs are routine before continuation
   BTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.15, tpCap: 2.00, tp3Cap: 3.50 },
@@ -1492,10 +1495,16 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
         // tp1 = 1R take-profit for the near scalp leg of the 3-leg ladder.
         // Snaps to the nearest opposing zone within 1.5R if one exists; else exactly 1R.
         tp1:        (function(){
-          const r1 = dir === 'long' ? entry + slDist * 1.0 : entry - slDist * 1.0;
+          // Per-instrument TP1 floor (multiple of SL distance). Default 1R; WTI
+          // uses 1.5R so grazed-then-SL outcomes turn flat instead of -R.
+          const floorR = prof.tp1FloorR ?? 1.0;
+          const r1 = dir === 'long' ? entry + slDist * floorR : entry - slDist * floorR;
+          // Snap to nearest opposing zone in the window [floor, floor+1R] — never
+          // closer than the floor.
+          const winMax = slDist * (floorR + 1.0);
           const nearby = sr15.active.filter(z =>
-            (dir === 'long'  && z.type === 'resistance' && z.wickTip > entry && z.wickTip - entry <= slDist * 1.5) ||
-            (dir === 'short' && z.type === 'support'    && z.wickTip < entry && entry - z.wickTip <= slDist * 1.5)
+            (dir === 'long'  && z.type === 'resistance' && z.wickTip - entry >= slDist * floorR && z.wickTip - entry <= winMax) ||
+            (dir === 'short' && z.type === 'support'    && entry - z.wickTip >= slDist * floorR && entry - z.wickTip <= winMax)
           );
           if (nearby.length) {
             nearby.sort((a,b) => dir === 'long' ? a.wickTip - b.wickTip : b.wickTip - a.wickTip);

@@ -150,7 +150,13 @@
       "Bash(grep -E \"// .{5,80}|>>>\")",
       "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"echo CONNECTED; date -u; pgrep -fa market_scanner.mjs | grep -v 'bash -c' | head -3\")",
       "Bash(powershell -NoProfile -Command \"Test-NetConnection -ComputerName 132.145.44.68 -Port 22 -InformationLevel Quiet -WarningAction SilentlyContinue\")",
-      "Bash(powershell -NoProfile -Command \"Test-NetConnection -ComputerName 132.145.44.68 -Port 9222 -InformationLevel Quiet -WarningAction SilentlyContinue\")"
+      "Bash(powershell -NoProfile -Command \"Test-NetConnection -ComputerName 132.145.44.68 -Port 9222 -InformationLevel Quiet -WarningAction SilentlyContinue\")",
+      "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 'bash -s')",
+      "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"echo '--- listening tcp ports ---'; ss -tlnp 2>/dev/null | grep -E ':\\(58|59|60|68|92\\)' | head -20; echo '--- vnc + websockify systemd ---'; systemctl is-active novnc 2>/dev/null; systemctl is-active websockify 2>/dev/null; systemctl is-active x11vnc 2>/dev/null; systemctl is-active vncserver 2>/dev/null; echo '--- process scan ---'; pgrep -fa 'vnc|websock|novnc' | head -5 || echo none\")",
+      "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"echo '--- installed binaries ---'; which x11vnc tigervncserver websockify novnc_proxy noVNC 2>/dev/null; ls /usr/share/novnc 2>/dev/null | head -5; echo '--- check for old startup scripts in home ---'; ls ~/start_vnc* ~/*vnc* 2>/dev/null; echo '--- systemd unit files for vnc ---'; ls /etc/systemd/system/ | grep -iE 'vnc|websock|novnc' 2>/dev/null\")",
+      "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"echo '--- service file ---'; sudo cat /etc/systemd/system/tradingview-vnc.service; echo; echo '--- starting ---'; sudo systemctl start tradingview-vnc; sleep 3; echo '--- status ---'; systemctl is-active tradingview-vnc; sudo systemctl status tradingview-vnc --no-pager -l 2>&1 | head -15; echo '--- listening ports now ---'; ss -tlnp 2>/dev/null | grep -E ':\\(58|59|60|68|92\\)'\")",
+      "Bash(ssh -o ConnectTimeout=15 -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \"sudo systemctl enable tradingview-vnc 2>&1 | tail -3; echo '---'; systemctl is-enabled tradingview-vnc\")",
+      "Bash(grep -nE \"\\(\\\\\\\\bsl\\\\\\\\s*[:=]|ATR|atr|stopLoss|computeSL\\)\" scripts/trading/setup_finder.mjs)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",

@@ -214,14 +214,14 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
     lots = Math.min(lots, maxLots);
     return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
   } else if (/WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym)) {
-    // BlackBull oil contracts (WTI + BRENT) accept WHOLE-NUMBER lots only, min 1.0
-    // per submit. Bot now thirds total into three legs (O1+O2+O3), so total must
-    // be >=3.0 and divisible by 3 so each leg is an integer >= 1.0.
+    // BlackBull oil: whole-integer lots only, min 1.0 per leg. We run 3 legs so
+    // total must be ≥3, but the total itself can be any integer (3,4,5,…); legs
+    // are split unevenly via splitLegs() — e.g. 5 → [1,2,2], 10 → [3,3,4].
     const OIL_MIN_TOTAL_LOTS = 3.0;
-    const OIL_LOT_STEP       = 3.0;   // step in 3s so each third is an integer
+    const OIL_STEP           = 1.0;
     const slPips = slDist / 0.01;
     let lots = riskAmt / (10.0 * slPips);
-    lots = Math.floor(lots / OIL_LOT_STEP) * OIL_LOT_STEP;
+    lots = Math.floor(lots / OIL_STEP) * OIL_STEP;
     return Math.min(Math.max(lots, OIL_MIN_TOTAL_LOTS), MAX_LOTS);
   } else if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) {
     let lots = riskAmt / slDist;
@@ -242,10 +242,32 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   }
 }
 
+// Split a total lot count into N legs, each ≥ minLeg, in `step` increments,
+// distributing any remainder to the tail legs. Returns null if N legs at minLeg
+// can't fit (caller should fall back to fewer legs).
+//   splitLegs(5, 3, 1, 1)     → [1, 2, 2]
+//   splitLegs(10, 3, 1, 1)    → [3, 3, 4]
+//   splitLegs(0.06, 3, 0.01, 0.01) → [0.02, 0.02, 0.02]
+function splitLegs(totalLots, n, minLeg, step) {
+  const totalUnits = Math.round(totalLots / step);
+  const minUnits   = Math.round(minLeg / step);
+  if (totalUnits < minUnits * n) return null;
+  const base = Math.floor(totalUnits / n);
+  const legs = Array(n).fill(base);
+  let rem = totalUnits - base * n;
+  for (let i = n - 1; i >= 0 && rem > 0; i--, rem--) legs[i] += 1;
+  return legs.map(u => Number((u * step).toFixed(4)));
+}
+
 // ── Per-scan-cycle state — tracks which correlated groups were traded this cycle ─
 // Reset by market_scanner at the start of each scan cycle via resetCycleState().
 let _cycleUsedGroups  = new Set();
 let _cyclePlacedCount = 0;
+
+// Last attempted entry per symbol+direction (persists across cycles within this
+// scanner process). Used by the 30-min same-symbol+dir cooldown.
+const _lastAttempt = new Map();
+const ATTEMPT_COOLDOWN_MS = 30 * 60 * 1000;
 
 export function resetCycleState() {
   _cycleUsedGroups  = new Set();
@@ -423,6 +445,17 @@ export async function attemptInlineTrade(setup) {
     log(`60-min loss cooldown active for ${setup.label} (any direction). Skip.`); return;
   }
 
+  // ── 6b. Same-symbol+direction attempt cooldown (30 min) ────────────────────
+  // Even before a loss is closed, block re-firing the same symbol+direction
+  // within 30 min. Stops the cluster-into-stop-pool pattern (e.g. 5/27 WTI
+  // fired 9 shorts before the first one closed, all into the same SL pool).
+  const attemptKey = `${setup.label}|${setup.dir}`;
+  const last = _lastAttempt.get(attemptKey);
+  if (last && Date.now() - last < ATTEMPT_COOLDOWN_MS) {
+    const minsLeft = Math.ceil((ATTEMPT_COOLDOWN_MS - (Date.now() - last)) / 60000);
+    log(`Same-symbol+dir attempt cooldown active (${minsLeft}m left). Skip.`); return;
+  }
+
   // ── 7. Blocked symbols ─────────────────────────────────────────────────────
   if (PARAMS.blockedSymbols?.includes(setup.label)) {
     log(`${setup.label} is blocked by params. Skip.`); return;
@@ -481,14 +514,20 @@ export async function attemptInlineTrade(setup) {
   const perLegMin = /WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym) ? 1.0 : 0.01;
   const legStep   = perLegMin;
   const totalLots = calcLots(setup.label, riskPct, equity, setup.entry, setup.sl);
-  // Split into 3 equal legs, each rounded to symbol's leg step and at least perLegMin.
-  const legLotsRaw = totalLots / 3;
-  const thirdLots  = Math.max(perLegMin, Math.floor(legLotsRaw / legStep) * legStep);
+  // Split into 3 legs; for oil this may be uneven (e.g. 5 → [1,2,2]).
+  // If 3 legs at minLeg won't fit (shouldn't happen — calcLots enforces ≥ 3 for oil
+  // and ≥ 0.03 elsewhere), fall back to a single leg of totalLots.
+  const legLots = splitLegs(totalLots, 3, perLegMin, legStep)
+                  ?? [Math.max(perLegMin, totalLots)];
+  const thirdLots = legLots[0]; // legacy: used in some log strings; per-leg uses legLots[i]
 
   // tp1 = ~1R near scalp (added 2026-05-26 to restore 3-leg ladder)
   // tp2 = first opposing S/R zone, ≥2R (existing logic)
   // tp3 = far runner cap; placed as a safety-net TP until chandelier trailing ships
-  log(`Risk:${riskPct}% | Equity:${equity} | ${thirdLots}×3 lots | TP1:${setup.tp1} TP2:${setup.tp2} TP3:${setup.tp3} SL:${setup.sl}`);
+  const lotsLabel = legLots.length === 3 && legLots[0] === legLots[2]
+    ? `${legLots[0]}×3`
+    : `[${legLots.join('+')}]=${legLots.reduce((a,b)=>a+b,0)}`;
+  log(`Risk:${riskPct}% | Equity:${equity} | ${lotsLabel} lots | TP1:${setup.tp1} TP2:${setup.tp2} TP3:${setup.tp3} SL:${setup.sl}`);
 
   const legs = [
     { name: 'O1', tp: setup.tp1, minRR: 1.0, reanchor: false, screenshot: false },
@@ -506,11 +545,14 @@ export async function attemptInlineTrade(setup) {
     try {
       const bridge = await import('./broker_ctrader.mjs');
       const validTps = legs.filter(l => l.tp).map(l => l.tp);
-      const totalUnits = thirdLots * legs.length;  // = thirdLots × 3
+      const totalUnits = legLots.reduce((a, b) => a + b, 0);
+      // Pass per-leg lot sizes so oil can split unevenly (e.g. 5 → [1,2,2]).
+      const legUnits = legLots.slice(0, validTps.length);
       const r = await bridge.placeMultiTpPosition({
         symbol:    setup.label,
         direction: setup.dir,
         totalUnits,
+        legUnits,
         entry:     setup.entry,
         slPrice:   setup.sl,
         tpPrices:  validTps,
@@ -526,24 +568,26 @@ export async function attemptInlineTrade(setup) {
 
   // ── Per-leg loop (TV-DOM path, or cTrader fallback) ────────────────────────
   if (placed === 0) {
-    for (const leg of legs) {
+    for (let i = 0; i < legs.length; i++) {
+      const leg = legs[i];
+      const legUnits = legLots[i] ?? legLots[legLots.length - 1];
       if (!leg.tp) { log(`⚠ ${leg.name} skipped — no TP value`); continue; }
       try {
         await placeOrder({
-          symbol: setup.label, direction: setup.dir, units: thirdLots,
+          symbol: setup.label, direction: setup.dir, units: legUnits,
           entry: setup.entry,
           tpPrice: leg.tp, slPrice: setup.sl,
           minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
           screenshot: leg.screenshot,
         });
-        log(`✓ ${leg.name} placed (TP=${leg.tp} SL=${setup.sl})`);
+        log(`✓ ${leg.name} placed (${legUnits} lots, TP=${leg.tp} SL=${setup.sl})`);
         placed++;
       } catch(e) {
         log(`✗ ${leg.name} error: ${e.message}`);
         await new Promise(r => setTimeout(r, 2000));
         try {
           await placeOrder({
-            symbol: setup.label, direction: setup.dir, units: thirdLots,
+            symbol: setup.label, direction: setup.dir, units: legUnits,
             entry: setup.entry,
             tpPrice: leg.tp, slPrice: setup.sl,
             minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
@@ -561,6 +605,7 @@ export async function attemptInlineTrade(setup) {
   if (placed > 0) {
     _cyclePlacedCount++;
     if (groupIdx !== -1) _cycleUsedGroups.add(groupIdx);
+    _lastAttempt.set(`${setup.label}|${setup.dir}`, Date.now());
 
     // ── Post-submit broker verification (TV-DOM path only) ──
     // The TradingView submit click can silently fail to route to BlackBull
@@ -590,7 +635,7 @@ export async function attemptInlineTrade(setup) {
         score: setup.score, entry: setup.entry, sl: setup.sl,
         tp: `${setup.tp1}/${setup.tp2}/${setup.tp3}`, rr: setup.rr,
         result: 'VOID', pnl: 0,
-        notes: (setup.reasons || []).join(';') + ` lots=${thirdLots}x3 placed=${placed} inline Trifecta=${trif}/3 [${conf}] BROKER_SILENT_REJECT_verified`,
+        notes: (setup.reasons || []).join(';') + ` lots=${lotsLabel} placed=${placed} inline Trifecta=${trif}/3 [${conf}] BROKER_SILENT_REJECT_verified`,
       });
       blockSymbolTemporarily(setup.label, 'broker silent reject');
       _cyclePlacedCount--; // rollback — this trade didn't actually open
@@ -601,7 +646,7 @@ export async function attemptInlineTrade(setup) {
         session, symbol: setup.label, tf: setup.tf, direction: setup.dir,
         score: setup.score, entry: setup.entry, sl: setup.sl,
         tp: `${setup.tp1}/${setup.tp2}/${setup.tp3}`, rr: setup.rr,
-        notes: (setup.reasons || []).join(';') + ` lots=${thirdLots}x3 placed=${placed} inline Trifecta=${trif}/3 [${conf}] verify=${brokerOk === true ? 'ok' : 'skipped'}`,
+        notes: (setup.reasons || []).join(';') + ` lots=${lotsLabel} placed=${placed} inline Trifecta=${trif}/3 [${conf}] verify=${brokerOk === true ? 'ok' : 'skipped'}`,
       });
 
       // Launch position monitor (detached — runs independently until position closes)
