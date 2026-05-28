@@ -1195,8 +1195,17 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
 // tp3Cap:   max runner (TP2) distance as ATR multiple
 const INST_PROFILE = {
   // Commodities: FVG + S&R zones — wide SL to survive institutional sweeps before trend resumes
-  XAUUSD: { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
-  XAGUSD: { slMode: 'fvg_sr', maxSlAtr: 1.50, minSlAtr: 0.20, tpCap: 3.50, tp3Cap: 6.00 },
+  // XAUUSD: 42% WR but PF 0.51 (-$418 over 90d). Same Asian-chop disease
+  // confirmed by deal audit — May 1 saw 8 losing shorts in 2 hours
+  // (16:26–18:13 UTC, cluster-into-stop-pool). Wider SL floor + 1.5R TP1 to
+  // match the XAG/WTI repair. Gold-specific extra: no XAU bias gate needed
+  // (XAU IS the bias other instruments check against).
+  XAUUSD: { slMode: 'fvg_sr', maxSlAtr: 2.00, minSlAtr: 1.00, tpCap: 3.50, tp3Cap: 6.00, tp1FloorR: 1.5 },
+  // XAGUSD: 22% lifetime WR, -$4,985 over 90d. Same disease as WTI — tight SL
+  // clipped by silver's high ATR + thin Asian liquidity. Wider SL floor + 1.5R
+  // TP1 to match the WTI repair. Combined with the XAUUSD-bias gate in
+  // inline_trader (silver follows gold ~80%).
+  XAGUSD: { slMode: 'fvg_sr', maxSlAtr: 2.00, minSlAtr: 1.00, tpCap: 3.50, tp3Cap: 6.00, tp1FloorR: 1.5 },
   // WTI: ASIAN-session chop was clipping 0.2×ATR stops (4W/16L over recent
   // weeks, 13 of 16 losses in ASIAN). Force SL ≥1×ATR(15m) so noise can't
   // reap the stop on the retrace; lot sizing compensates by shrinking volume.
@@ -1218,19 +1227,24 @@ const INST_PROFILE = {
   JP225:  { slMode: 'atr',    maxSlAtr: 1.50, minSlAtr: 0.25, tpCap: 3.00, tp3Cap: 5.00 },
   HK50:   { slMode: 'atr',    maxSlAtr: 1.50, minSlAtr: 0.25, tpCap: 3.00, tp3Cap: 5.00 },
 
-  // Forex majors: wick-to-body S&R zones are reliable; moderate ATR, tight intraday ranges
-  EURUSD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 },
-  GBPUSD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 },
-  AUDUSD: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.05, tpCap: 0.60, tp3Cap: 0.90 },
-  NZDUSD: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.05, tpCap: 0.60, tp3Cap: 0.90 },
-  USDCAD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 },
-  USDCHF: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.05, tpCap: 0.60, tp3Cap: 0.90 },
+  // Forex majors: wick-to-body S&R zones are reliable. tp1FloorR=1.2 lifts TP1
+  // off the 1R noise band so a TP1+SL outcome nets ~+0.2R instead of −R (key
+  // for fixing GBPUSD's 82% WR / 0.00 PF problem: tiny wins + huge losses).
+  EURUSD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.10, tpCap: 0.70, tp3Cap: 1.10, tp1FloorR: 1.2 },
+  GBPUSD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.10, tpCap: 0.70, tp3Cap: 1.10, tp1FloorR: 1.2 },
+  AUDUSD: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.08, tpCap: 0.60, tp3Cap: 0.90, tp1FloorR: 1.2 },
+  NZDUSD: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.08, tpCap: 0.60, tp3Cap: 0.90, tp1FloorR: 1.2 },
+  USDCAD: { slMode: 'sr',     maxSlAtr: 0.30, minSlAtr: 0.10, tpCap: 0.70, tp3Cap: 1.10, tp1FloorR: 1.2 },
+  USDCHF: { slMode: 'sr',     maxSlAtr: 0.25, minSlAtr: 0.08, tpCap: 0.60, tp3Cap: 0.90, tp1FloorR: 1.2 },
 
-  // JPY pairs: strong trending behaviour with large pip moves; S&R respected but need more room
-  USDJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.08, tpCap: 0.90, tp3Cap: 1.40 },
-  EURJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.08, tpCap: 0.90, tp3Cap: 1.40 },
-  GBPJPY: { slMode: 'sr',     maxSlAtr: 0.45, minSlAtr: 0.08, tpCap: 1.00, tp3Cap: 1.60 },
-  AUDJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.08, tpCap: 0.90, tp3Cap: 1.40 },
+  // JPY pairs: strong trending behaviour with large pip moves. USDJPY's 2 catastrophic
+  // losses on Apr 30 10:41 (FOMC week, both $1,900+) were double-fires within the
+  // same minute — now blocked by the 30-min same-symbol+dir cooldown. minSlAtr
+  // raised so 0.08×ATR can't be clipped by pre-news spread widening.
+  USDJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.15, tpCap: 0.90, tp3Cap: 1.40, tp1FloorR: 1.2 },
+  EURJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.10, tpCap: 0.90, tp3Cap: 1.40 },
+  GBPJPY: { slMode: 'sr',     maxSlAtr: 0.45, minSlAtr: 0.10, tpCap: 1.00, tp3Cap: 1.60 },
+  AUDJPY: { slMode: 'sr',     maxSlAtr: 0.40, minSlAtr: 0.10, tpCap: 0.90, tp3Cap: 1.40, tp1FloorR: 1.2 },
 };
 const DEFAULT_PROFILE = { slMode: 'sr', maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0.70, tp3Cap: 1.10 };
 

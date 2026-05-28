@@ -439,6 +439,33 @@ export async function attemptInlineTrade(setup) {
     }
   }
 
+  // ── 5e. Sibling-symbol daily-bias gates ────────────────────────────────────
+  // Some instruments follow a "parent" symbol's macro bias. Trading against it
+  // historically destroys edge:
+  //   XAGUSD → follows XAUUSD (silver follows gold ~80%; XAG shorts vs XAU
+  //              long bias accounted for −$3,554 of XAG's lifetime drag)
+  //   LTCUSD → follows BTCUSD (small-cap crypto tracks BTC; LTC went 0/14
+  //              long over May 19–26 while BTC was bearish)
+  // Daily bias comes from daily_watchlist.json (06:30 UTC computation).
+  const SIBLING_BIAS = { XAGUSD: 'XAUUSD', LTCUSD: 'BTCUSD' };
+  const parentSym = SIBLING_BIAS[setup.label];
+  if (parentSym) {
+    try {
+      const WATCHLIST_FILE = join(DATA_ROOT, 'daily_watchlist.json');
+      if (existsSync(WATCHLIST_FILE)) {
+        const wl = JSON.parse(readFileSync(WATCHLIST_FILE, 'utf8'));
+        const today = new Date().toISOString().slice(0, 10);
+        if (wl.date === today && Array.isArray(wl.instruments)) {
+          const parent = wl.instruments.find(i => i.label === parentSym);
+          if (parent && parent.biasDir && parent.biasDir !== setup.dir) {
+            log(`${setup.label} ${setup.dir} rejected — ${parentSym} daily bias is ${parent.biasDir} (sibling-bias gate). Skip.`);
+            return;
+          }
+        }
+      }
+    } catch (e) { log(`${parentSym} bias check error: ${e.message} (continuing — fail-open)`); }
+  }
+
   // ── 6. Loss cooldown ───────────────────────────────────────────────────────
   const cooldowns = getRecentLossCooldowns();
   if (cooldowns.has(setup.label)) {

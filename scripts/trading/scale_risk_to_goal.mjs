@@ -71,7 +71,10 @@ function parseTradesCsv() {
 // edge math stays apples-to-apples with the csv path.
 async function parseTradesFromCtrader() {
   const bridge = await import('./broker_ctrader.mjs');
+  // Force connection up front so per-symbol calls don't race against connect()
+  await bridge.connect();
   const fromMs = Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  let symHits = 0, symMisses = 0;
   // Symbols we've actually traded — covers all instruments in any current or
   // recent watchlist. Each call is a single API roundtrip; cached after the
   // first hit so cost stays low.
@@ -86,16 +89,17 @@ async function parseTradesFromCtrader() {
   for (const sym of symbols) {
     try {
       const r = await bridge.getRecentClosePnl(sym, fromMs);
+      if ((r.deals || []).length > 0) symHits++;
       for (const d of (r.deals || [])) {
         const pid = d.positionId;
         const cur = byPos.get(pid) || { date: new Date(d.execTs).toISOString().slice(0, 10), net: 0 };
         cur.net += d.net;
-        // keep earliest close date for the position
         if (new Date(d.execTs).toISOString().slice(0, 10) < cur.date) cur.date = new Date(d.execTs).toISOString().slice(0, 10);
         byPos.set(pid, cur);
       }
-    } catch (_) { /* symbol not in account or no deals; skip */ }
+    } catch (_) { symMisses++; }
   }
+  console.log(`  cTrader: ${symHits} symbols had deals, ${symMisses} symbols missed; ${byPos.size} unique positions`);
   return [...byPos.values()]
     .filter(t => t.net !== 0)
     .map(t => ({ date: t.date, result: t.net > 0 ? 'W' : 'L', pnl: t.net }));
