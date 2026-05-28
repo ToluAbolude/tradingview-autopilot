@@ -656,6 +656,7 @@ export async function attemptInlineTrade(setup) {
       const monitor = spawn(process.execPath, [
         monitorPath,
         `--entry=${setup.entry}`,
+        `--sl=${setup.sl}`,
         `--tp1=${setup.tp1}`,
         `--tp2=${setup.tp2}`,
         `--tp3=${setup.tp3}`,

@@ -373,15 +373,23 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
   }
 
   // ── 1. Open the parent position ──
-  // MARKET order with relativeStopLoss (no TP — the limit orders below handle exits).
-  const slDist = Math.round(Math.abs(entry - slPrice) * 100_000);
+  // MARKET order with relativeStopLoss AND relativeTakeProfit at TP3 (the final
+  // target). The intermediate TP1/TP2 partial fills happen via the linked LIMIT
+  // close orders placed below. Setting position-level TP at TP3 ensures every
+  // position visibly shows SL + TP in the broker UI (no "naked TP=0" appearance)
+  // and acts as a safety-net close if price runs through all targets before any
+  // of the LIMITs fill (e.g. on a gap or fast move).
+  const slDist  = Math.round(Math.abs(entry  - slPrice)              * 100_000);
+  const tpFinal = tpPrices[tpPrices.length - 1];
+  const tpDist  = Math.round(Math.abs(tpFinal - entry)               * 100_000);
   const openRes = await send('ProtoOANewOrderReq', {
     ctidTraderAccountId: _accountId,
     symbolId:    meta.id,
     orderType:   1,                   // MARKET
     tradeSide,
     volume:      totalVol,
-    relativeStopLoss: slDist,
+    relativeStopLoss:   slDist,
+    relativeTakeProfit: tpDist,
     timeInForce: 3,                   // IMMEDIATE_OR_CANCEL
   });
   const positionId = _toNum(openRes?.position?.positionId);
@@ -470,6 +478,68 @@ export async function setBreakeven(positionId, entryPrice) {
  */
 export async function enableTrailingStop(positionId) {
   return modifyPosition(positionId, { trailingStopLoss: true });
+}
+
+/**
+ * Arm trailing stop with a SENSIBLE distance. Calling enableTrailingStop()
+ * after setBreakeven() trails at distance 0 → instant close on next adverse
+ * tick. This helper instead:
+ *   1. Reads the current position
+ *   2. Moves SL to (currentPrice ± trailDistance) — locking trailDistance as
+ *      the trail width
+ *   3. Enables trailingStopLoss
+ *
+ *   trailDistance — absolute price distance (e.g. 0.5 for $0.50 trail on WTI).
+ *                   Caller computes this; typically originalSlDist × 0.5.
+ *   currentPrice  — current bid (for long) or ask (for short). If not provided,
+ *                   we use the position's stored entry as a fallback (degrades
+ *                   gracefully to BE trail).
+ */
+export async function armTrailingStop(positionId, trailDistance, currentPrice) {
+  await connect();
+  const positions = await getPositions();
+  const pos = positions.find(p => p.positionId === Number(positionId));
+  if (!pos) throw new Error(`armTrailingStop: positionId ${positionId} not open`);
+  const anchor = (currentPrice != null && isFinite(currentPrice)) ? currentPrice : pos.entryPrice;
+  const newSL = pos.direction === 'long'
+    ? anchor - Math.abs(trailDistance)
+    : anchor + Math.abs(trailDistance);
+  // Two-step: move SL to give the trail real distance, THEN flip trailing on.
+  await modifyPosition(positionId, { stopLoss: newSL });
+  return modifyPosition(positionId, { trailingStopLoss: true });
+}
+
+/** Cancel a single pending order. */
+export async function cancelOrder(orderId) {
+  await connect();
+  return send('ProtoOACancelOrderReq', {
+    ctidTraderAccountId: _accountId,
+    orderId: Number(orderId),
+  });
+}
+
+/**
+ * Cancel any pending orders linked to a positionId. Called after the parent
+ * position closes to clean up TP-limit children, even though cTrader normally
+ * auto-cancels them — belt-and-braces for the rare case the cleanup is delayed.
+ * Returns { cancelled: N }.
+ */
+export async function cancelOrphanLimits(positionId) {
+  await connect();
+  const res = await send('ProtoOAReconcileReq', { ctidTraderAccountId: _accountId });
+  const orders = res.order || [];
+  let cancelled = 0;
+  for (const o of orders) {
+    if (_toNum(o.positionId) === Number(positionId)) {
+      try {
+        await cancelOrder(_toNum(o.orderId));
+        cancelled++;
+      } catch (e) {
+        console.error(`[cTrader] orphan cancel ${o.orderId} failed: ${e.message}`);
+      }
+    }
+  }
+  return { cancelled };
 }
 
 // Helper — protobufjs returns int64 as either a JS number, a Long object

@@ -28,6 +28,7 @@ const EOD_CLOSE_HOUR = 20;  // UTC
 const args       = Object.fromEntries(process.argv.slice(2).map(a => a.replace('--','').split('=')));
 const SYMBOL     = (args.symbol || '').toUpperCase();
 const ENTRY_PRICE = parseFloat(args.entry) || null;
+const SL_PRICE    = parseFloat(args.sl)    || null;   // for trail-distance calc
 const NUM_ORDERS  = parseInt(args.numOrders) || 1;
 const TRADE_TIME  = args.tradeTime || null;
 const MONITOR_START_MS = Date.now();   // for cTrader deal-history filtering
@@ -309,15 +310,30 @@ async function main() {
           }
         }
 
-        // TP2: second volume shrink → enable cTrader trailing stop on the runner
+        // TP2: second volume shrink → arm cTrader trailing stop with a REAL
+        // trail distance. After TP1, broker SL was moved to entry (BE) — if we
+        // just flip trailingStopLoss on now, trail distance = 0 → instant close
+        // on the next adverse tick (broken). Instead: move SL to give the trail
+        // half-an-R worth of room, THEN enable trailing.
         else if (tp1Triggered && !tp2Triggered && volAfterTp1 != null && currentVol > 0 && currentVol < volAfterTp1) {
           tp2Triggered = true;
           log(`⚡ TP2 HIT via cTrader volume shrink ${volAfterTp1} → ${currentVol}`);
-          if (cTraderPositionId) {
+          if (cTraderPositionId && ENTRY_PRICE && SL_PRICE) {
             try {
-              await bridge.enableTrailingStop(cTraderPositionId);
-              log(`📈 cTrader trailing SL enabled — runner now trails at current SL distance`);
-            } catch (e) { log(`enableTrailingStop failed: ${e.message}`); }
+              const originalSlDist = Math.abs(ENTRY_PRICE - SL_PRICE);
+              const trailDist = originalSlDist * 0.5;  // half-R trail width
+              // Anchor near entry + 1R favorable (post-TP1 position has at least 1R unrealised).
+              // Conservative — if price hasn't run much past 1R, this still locks 0.5R.
+              const positions = await bridge.getPositions();
+              const pos = positions.find(p => p.positionId === cTraderPositionId);
+              const dir = pos?.direction || 'long';
+              const anchor = dir === 'long'  ? ENTRY_PRICE + originalSlDist
+                                             : ENTRY_PRICE - originalSlDist;
+              await bridge.armTrailingStop(cTraderPositionId, trailDist, anchor);
+              log(`📈 Trailing SL armed — anchor=${anchor.toFixed(5)} trail=${trailDist.toFixed(5)} (=0.5R)`);
+            } catch (e) { log(`armTrailingStop failed: ${e.message}`); }
+          } else {
+            log(`⚠ Skipping trail arm — missing positionId/entry/sl (${cTraderPositionId}/${ENTRY_PRICE}/${SL_PRICE})`);
           }
         }
       } catch (e) { log(`cTrader volume check failed: ${e.message}`); }
@@ -346,6 +362,16 @@ async function main() {
       const pnl = await resolvePnl('closed');
       const result = pnl != null ? (pnl >= 0 ? 'W' : 'L') : '?';
       log(`POSITION CLOSED → result=${result} pnl=${pnl}`);
+      // Belt-and-braces: cancel any LIMIT close orders that were linked to the
+      // closed position. cTrader normally auto-cancels, but a rare delay can
+      // leave ghost pending orders behind that confuse the next scan cycle.
+      if (USE_CTRADER && cTraderPositionId) {
+        try {
+          const bridge = await import('./broker_ctrader.mjs');
+          const { cancelled } = await bridge.cancelOrphanLimits(cTraderPositionId);
+          if (cancelled > 0) log(`🧹 Cancelled ${cancelled} orphan LIMIT order(s) linked to position ${cTraderPositionId}`);
+        } catch (e) { log(`Orphan cleanup failed: ${e.message}`); }
+      }
       updateLastTrade(result, pnl, 'closed');
       log('Done. Exiting.');
       return;
