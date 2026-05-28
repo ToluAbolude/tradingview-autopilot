@@ -223,6 +223,17 @@ export async function connect() {
 const _symbolMeta  = new Map();   // name -> { id, lotSize, minVolume, stepVolume }
 const _symbolIdMap = new Map();   // name -> id (populated from light list)
 
+// Scanner uses TradingView symbol names (e.g. GER40, JP225). BlackBull cTrader
+// demo carries some of these under different names — translate on lookup so
+// callers don't need to know.
+const CTRADER_NAME_MAP = {
+  GER40: 'GER30',
+  JP225: 'JPN225',
+};
+// Symbols we know are NOT carried by cTrader on this account. Throwing a
+// recognizable error keeps the inline_trader's fallback-to-TV-DOM logic clean.
+const CTRADER_UNSUPPORTED = new Set(['HK50']);
+
 async function _loadSymbolList() {
   if (_symbolIdMap.size > 0) return;
   const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId });
@@ -231,9 +242,13 @@ async function _loadSymbolList() {
 
 async function _symbolMetaFor(name) {
   if (_symbolMeta.has(name)) return _symbolMeta.get(name);
+  if (CTRADER_UNSUPPORTED.has(name)) {
+    throw new Error(`cTrader: symbol "${name}" not supported on this account (broker doesn't carry it).`);
+  }
+  const cTraderName = CTRADER_NAME_MAP[name] || name;
   await _loadSymbolList();
-  const id = _symbolIdMap.get(name);
-  if (id == null) throw new Error(`cTrader: symbol "${name}" not in account symbol list.`);
+  const id = _symbolIdMap.get(cTraderName);
+  if (id == null) throw new Error(`cTrader: symbol "${name}" (cTrader name: "${cTraderName}") not in account symbol list.`);
   const res = await send('ProtoOASymbolByIdReq', { ctidTraderAccountId: _accountId, symbolId: [id] });
   const full = (res.symbol || [])[0];
   if (!full) throw new Error(`cTrader: ProtoOASymbolByIdReq returned no symbol for ${name} (id=${id}).`);
@@ -261,7 +276,11 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
   const meta = await _symbolMetaFor(symbol);
   const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
-  const volume = Math.round(units * meta.lotSize);
+  // Quantize to broker step + enforce min volume
+  const step = meta.stepVolume > 0 ? meta.stepVolume : 1;
+  const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
+  const rawVol = Math.round(units * meta.lotSize);
+  const volume = Math.max(minV, Math.floor(rawVol / step) * step);
 
   const req = {
     ctidTraderAccountId: _accountId,
@@ -325,22 +344,32 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
   const meta = await _symbolMetaFor(symbol);
   const tradeSide  = (direction === 'long' || direction === 'buy') ? 1 : 2;  // BUY | SELL
   const closeSide  = tradeSide === 1 ? 2 : 1;
-  const totalVol   = Math.round(totalUnits * meta.lotSize);
+  // cTrader requires volume to be a multiple of meta.stepVolume (in cents) and
+  // >= meta.minVolume. Round DOWN to the step so we don't accidentally inflate risk.
+  const step = meta.stepVolume > 0 ? meta.stepVolume : 1;
+  const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
+  const _quantize = (v) => Math.max(minV, Math.floor(v / step) * step);
+  const totalVol   = _quantize(Math.round(totalUnits * meta.lotSize));
 
   // Per-leg volume. If caller supplied legUnits (used for oil's uneven int split
-  // e.g. 5 → [1,2,2]), honor it exactly. Otherwise divide evenly and put the
-  // remainder on the last leg.
+  // e.g. 5 → [1,2,2]), honor it but quantize each leg to the step. Otherwise
+  // divide totalVol evenly across N legs in step units.
   const N = tpPrices.length;
   let legVols;
   if (Array.isArray(legUnits) && legUnits.length === N) {
-    legVols = legUnits.map(u => Math.round(u * meta.lotSize));
+    legVols = legUnits.map(u => _quantize(Math.round(u * meta.lotSize)));
+    // After per-leg quantization the sum can drift below totalVol. Push the
+    // remainder onto the last leg (still in step units) so totals reconcile.
     const sum = legVols.reduce((a, b) => a + b, 0);
-    // Patch any rounding drift onto the last leg so totals reconcile exactly.
-    if (sum !== totalVol) legVols[N - 1] += (totalVol - sum);
+    if (sum !== totalVol) legVols[N - 1] = Math.max(minV, legVols[N - 1] + (totalVol - sum));
   } else {
-    const perLeg = Math.floor(totalVol / N);
-    legVols = Array(N).fill(perLeg);
-    legVols[N - 1] = totalVol - perLeg * (N - 1);
+    // Divide in step-multiple chunks so each leg is broker-legal
+    const totalSteps = Math.floor(totalVol / step);
+    const baseSteps  = Math.floor(totalSteps / N);
+    const remSteps   = totalSteps - baseSteps * N;
+    legVols = Array(N).fill(baseSteps * step);
+    legVols[N - 1] += remSteps * step;
+    legVols = legVols.map(v => Math.max(minV, v));
   }
 
   // ── 1. Open the parent position ──

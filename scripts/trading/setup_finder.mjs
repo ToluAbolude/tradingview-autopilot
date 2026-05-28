@@ -175,6 +175,33 @@ export async function waitForBars(count = 300, minRequired = 200, maxRetries = 4
 // Higher TFs carry more weight in the MTF bonus — weekly/daily confluence is far more reliable.
 const ALL_TFS = ['1', '5', '15', '30', '60', '240', 'D', 'W'];
 
+// Per-TF bar request count. Hard floor for indicators: EMA200 needs ~250 bars
+// to stabilize, RSI(14) ~70, ATR(14) ~70. Going past 300 starts to dilute the
+// current trend with stale structure that the order book has forgotten.
+//
+//   req = bars requested from TradingView
+//   min = minimum acceptable (waitForBars retries 4× if below)
+//
+// Time coverage per TF:
+//   1M:  200 → ~3.3 hrs  (skip EMA200 contribution at scan time — too long ago)
+//   5M:  240 → ~20 hrs   (1 overnight + open)
+//   15M: 250 → ~2.6 days (one session pair)
+//   30M: 250 → ~5 days   (one trading week)
+//   1H:  280 → ~12 days  (2-week trend)
+//   4H:  300 → ~50 days  (~2 months — current macro position)
+//   D:   300 → ~14 mo    (full annual cycle + seasonality)
+//   W:   260 → ~5 yrs    (multi-year regime)
+const PER_TF_BARS = {
+  '1':   { req: 200, min: 150 },
+  '5':   { req: 240, min: 200 },
+  '15':  { req: 250, min: 200 },
+  '30':  { req: 250, min: 200 },
+  '60':  { req: 280, min: 240 },
+  '240': { req: 300, min: 250 },
+  'D':   { req: 300, min: 250 },
+  'W':   { req: 260, min: 200 },
+};
+
 // TF display labels and confluence weights (higher TF = more signal weight, less noise)
 const TF_LABEL  = { '1':'1M', '5':'5M', '15':'15M', '30':'30M', '60':'1H', '240':'4H', 'D':'D', 'W':'W' };
 const TF_WEIGHT = Object.keys(TFW).length > 0
@@ -1285,9 +1312,11 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       let bars = null;
       try {
         await setChart(inst.sym, tf);
-        // Require ≥250 bars. 500-bar request gives 15M ~450 bars (4.7 days → near-weekly T gate),
-        // 30M/1H/4H full-week coverage, D/W trivially covered. Retries 4× with 600ms gaps.
-        bars = await waitForBars(500, 250);
+        // Per-TF bar count — recent-focused, EMA200 still valid (≥250 floor).
+        // Rationale: too much history dilutes current trend, lower TFs especially
+        // (500 × 1M = price from 8h ago). See PER_TF_BARS map below.
+        const { req, min } = PER_TF_BARS[tf] || { req: 280, min: 240 };
+        bars = await waitForBars(req, min);
       } catch (e) {
         process.stdout.write(`!${(e.message || 'err').slice(0, 12)} `);
         skipped.push(`${inst.label}/${tf}/${e.message}`);
@@ -1329,7 +1358,9 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
     }
 
     await setChart(inst.sym, '15');
-    const bars15 = await waitForBars(200, 150);
+    // Pass-2 15M entry calc — use the same per-TF profile as the scan loop
+    const { req: bars15Req, min: bars15Min } = PER_TF_BARS['15'];
+    const bars15 = await waitForBars(bars15Req, bars15Min);
 
     for (const [dir, cands] of Object.entries(byDir)) {
       if (!bars15) {
