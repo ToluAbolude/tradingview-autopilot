@@ -230,6 +230,11 @@ const CTRADER_NAME_MAP = {
   GER40: 'GER30',
   JP225: 'JPN225',
 };
+// Reverse map (cTrader name -> TradingView/scanner name) for resolving a
+// position's symbolId back to the name the scanner + trades.csv use.
+const CTRADER_NAME_REV = Object.fromEntries(
+  Object.entries(CTRADER_NAME_MAP).map(([tv, ct]) => [ct, tv]),
+);
 // Symbols we know are NOT carried by cTrader on this account. Throwing a
 // recognizable error keeps the inline_trader's fallback-to-TV-DOM logic clean.
 const CTRADER_UNSUPPORTED = new Set(['HK50']);
@@ -580,6 +585,34 @@ export async function getOpenVolumeForSymbol(symbolName) {
   const meta = await _symbolMetaFor(symbolName);
   const positions = await getPositions();
   return positions.filter(p => p.symbolId === meta.id).reduce((s, p) => s + p.volumeCents, 0);
+}
+
+/**
+ * Return open positions missing a stop-loss or take-profit, with symbolId
+ * resolved back to the scanner/TradingView name. Used by naked_position_guard
+ * to repair (modifyPosition) or close via the cTrader API — the DOM path lags
+ * and closes netted positions piecemeal.
+ */
+export async function getNakedPositions() {
+  await connect();
+  await _loadSymbolList();
+  const idToName = new Map();
+  for (const [name, id] of _symbolIdMap) idToName.set(id, name);
+  const positions = await getPositions();
+  return positions
+    .filter(p => !p.stopLoss || !p.takeProfit)
+    .map(p => {
+      const ctName = idToName.get(p.symbolId) || String(p.symbolId);
+      return {
+        positionId:  p.positionId,
+        symbolName:  CTRADER_NAME_REV[ctName] || ctName,
+        direction:   p.direction,
+        entryPrice:  p.entryPrice,
+        volumeCents: p.volumeCents,
+        stopLoss:    p.stopLoss,
+        takeProfit:  p.takeProfit,
+      };
+    });
 }
 
 export async function getEquity() {

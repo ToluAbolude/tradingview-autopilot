@@ -253,9 +253,74 @@ async function closePosition(sym, side) {
   return `${r} → ${conf}`;
 }
 
+// ── cTrader-native enforcement (source of truth) ────────────────────────────
+// The DOM path lags the broker and closes netted positions piecemeal while
+// reporting premature success (2026-05-29 NZDCAD). When trading via cTrader we
+// read positions and repair/close through the API, VERIFYING each result via a
+// re-fetch before counting it.
+function validLevels(direction, entry, sl, tp) {
+  if (!isFinite(entry) || !isFinite(sl) || !isFinite(tp) || sl <= 0 || tp <= 0) return false;
+  return direction === 'long'  ? (sl < entry && tp > entry)
+       : direction === 'short' ? (sl > entry && tp < entry)
+       : false;
+}
+
+async function enforceCtrader() {
+  const ct = await import('./broker_ctrader.mjs');
+  const naked = await ct.getNakedPositions();
+  log(`Naked positions (cTrader): ${naked.length}`);
+  for (const p of naked) {
+    log(`  ⚠ ${p.symbolName} ${p.direction} pos=${p.positionId} entry=${p.entryPrice} sl=${p.stopLoss || '-'} tp=${p.takeProfit || '-'}`);
+  }
+  if (naked.length === 0) { log('✓ All cTrader positions have both SL and TP. Nothing to do.'); return; }
+  if (mode === 'report') { log('[report] No action taken. Run with --enforce to repair-or-close.'); return; }
+
+  let repaired = 0, closed = 0, failed = 0;
+  for (const p of naked) {
+    let done = false;
+    // 1. Repair from a recent, direction-consistent trades.csv intent.
+    if (mode !== 'close-only') {
+      const intent = findRecentTradeIntent(p.symbolName, p.direction);
+      if (intent && validLevels(p.direction, p.entryPrice, intent.sl, intent.tp)) {
+        try {
+          await ct.modifyPosition(p.positionId, { stopLoss: intent.sl, takeProfit: intent.tp });
+          await sleep(1500);
+          const still = (await ct.getNakedPositions()).find(x => x.positionId === p.positionId);
+          if (!still) { log(`  ✓ repaired ${p.symbolName} pos=${p.positionId} SL=${intent.sl} TP=${intent.tp}`); repaired++; done = true; }
+          else log(`  ✗ repair did not stick for ${p.symbolName} — will close`);
+        } catch (e) { log(`  ✗ repair error ${p.symbolName}: ${e.message}`); }
+      } else {
+        log(`  ${p.symbolName} ${p.direction} — no valid trades.csv intent within ${TRADE_LOOKUP_WINDOW_MIN}min, will close`);
+      }
+    }
+    // 2. Close as fallback (or in close-only mode); verify it actually left.
+    if (!done) {
+      try {
+        await ct.closePosition(p.positionId, p.volumeCents);
+        await sleep(1500);
+        const open = (await ct.getPositions()).find(x => x.positionId === p.positionId);
+        if (!open) { log(`  ✓ closed ${p.symbolName} pos=${p.positionId}`); closed++; done = true; }
+        else { log(`  ✗ close did not take for ${p.symbolName} pos=${p.positionId}`); failed++; }
+      } catch (e) { log(`  ✗ close error ${p.symbolName}: ${e.message}`); failed++; }
+    }
+  }
+  log(`Repaired: ${repaired} | Closed: ${closed} | Failed: ${failed}`);
+  if (failed > 0) {
+    log('⚠ ESCALATE: some naked positions resisted both repair and close — manual intervention required.');
+    process.exit(2);
+  }
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
   log(`=== NAKED POSITION GUARD (${mode}) ===`);
+
+  // cTrader is the source of truth when active — use the API path, not the DOM.
+  // Detect via explicit provider OR presence of cTrader creds (so the cron path,
+  // which sources .ctrader_env, takes the API route even without BROKER_PROVIDER).
+  if (process.env.BROKER_PROVIDER === 'ctrader' || process.env.CTRADER_REFRESH_TOKEN) {
+    return enforceCtrader();
+  }
 
   const positions = await getOpenPositions();
   log(`Open positions: ${positions.length}`);

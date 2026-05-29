@@ -528,10 +528,24 @@ export async function attemptInlineTrade(setup) {
     log(`Entry ${setup.entry} outside expected range [${priceRange[0]}–${priceRange[1]}] — corrupt signal. Skip.`); return;
   }
 
-  // ── 12. Already-open position (live CDP check) ─────────────────────────────
+  // ── 12. Already-open position ──────────────────────────────────────────────
+  // cTrader is a NETTING account: a 2nd order on a symbol that already has an
+  // open position collapses into ONE net position and ORPHANS the per-leg SL/TP
+  // limit orders → naked position (the 2026-05-29 NZDCAD incident). The DOM
+  // scrape lags the broker, so for cTrader we use the API (source of truth) to
+  // hard-block ANY new order while the symbol has open volume.
   const openSymbols = await getOpenSymbols();
-  if (openSymbols.has(setup.label)) {
-    log(`${setup.label} already has an open position. Skip.`); return;
+  let symbolAlreadyOpen = openSymbols.has(setup.label);
+  if (process.env.BROKER_PROVIDER === 'ctrader') {
+    try {
+      const bridge = await import('./broker_ctrader.mjs');
+      symbolAlreadyOpen = (await bridge.getOpenVolumeForSymbol(setup.label)) > 0;
+    } catch (e) {
+      log(`cTrader open-volume check failed (${e.message}) — using DOM result (${symbolAlreadyOpen}).`);
+    }
+  }
+  if (symbolAlreadyOpen) {
+    log(`${setup.label} already has an open position. Skip (avoids netting into a naked position).`); return;
   }
   if (groupIdx !== -1) {
     const correlatedOpen = [...openSymbols].find(sym => CORRELATED_GROUPS[groupIdx].includes(sym));
