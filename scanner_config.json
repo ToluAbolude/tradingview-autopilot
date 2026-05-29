@@ -32,9 +32,20 @@
     "pass1_min_score":   6,
     "ema_flat_pct":      0.004,
     "rr_min":            2.0,
-    "ema_fast":          21,
-    "ema_mid":           50,
-    "ema_slow":          200
+    "ema_fast":          8,
+    "ema_mid":           21,
+    "ema_slow":          50
+  },
+
+  "_ema_overrides_note": "Per-symbol EMA [fast,mid,slow] override (2026-05-29). Global default is 8/21/50; these symbols opt into 21/50/200 because the full-portfolio backtest showed PF>=1.5 there (USDCHF 3.05, EURJPY 2.85, ETHUSD 2.14, US30 1.89, LTCUSD 1.65, BTCUSD 1.62) plus NZDCAD from its own focused test (~2.0). All other symbols stay on 8/21/50.",
+  "ema_overrides": {
+    "USDCHF": [21, 50, 200],
+    "EURJPY": [21, 50, 200],
+    "ETHUSD": [21, 50, 200],
+    "US30":   [21, 50, 200],
+    "LTCUSD": [21, 50, 200],
+    "BTCUSD": [21, 50, 200],
+    "NZDCAD": [21, 50, 200]
   },
 
   "mtf_bonus": [

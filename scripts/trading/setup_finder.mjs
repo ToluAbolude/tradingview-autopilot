@@ -28,6 +28,7 @@ let TC = {};  // threshold config
 let MTFC = [];
 let TFW = {};
 let INST_CFG = {};
+let EMA_OVR = {};
 try {
   const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
   SC    = cfg.scoring       || {};
@@ -35,6 +36,7 @@ try {
   MTFC  = cfg.mtf_bonus     || [];
   TFW   = cfg.tf_weights    || {};
   INST_CFG = cfg.inst_profiles || {};
+  EMA_OVR  = cfg.ema_overrides || {};
 } catch (_) {
   // config missing — all defaults below apply
 }
@@ -780,13 +782,17 @@ export function classifySetup(bars, dir, ema8, ema21, ema50, rsi, atr) {
 export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
   const atr    = calcATR(bars);
-  // EMA periods are config-driven; default to the 21/50/200 trend-following set
-  // (was 8/21/50). Variable names kept for a minimal diff — ema8≈fast(21),
-  // ema21≈mid(50), ema50≈slow(200) — and propagate to the flat gate, the EMA-stack
-  // vote (B), the EMA200 trend filter (E) and classifySetup().
-  const ema8   = calcEMA(bars, TC.ema_fast ?? 21);
-  const ema21  = calcEMA(bars, TC.ema_mid  ?? 50);
-  const ema50  = calcEMA(bars, TC.ema_slow ?? 200);
+  // EMA periods: a per-symbol override (ema_overrides in scanner_config, keyed by
+  // label, [fast,mid,slow]) wins; otherwise the global default below. Default is
+  // the proven 8/21/50 — the 21/50/200 trend set is opted-in per symbol only where
+  // it backtested better (full-portfolio test 2026-05-29 showed 21/50/200 only wins
+  // on trenders and bleeds the FX majors). Variable names kept for a minimal diff;
+  // they propagate to the flat gate, the EMA-stack vote (B), the crossover vote (E)
+  // and classifySetup().
+  const _emaOvr = EMA_OVR[label];
+  const ema8   = calcEMA(bars, _emaOvr?.[0] ?? TC.ema_fast ?? 8);
+  const ema21  = calcEMA(bars, _emaOvr?.[1] ?? TC.ema_mid  ?? 21);
+  const ema50  = calcEMA(bars, _emaOvr?.[2] ?? TC.ema_slow ?? 50);
   const rsi    = calcRSI(bars);
   const st     = calcSmartTrail(bars);
   const isT1   = ['WTI','NAS100','US30','XAUUSD','XAGUSD','SPX500'].includes(label);
