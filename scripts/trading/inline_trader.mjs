@@ -472,14 +472,32 @@ export async function attemptInlineTrade(setup) {
     log(`60-min loss cooldown active for ${setup.label} (any direction). Skip.`); return;
   }
 
-  // ── 6b. Same-symbol+direction attempt cooldown (30 min) ────────────────────
-  // Even before a loss is closed, block re-firing the same symbol+direction
-  // within 30 min. Stops the cluster-into-stop-pool pattern (e.g. 5/27 WTI
-  // fired 9 shorts before the first one closed, all into the same SL pool).
+  // ── 6b. Per-instrument session block (asianBlock window) ───────────────────
+  // Set in setup_finder's INST_PROFILE (e.g. WTI: asianBlockStart=22, end=7).
+  // 11/11 losses on 2026-05-29 between 00:10 and 03:40 UTC made this concrete:
+  // WTI is directionally right in Asian but stops get chopped 100% of the time.
+  // Reject entries within the block window, regardless of score.
+  const instProf = setup.profile || {};
+  if (instProf.asianBlockStart != null && instProf.asianBlockEnd != null) {
+    const utcH = h;
+    const inWindow = instProf.asianBlockStart < instProf.asianBlockEnd
+      ? (utcH >= instProf.asianBlockStart && utcH < instProf.asianBlockEnd)
+      : (utcH >= instProf.asianBlockStart || utcH < instProf.asianBlockEnd);  // wraps midnight
+    if (inWindow) {
+      log(`${setup.label} ${setup.dir} blocked — inside asianBlock window ${instProf.asianBlockStart}-${instProf.asianBlockEnd} UTC. Skip.`);
+      return;
+    }
+  }
+
+  // ── 6c. Same-symbol+direction attempt cooldown ─────────────────────────────
+  // Even before a loss is closed, block re-firing the same symbol+direction.
+  // Per-instrument override via INST_PROFILE.cooldownMin (WTI uses 60min).
+  // Stops the cluster-into-stop-pool pattern.
   const attemptKey = `${setup.label}|${setup.dir}`;
   const last = _lastAttempt.get(attemptKey);
-  if (last && Date.now() - last < ATTEMPT_COOLDOWN_MS) {
-    const minsLeft = Math.ceil((ATTEMPT_COOLDOWN_MS - (Date.now() - last)) / 60000);
+  const cooldownMs = (instProf.cooldownMin ?? 30) * 60 * 1000;
+  if (last && Date.now() - last < cooldownMs) {
+    const minsLeft = Math.ceil((cooldownMs - (Date.now() - last)) / 60000);
     log(`Same-symbol+dir attempt cooldown active (${minsLeft}m left). Skip.`); return;
   }
 

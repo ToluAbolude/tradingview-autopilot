@@ -1206,10 +1206,22 @@ const INST_PROFILE = {
   // TP1 to match the WTI repair. Combined with the XAUUSD-bias gate in
   // inline_trader (silver follows gold ~80%).
   XAGUSD: { slMode: 'fvg_sr', maxSlAtr: 2.00, minSlAtr: 1.00, tpCap: 3.50, tp3Cap: 6.00, tp1FloorR: 1.5 },
-  // WTI: ASIAN-session chop was clipping 0.2×ATR stops (4W/16L over recent
-  // weeks, 13 of 16 losses in ASIAN). Force SL ≥1×ATR(15m) so noise can't
-  // reap the stop on the retrace; lot sizing compensates by shrinking volume.
-  WTI:    { slMode: 'fvg_sr', maxSlAtr: 2.00, minSlAtr: 1.00, tpCap: 3.50, tp3Cap: 6.00, tp1FloorR: 1.5 },
+  // WTI: 11/11 losses on 2026-05-29 ASIAN (00:10–03:40 UTC) — bot was
+  // DIRECTIONALLY CORRECT every time (net price moved $0.61 in our favor)
+  // but SL distances of $0.21–0.23 got clipped by routine $0.20–0.40 wicks.
+  // 15M ATR in ASIAN is itself only ~$0.20 so ATR-multiple alone won't help.
+  // Three WTI-specific fixes:
+  //   minSlAbs   — absolute $ floor on SL distance (no matter what ATR says)
+  //   asianBlock — reject signals fired between asianBlockStart and asianBlockEnd UTC
+  //   cooldown   — per-symbol cooldown overrides global 30min (uses 60min for WTI)
+  // These are read by setup_finder + inline_trader. If any later instrument
+  // needs the same treatment, copy these three keys.
+  WTI:    {
+    slMode: 'fvg_sr', maxSlAtr: 2.50, minSlAtr: 1.50, tpCap: 3.50, tp3Cap: 6.00, tp1FloorR: 1.5,
+    minSlAbs: 0.50,                                  // absolute $ floor on SL distance
+    asianBlockStart: 22, asianBlockEnd: 7,           // UTC hours — block in this window
+    cooldownMin: 60,                                 // override 30-min global cooldown
+  },
 
   // Crypto: wide SL required — liquidity sweeps below OBs are routine before continuation
   BTCUSD: { slMode: 'fvg_sr', maxSlAtr: 0.80, minSlAtr: 0.15, tpCap: 2.00, tp3Cap: 3.50 },
@@ -1421,6 +1433,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       // ── Per-instrument SL/TP strategy ────────────────────────────────────────────
       const prof = INST_CFG[inst.label] || INST_PROFILE[inst.label] || DEFAULT_PROFILE;
       const { slMode, maxSlAtr, minSlAtr, tpCap, tp3Cap } = prof;
+      const minSlAbs = prof.minSlAbs ?? 0;   // absolute $ floor on SL distance (WTI = 0.50)
 
       // ── SL placement ─────────────────────────────────────────────────────────────
       let sl;
@@ -1479,6 +1492,14 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       if (dir === 'long'  && entry - sl > atrVal * maxSlAtr) sl = entry - atrVal * maxSlAtr;
       if (dir === 'short' && sl - entry > atrVal * maxSlAtr) sl = entry + atrVal * maxSlAtr;
 
+      // Absolute $ floor on SL distance (per-instrument override). For WTI:
+      // ATR-based floor of 1.5×ATR can land at $0.30 in ASIAN session, but
+      // 15M wicks routinely run $0.20–0.40 against trend — minSlAbs=0.50
+      // ensures we always give the SL real breathing room.
+      if (minSlAbs > 0 && Math.abs(entry - sl) < minSlAbs) {
+        sl = dir === 'long' ? entry - minSlAbs : entry + minSlAbs;
+      }
+
       const slDist = Math.abs(entry - sl);
 
       // ── TP1 (tp2): nearest opposing S/R zone within tpCap × ATR ─────────────────
@@ -1534,6 +1555,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
         score:      finalScore,
         reasons:    allReasons,
         strategies: allStrats,
+        profile:    prof,                       // per-instrument profile (read by inline_trader gates)
         entry:      Math.round(entry   * 10000) / 10000,
         sl:         Math.round(sl      * 10000) / 10000,
         tpQuick:    Math.round((dir === 'long' ? entry + slDist * 0.5 : entry - slDist * 0.5) * 10000) / 10000,
