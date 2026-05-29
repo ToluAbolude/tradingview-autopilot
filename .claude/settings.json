@@ -159,7 +159,13 @@
       "Bash(grep -nE \"\\(\\\\\\\\bsl\\\\\\\\s*[:=]|ATR|atr|stopLoss|computeSL\\)\" scripts/trading/setup_finder.mjs)",
       "Bash(node --check scripts/trading/scale_risk_to_goal.mjs)",
       "Bash(node --check scripts/trading/per_symbol_pf_reflection.mjs)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/per_symbol_pf_reflection.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle scripts/trading/per_symbol_pf_reflection.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=10 scripts/trading/setup_finder.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=10 scanner_config.json ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scanner_config.json)",
+      "Bash(exit 0)",
+      "Bash(ping -n 2 132.145.44.68)",
+      "Bash(ping -c 2 132.145.44.68)",
+      "PowerShell(Test-NetConnection -ComputerName 132.145.44.68 -Port 22 -WarningAction SilentlyContinue)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
