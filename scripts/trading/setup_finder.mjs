@@ -780,9 +780,13 @@ export function classifySetup(bars, dir, ema8, ema21, ema50, rsi, atr) {
 export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const n      = bars.length - 1;
   const atr    = calcATR(bars);
-  const ema8   = calcEMA(bars, 8);
-  const ema21  = calcEMA(bars, 21);
-  const ema50  = calcEMA(bars, 50);
+  // EMA periods are config-driven; default to the 21/50/200 trend-following set
+  // (was 8/21/50). Variable names kept for a minimal diff — ema8≈fast(21),
+  // ema21≈mid(50), ema50≈slow(200) — and propagate to the flat gate, the EMA-stack
+  // vote (B), the EMA200 trend filter (E) and classifySetup().
+  const ema8   = calcEMA(bars, TC.ema_fast ?? 21);
+  const ema21  = calcEMA(bars, TC.ema_mid  ?? 50);
+  const ema50  = calcEMA(bars, TC.ema_slow ?? 200);
   const rsi    = calcRSI(bars);
   const st     = calcSmartTrail(bars);
   const isT1   = ['WTI','NAS100','US30','XAUUSD','XAGUSD','SPX500'].includes(label);
@@ -934,6 +938,27 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     if (stacked) {
       score += (SC.B_ema_stack ?? 1);
       reasons.push('EMA stack aligned'); strats.push('B');
+    }
+  }
+
+  // ── E. EMA 21/50 crossover trigger, filtered by the 200-EMA trend ──
+  // The "BUY/SELL setup" from the EMA21/50/200 tool: reward a FRESH cross of the
+  // fast EMA over the mid EMA (ema8=21 over ema21=50), in the direction of the
+  // long-term 200-EMA (ema50). Because it only fires near the cross bar, it
+  // rewards trend *initiations* rather than every already-trending bar — so it
+  // adds timing information the EMA-stack vote (B) doesn't, without inflating
+  // the score on every trending candle.
+  {
+    const lookback = SC.E_cross_lookback ?? 3;
+    let crossed = false;
+    for (let k = n; k >= Math.max(1, n - lookback); k--) {
+      if (dir === 'long'  && ema8[k] > ema21[k] && ema8[k - 1] <= ema21[k - 1]) { crossed = true; break; }
+      if (dir === 'short' && ema8[k] < ema21[k] && ema8[k - 1] >= ema21[k - 1]) { crossed = true; break; }
+    }
+    const trendOK = dir === 'long' ? last.c > ema50[n] : last.c < ema50[n];
+    if (crossed && trendOK) {
+      score += (SC.E_ema_cross ?? 2);
+      reasons.push('EMA 21/50 cross (trend-filtered)'); strats.push('E');
     }
   }
 

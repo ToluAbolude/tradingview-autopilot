@@ -6,6 +6,7 @@
   "scoring": {
     "A_smarttrail":       1,
     "B_ema_stack":        1,
+    "E_ema_cross":        2,
     "C_sr_fresh":         2,
     "C_sr_retested":      3,
     "D_daily_bias":       1,
@@ -30,7 +31,10 @@
   "thresholds": {
     "pass1_min_score":   6,
     "ema_flat_pct":      0.004,
-    "rr_min":            2.0
+    "rr_min":            2.0,
+    "ema_fast":          21,
+    "ema_mid":           50,
+    "ema_slow":          200
   },
 
   "mtf_bonus": [

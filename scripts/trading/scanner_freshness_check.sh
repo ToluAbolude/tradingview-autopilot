@@ -57,6 +57,9 @@ start_scanner() {
     return 1
   fi
 
+  # NOTE: 9>&- closes the flock fd in the child. Without this the scanner
+  # inherits fd 9 and holds the freshness lock for its entire life, which
+  # makes every later freshness check "skip" and silently disables this guard.
   nohup env \
     BROKER_PROVIDER=ctrader \
     CTRADER_ENV="${CTRADER_ENV:-demo}" \
@@ -67,7 +70,7 @@ start_scanner() {
     CTRADER_CLIENT_ID="${CTRADER_CLIENT_ID}" \
     DISPLAY=:1 \
     node scripts/trading/market_scanner.mjs \
-    >> "${DATA_ROOT}/scanner.log" 2>&1 < /dev/null &
+    >> "${DATA_ROOT}/scanner.log" 2>&1 < /dev/null 9>&- &
   disown || true
 
   sleep 4
