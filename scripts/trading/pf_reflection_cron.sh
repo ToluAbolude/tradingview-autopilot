@@ -23,6 +23,14 @@ mkdir -p "${LOG_DIR}"
 
 cd "${PROJECT_ROOT}" || { echo "[$(date -Iseconds)] cd failed" >> "${DAILY_LOG}"; exit 99; }
 
+# Source cTrader creds + select provider. Cron does NOT inherit the scanner's
+# env, so without this the reflection fails with "Missing CTRADER_* env vars"
+# (exit 2) and emails a false "cTrader connection FAILED" alert.
+set -a
+[ -r /home/ubuntu/.ctrader_env ] && . /home/ubuntu/.ctrader_env
+set +a
+export BROKER_PROVIDER=ctrader
+
 # Capture both stdout and stderr; save exit code separately
 OUTPUT="$(node scripts/trading/per_symbol_pf_reflection.mjs 2>&1)"
 EXIT=$?
