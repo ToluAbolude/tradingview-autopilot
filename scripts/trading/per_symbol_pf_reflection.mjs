@@ -158,6 +158,115 @@ function printReport(report, threshold) {
   }
 }
 
+// ── HTML email report — styled tables + CSS bar-chart "graphs" ──────────────
+// Uses table/bgcolor/width-based bars and inline styles so it renders in Gmail
+// (no external images, no SVG — both are stripped/blocked by Gmail).
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function money(n) { const r = Math.round(n); return (r < 0 ? '-$' : '$') + Math.abs(r).toLocaleString('en-US'); }
+function pfTxt(pf) { return pf === Infinity ? '∞' : pf.toFixed(2); }
+
+function buildHtml(report, threshold) {
+  const active = [...report.active_fail, ...report.active_pass];
+  const rows   = [...report.active_fail, ...report.active_pass, ...report.insufficient];
+  const when   = new Date().toUTCString();
+
+  const statusOf = s =>
+    s.n < MIN_TRADES ? { label: `n&lt;${MIN_TRADES}`, bg: '#eceff1', fg: '#607d8b' }
+    : s.pf >= threshold ? { label: 'OK',  bg: '#e8f5e9', fg: '#2e7d32' }
+    :                     { label: 'FLAG', bg: '#ffebee', fg: '#c62828' };
+
+  // Main table
+  const tableRows = rows.map(s => {
+    const st = statusOf(s);
+    const netC = s.net > 0 ? '#2e7d32' : s.net < 0 ? '#c62828' : '#607d8b';
+    return `<tr style="border-bottom:1px solid #eee">
+      <td style="padding:7px 12px;font-weight:600">${esc(s.sym)}</td>
+      <td style="padding:7px 12px;text-align:right;color:#555">${s.n}</td>
+      <td style="padding:7px 12px;text-align:right;color:#555">${(s.wr * 100).toFixed(0)}%</td>
+      <td style="padding:7px 12px;text-align:right;font-weight:700">${pfTxt(s.pf)}</td>
+      <td style="padding:7px 12px;text-align:right;font-weight:700;color:${netC}">${money(s.net)}</td>
+      <td style="padding:7px 12px;text-align:center"><span style="background:${st.bg};color:${st.fg};padding:3px 10px;border-radius:11px;font-size:12px;font-weight:700">${st.label}</span></td>
+    </tr>`;
+  }).join('');
+
+  // PF bar chart (cap display at 6×; goal line drawn at threshold)
+  const PF_CAP = 6, PF_PX = 280;
+  const goalPx = Math.round(threshold / PF_CAP * PF_PX);
+  const pfBars = active.map(s => {
+    const v = s.pf === Infinity ? PF_CAP : Math.min(s.pf, PF_CAP);
+    const px = Math.max(2, Math.round(v / PF_CAP * PF_PX));
+    const color = s.pf >= threshold ? '#43a047' : '#e53935';
+    return `<tr>
+      <td style="padding:3px 10px 3px 0;font-size:13px;width:64px;text-align:right;color:#444">${esc(s.sym)}</td>
+      <td style="padding:3px 0;width:${PF_PX}px">
+        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:${PF_PX}px;background:#f4f4f4;border-left:2px solid #bbb"><tr>
+          <td bgcolor="${color}" width="${px}" style="height:14px;line-height:14px;font-size:1px">&nbsp;</td><td>&nbsp;</td>
+        </tr></table>
+      </td>
+      <td style="padding:3px 10px;font-size:13px;font-weight:700;color:${color}">${pfTxt(s.pf)}</td>
+    </tr>`;
+  }).join('');
+
+  // Net P&L bars (single direction, colored by sign, sorted desc)
+  const maxAbs = Math.max(1, ...active.map(s => Math.abs(s.net)));
+  const NET_PX = 280;
+  const netBars = active.slice().sort((a, b) => b.net - a.net).map(s => {
+    const px = Math.max(2, Math.round(Math.abs(s.net) / maxAbs * NET_PX));
+    const pos = s.net >= 0, color = pos ? '#43a047' : '#e53935';
+    return `<tr>
+      <td style="padding:3px 10px 3px 0;font-size:13px;width:64px;text-align:right;color:#444">${esc(s.sym)}</td>
+      <td style="padding:3px 0;width:${NET_PX}px">
+        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:${NET_PX}px"><tr>
+          <td bgcolor="${color}" width="${px}" style="height:14px;line-height:14px;font-size:1px">&nbsp;</td><td>&nbsp;</td>
+        </tr></table>
+      </td>
+      <td style="padding:3px 10px;font-size:13px;font-weight:700;color:${color}">${money(s.net)}</td>
+    </tr>`;
+  }).join('');
+
+  const card = (n, label, color) =>
+    `<td style="padding:0 6px"><table cellpadding="0" cellspacing="0" width="100%" style="background:${color}1a;border:1px solid ${color}55;border-radius:8px"><tr><td style="padding:12px;text-align:center">
+       <div style="font-size:26px;font-weight:800;color:${color}">${n}</div>
+       <div style="font-size:12px;color:#555;text-transform:uppercase;letter-spacing:.5px">${label}</div>
+     </td></tr></table></td>`;
+
+  return `<!doctype html><html><body style="margin:0;background:#f0f2f5;font-family:Arial,Helvetica,sans-serif;color:#222">
+  <table cellpadding="0" cellspacing="0" width="100%"><tr><td align="center" style="padding:20px 10px">
+  <table cellpadding="0" cellspacing="0" width="720" style="max-width:720px;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1e2a38;padding:20px 24px">
+      <div style="color:#fff;font-size:20px;font-weight:700">Per-Symbol Profit Factor — ${DAYS}d</div>
+      <div style="color:#9fb3c8;font-size:13px;margin-top:4px">Goal PF &ge; ${threshold.toFixed(1)} &nbsp;·&nbsp; cTrader deal history (authoritative) &nbsp;·&nbsp; ${esc(when)}</div>
+    </td></tr>
+    <tr><td style="padding:18px 18px 6px">
+      <table cellpadding="0" cellspacing="0" width="100%"><tr>
+        ${card(report.active_pass.length, 'Passing', '#2e7d32')}
+        ${card(report.active_fail.length, 'Flagged', '#c62828')}
+        ${card(report.insufficient.length, 'Insufficient', '#607d8b')}
+      </tr></table>
+    </td></tr>
+    <tr><td style="padding:14px 24px 4px;font-size:15px;font-weight:700;color:#1e2a38">Summary table</td></tr>
+    <tr><td style="padding:0 18px">
+      <table cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;font-size:14px">
+        <tr style="background:#f6f8fa;color:#555;font-size:12px;text-transform:uppercase">
+          <td style="padding:7px 12px">Symbol</td><td style="padding:7px 12px;text-align:right">N</td>
+          <td style="padding:7px 12px;text-align:right">WR</td><td style="padding:7px 12px;text-align:right">PF</td>
+          <td style="padding:7px 12px;text-align:right">Net</td><td style="padding:7px 12px;text-align:center">Status</td>
+        </tr>
+        ${tableRows}
+      </table>
+    </td></tr>
+    <tr><td style="padding:22px 24px 4px;font-size:15px;font-weight:700;color:#1e2a38">Profit Factor by symbol <span style="font-weight:400;font-size:12px;color:#888">(green = meets goal ${threshold.toFixed(1)}, red = below; bars capped at ${PF_CAP}×)</span></td></tr>
+    <tr><td style="padding:4px 24px">
+      <table cellpadding="0" cellspacing="0">${pfBars}</table>
+    </td></tr>
+    <tr><td style="padding:22px 24px 4px;font-size:15px;font-weight:700;color:#1e2a38">Net P&amp;L by symbol</td></tr>
+    <tr><td style="padding:4px 24px 18px">
+      <table cellpadding="0" cellspacing="0">${netBars}</table>
+    </td></tr>
+    <tr><td style="background:#f6f8fa;padding:12px 24px;font-size:11px;color:#999">Generated by per_symbol_pf_reflection.mjs · ${DAYS}-day window · min ${MIN_TRADES} trades to evaluate · we flag, never auto-block.</td></tr>
+  </table></td></tr></table></body></html>`;
+}
+
 async function main() {
   const goal = existsSync(GOAL_FILE) ? JSON.parse(readFileSync(GOAL_FILE, 'utf8')) : {};
   const threshold = Number(goal.minProfitFactor || 2.0);
@@ -193,7 +302,12 @@ async function main() {
   };
   writeFileSync(LATEST_FILE, JSON.stringify(payload, null, 2));
   appendFileSync(HISTORY, JSON.stringify(payload) + '\n');
+
+  // Rich HTML report (tables + bar-chart graphs) for the email body
+  const REPORT_HTML = join(OUT_DIR, 'report.html');
+  writeFileSync(REPORT_HTML, buildHtml(report, threshold));
   console.log('\nSnapshot → ' + LATEST_FILE);
+  console.log('HTML     → ' + REPORT_HTML);
 
   process.exit(report.active_fail.length > 0 ? 1 : 0);
 }
