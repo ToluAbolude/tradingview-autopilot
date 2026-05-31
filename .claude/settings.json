@@ -165,7 +165,9 @@
       "Bash(exit 0)",
       "Bash(ping -n 2 132.145.44.68)",
       "Bash(ping -c 2 132.145.44.68)",
-      "PowerShell(Test-NetConnection -ComputerName 132.145.44.68 -Port 22 -WarningAction SilentlyContinue)"
+      "PowerShell(Test-NetConnection -ComputerName 132.145.44.68 -Port 22 -WarningAction SilentlyContinue)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=15 ubuntu@132.145.44.68:/tmp/verify_bb.png /c/tmp/verify_bb2.png)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=15 /tmp/add_mailto.py ubuntu@132.145.44.68:/tmp/)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
