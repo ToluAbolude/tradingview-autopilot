@@ -167,7 +167,17 @@
       "Bash(ping -c 2 132.145.44.68)",
       "PowerShell(Test-NetConnection -ComputerName 132.145.44.68 -Port 22 -WarningAction SilentlyContinue)",
       "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=15 ubuntu@132.145.44.68:/tmp/verify_bb.png /c/tmp/verify_bb2.png)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=15 /tmp/add_mailto.py ubuntu@132.145.44.68:/tmp/)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=15 /tmp/add_mailto.py ubuntu@132.145.44.68:/tmp/)",
+      "Bash(node --check scripts/trading/daily_trade_report.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=20 \"C:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/daily_trade_report.mjs\" \"C:/Users/Tda-d/tradingview-mcp-jackson/scripts/trading/daily_report_cron.sh\" ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(node --check scripts/trading/orb_backtest.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=20 scripts/trading/orb_backtest.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(node --check scripts/trading/pnl_history.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=20 scripts/trading/pnl_history.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(node --check scripts/trading/orb_preview.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=20 scripts/trading/orb_preview.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
+      "Bash(node --check scripts/trading/morning_review.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=20 scripts/trading/morning_review.mjs scripts/trading/morning_review_cron.sh ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",

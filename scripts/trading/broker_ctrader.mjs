@@ -674,6 +674,139 @@ export async function getRecentClosePnl(symbolName, fromMs, toMs = Date.now()) {
   return { netPnl: Math.round(netPnl * 100) / 100, count: matching.length, deals: matching };
 }
 
+const TRENDBAR_PERIOD = { M1:1, M2:2, M3:3, M4:4, M5:5, M10:6, M15:7, M30:8, H1:9, H4:10, H12:11, D1:12, W1:13, MN1:14 };
+
+/**
+ * Fetch historical trendbars (OHLCV) for `symbolName` over [fromMs, toMs].
+ * Walks backward in `windowDays`-sized windows so each request stays under
+ * cTrader's per-request bar cap, then dedupes + sorts ascending.
+ *
+ * ProtoOATrendbar encodes prices as deltas off `low`, scaled ×100000:
+ *   low=raw/1e5, open=(low+deltaOpen)/1e5, etc. timestamp = utcTimestampInMinutes×60000.
+ * (Absolute scale is irrelevant to R-normalized backtests, but we divide so
+ *  prices read normally.)
+ *
+ * Returns: [{ t (unix ms), o, h, l, c, v }] ascending. Deep history source for
+ * backtests — TradingView getBars only serves ~300 loaded bars.
+ */
+export async function getTrendbars(symbolName, { period = 'M5', fromMs, toMs = Date.now(), windowDays = 5 } = {}) {
+  await connect();
+  const meta = await _symbolMetaFor(symbolName);
+  const periodEnum = TRENDBAR_PERIOD[period];
+  if (!periodEnum) throw new Error(`Unknown trendbar period: ${period}`);
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+  const byTs = new Map();
+  let winTo = toMs;
+
+  while (winTo > fromMs) {
+    const winFrom = Math.max(fromMs, winTo - windowMs);
+    let attempt = 0;
+    while (attempt < 3) {
+      try {
+        const res = await send('ProtoOAGetTrendbarsReq', {
+          ctidTraderAccountId: _accountId,
+          fromTimestamp: winFrom,
+          toTimestamp:   winTo,
+          period:        periodEnum,
+          symbolId:      meta.id,
+        }, { timeoutMs: 20_000 });
+        for (const tb of (res.trendbar || [])) {
+          const low = _toNum(tb.low);
+          const t   = _toNum(tb.utcTimestampInMinutes) * 60000;
+          byTs.set(t, {
+            t,
+            o: (low + _toNum(tb.deltaOpen))  / 100000,
+            h: (low + _toNum(tb.deltaHigh))  / 100000,
+            l:  low / 100000,
+            c: (low + _toNum(tb.deltaClose)) / 100000,
+            v: _toNum(tb.volume),
+          });
+        }
+        break;
+      } catch (e) {
+        if (/rate limited|BLOCKED_PAYLOAD_TYPE/i.test(e.message) && attempt < 2) {
+          attempt++; await sleep(2000 * attempt); continue;
+        }
+        throw e;
+      }
+    }
+    winTo = winFrom;
+    await sleep(300);
+  }
+  return [...byTs.values()].sort((a, b) => a.t - b.t);
+}
+
+/**
+ * Pull EVERY closing deal for the whole account over [fromMs, toMs] — no symbol
+ * filter, paginated in weekly windows so nothing is missed or truncated.
+ * Use this (not per-symbol getRecentClosePnl) for account-wide P&L reconciliation.
+ * Returns: [{ dealId, positionId, symbolId, symbolName, execTs, net }] ascending.
+ */
+export async function getAllClosedDeals(fromMs, toMs = Date.now(), { windowDays = 7 } = {}) {
+  await connect();
+  await _loadSymbolList();
+  const idToName = new Map();
+  for (const [name, id] of _symbolIdMap) idToName.set(id, name);
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+  const byDeal = new Map();
+  let winTo = toMs;
+
+  while (winTo > fromMs) {
+    const winFrom = Math.max(fromMs, winTo - windowMs);
+    let attempt = 0;
+    while (attempt < 3) {
+      try {
+        const res = await send('ProtoOADealListReq', {
+          ctidTraderAccountId: _accountId, fromTimestamp: winFrom, toTimestamp: winTo, maxRows: 1000,
+        }, { timeoutMs: 20_000 });
+        for (const d of (res.deal || [])) {
+          if (!d.closePositionDetail) continue;            // only closing deals carry realised PnL
+          const st = _toNum(d.dealStatus);
+          if (st !== 2 && st !== 3) continue;              // FILLED / PARTIALLY_FILLED
+          const cpd = d.closePositionDetail;
+          const scale = Math.pow(10, _toNum(cpd.moneyDigits) || 2);
+          const net = (_toNum(cpd.grossProfit) + _toNum(cpd.commission) + _toNum(cpd.swap)) / scale;
+          const sid = _toNum(d.symbolId);
+          const ctName = idToName.get(sid);
+          byDeal.set(_toNum(d.dealId), {
+            dealId:     _toNum(d.dealId),
+            positionId: _toNum(d.positionId),
+            symbolId:   sid,
+            symbolName: (ctName && (CTRADER_NAME_REV[ctName] || ctName)) || `id${sid}`,
+            execTs:     _toNum(d.executionTimestamp),
+            net,
+            balance:        _toNum(cpd.balance) / scale,   // account balance AFTER this deal (cTrader ledger)
+            balanceVersion: _toNum(cpd.balanceVersion),
+          });
+        }
+        break;
+      } catch (e) {
+        if (/rate limited|BLOCKED_PAYLOAD_TYPE/i.test(e.message) && attempt < 2) { attempt++; await sleep(2000 * attempt); continue; }
+        throw e;
+      }
+    }
+    winTo = winFrom;
+    await sleep(250);
+  }
+  return [...byDeal.values()].sort((a, b) => a.execTs - b.execTs);
+}
+
+/**
+ * Today's REALISED P&L (sum of net on all closing deals since 00:00 UTC), from
+ * the cTrader ledger. This is the authoritative figure for the daily-drawdown
+ * kill-switch — trades.csv P&L is unreliable (often VOID/0).
+ */
+export async function getTodayRealizedPnl() {
+  const now = new Date();
+  const startOfDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0);
+  const deals = await getAllClosedDeals(startOfDay);
+  return deals.reduce((s, d) => s + d.net, 0);
+}
+
 export function onPositionEvent(handler) {
   on('ProtoOAExecutionEvent', (evt) => {
     if (!evt?.position) return;

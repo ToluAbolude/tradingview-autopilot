@@ -17,6 +17,7 @@
  *   - CRYPTO_ASIAN min-score gate
  */
 import { placeOrder, getEquity, closeAllPositions } from './execute_trade.mjs';
+import { getTodayRealizedPnl } from './broker_ctrader.mjs';
 import { evaluate } from '../../src/connection.js';
 import { fetchHighImpactNews, isSafeToTrade, filterForSymbol } from './news_checker.mjs';
 import { analyzePerformance } from './performance_tracker.mjs';
@@ -419,24 +420,22 @@ export async function attemptInlineTrade(setup) {
   }
 
   // ── 5d. Daily drawdown halt ───────────────────────────────────────────────
-  // If today's realised PnL is a loss worse than 3% of equity, halt for the day.
-  if (existsSync(LOG_FILE)) {
-    const todayStr = now.toISOString().slice(0, 10);
-    const todayPnl = readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(1)
-      .filter(l => l.startsWith(todayStr))
-      .reduce((sum, l) => {
-        const p = l.split(',');
-        const result = (p[10] || '').trim();
-        if (!['W', 'L'].includes(result)) return sum;
-        return sum + (parseFloat(p[11] || 0) || 0);
-      }, 0);
+  // Halt for the day if today's REALISED P&L is a loss worse than the limit.
+  // Reads the cTrader ledger (not trades.csv, whose P&L column is mostly VOID/0
+  // and left this kill-switch blind through a -9% day on 2026-06-01).
+  try {
+    const todayPnl   = await getTodayRealizedPnl();
     const equityData = await getEquity().catch(() => ({}));
     const equity     = equityData.equity || equityData.balance || 10000;
     const drawdownPct = (todayPnl / equity) * 100;
     const MAX_DAILY_DRAWDOWN_PCT = PARAMS.maxDailyDrawdownPct || 3;
     if (drawdownPct <= -MAX_DAILY_DRAWDOWN_PCT) {
-      log(`Daily drawdown halt: today P&L ${todayPnl.toFixed(0)} = ${drawdownPct.toFixed(1)}% (limit -${MAX_DAILY_DRAWDOWN_PCT}%). No more trades today.`); return;
+      log(`Daily drawdown halt: today realised P&L ${todayPnl.toFixed(0)} = ${drawdownPct.toFixed(1)}% (limit -${MAX_DAILY_DRAWDOWN_PCT}%). No more trades today.`); return;
     }
+  } catch (e) {
+    // Fail-open on a transient cTrader read error so a hiccup doesn't block all
+    // trading — but log loudly so a persistently-blind halt is visible.
+    log(`⚠ drawdown-halt check failed (${e.message}) — proceeding without it this cycle`);
   }
 
   // ── 5e. Sibling-symbol daily-bias gates ────────────────────────────────────
