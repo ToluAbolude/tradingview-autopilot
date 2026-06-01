@@ -24,8 +24,13 @@ const usd  = n => (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-US', { m
 async function main() {
   const b = await import('./broker_ctrader.mjs');
   await b.connect();
+  // Pull 30d so we can guard auto-block against a proven winner in a short dip.
+  const LONG_DAYS = Math.max(DAYS, 30);
+  const longDeals = (await b.getAllClosedDeals(Date.now() - LONG_DAYS * 864e5)).sort((x, y) => x.execTs - y.execTs);
   const fromMs = Date.now() - DAYS * 864e5;
-  const deals = (await b.getAllClosedDeals(fromMs)).sort((x, y) => x.execTs - y.execTs);
+  const deals = longDeals.filter(d => d.execTs >= fromMs);
+  const longNetBySym = {};
+  for (const d of longDeals) longNetBySym[d.symbolName] = (longNetBySym[d.symbolName] || 0) + d.net;
   const live = await b.getEquity().catch(() => ({}));
   const params = existsSync(PARAMS_FILE) ? JSON.parse(readFileSync(PARAMS_FILE, 'utf8')) : {};
 
@@ -48,11 +53,14 @@ async function main() {
   for (const d of deals) { const c = bySym.get(d.symbolName) || []; c.push(d); bySym.set(d.symbolName, c); }
   const symStats = [...bySym.entries()].map(([s, arr]) => ({ sym: s, ...agg(arr) })).sort((a, b2) => a.net - b2.net);
 
-  // Auto-block clear bleeders (authorized): WR<30% AND net<0 AND n>=5, not already blocked
+  // Auto-block clear bleeders (authorized): WR<30% AND net<0 AND n>=5 over the
+  // window, AND also net<0 over the 30d window (so a proven winner in a short
+  // dip — e.g. BTCUSD — is NOT blocked).
   const blocked = new Set(params.blockedSymbols || []);
   const newlyBlocked = [];
   for (const s of symStats) {
-    if (s.n >= 5 && s.net < 0 && s.wr < 30 && !blocked.has(s.sym)) { blocked.add(s.sym); newlyBlocked.push(s); }
+    const persistentLoser = (longNetBySym[s.sym] || 0) < 0;
+    if (s.n >= 5 && s.net < 0 && s.wr < 30 && persistentLoser && !blocked.has(s.sym)) { blocked.add(s.sym); newlyBlocked.push(s); }
   }
   if (newlyBlocked.length) {
     params.blockedSymbols = [...blocked];

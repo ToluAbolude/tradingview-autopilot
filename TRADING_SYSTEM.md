@@ -5,7 +5,53 @@ Live automated day-trading system running on an Oracle Cloud VM. Scans 22 instru
 structured orders via BlackBull Markets through TradingView Desktop. All positions are closed
 by 20:00 UTC — no overnight exposure.
 
-_Last updated: 2026-05-08_
+_Last updated: 2026-06-01_
+
+> **NOTE:** sections below this status block predate the cTrader migration and may be stale.
+> Order execution is now via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`),
+> not the TradingView/BlackBull DOM path. TradingView (Chrome on the VM, CDP 9222) is used for
+> **chart reading only**.
+
+---
+
+## Current Operational Status (2026-06-01)
+
+**Account** — cTrader **demo** (acct 2118552): started **$10,000** (Apr 15) → peaked **$15,090** → currently **~$6,655** (net ≈ −$3,345 since April). Authoritative P&L via `pnl_reconcile.mjs` / `broker_ctrader.getAllClosedDeals()` (reconciles to the broker balance ledger).
+
+**Root cause of the drawdown** — overtrading on a negative edge. Trades/week 9 → 104 → 149; win rate 22% → 15%; weekly profit factor 7.0 → 0.46. Two blow-up days (XAGUSD −$4,949 on May 20; USDJPY −$3,856 on Apr 30) plus all-day churn gave back the +51% peak. Edge was in **selectivity**, not volume.
+
+**Scanner** — LIVE (resumed 2026-06-01 after a pause). Selectivity rebuild + operator overrides:
+
+| Param | Value | Note |
+|---|---|---|
+| scoreThreshold | 9 | selective |
+| riskPct | [5, 3.5, 2.5]% | operator override — against advice on a negative edge |
+| maxDailyTotal / maxDailyPerSymbol | 4 / 1 | per-symbol 1 kills the 25-trades-in-a-day pattern |
+| maxConcurrent | 3 | |
+| slAtrMult | 1.5 | wider stops (was 0.75) |
+| maxDailyDrawdownPct | 20 | kill-switch ≈ off given the 4-trade cap (~13.5% max daily loss) |
+
+**Blocked symbols** — XAGUSD, WTI, HK50, USDCAD, LTCUSD, ETHUSD, GER40, AUS200, NZDCHF, NZDUSD, id188, XRPUSD, EURUSD. (`id188` = an unmapped DAX/GER40 contract, price ~24.5k; the GER40→GER30 name gap routes fills to it.)
+
+**Kill-switch fixed** — the daily-drawdown halt now reads REAL cTrader P&L (`getTodayRealizedPnl()`); it previously summed `trades.csv` (mostly VOID/0) and was blind through a −9.6% day.
+
+**`scale_risk_to_goal` DISABLED** (commented out in `/home/ubuntu/run_eod_hermes.sh`) — it was cranking risk toward the **$500k-in-55-days moonshot** even on a negative edge (a root cause of blow-up risk). Risk is now operator-set and fixed. The remaining Hermes steps (eod_agent + hermes_reflect --apply) still run nightly.
+
+**ORB strategy** — dedicated time-gated runner `orb_runner.mjs` in **DRY-RUN** (logs would-be trades to `orb_signals.jsonl`, places nothing). Pairings from a 90-day isolated backtest (`orb_backtest.mjs`): **Gold@Asia, indices/AUD-NZD/JPY-cross cluster@London, AUDJPY@NY**, 2R target, SL = opposite OR boundary. Has its own allowlist — **not** gated by `blockedSymbols` (so it trades WTI@London despite the scanner block).
+
+**Automations (cron, UTC):**
+
+| When | Job | Action |
+|---|---|---|
+| 06:00 Mon–Fri | `morning_review_cron.sh` | emails edge read + tuning proposals; auto-blocks persistent bleeders (WR<30% & net<0 over 14d **and** 30d) |
+| 07:00–11:55 / 13:30–18:55 / 00:00–04:55 | `orb_runner_cron.sh` | ORB dry-run, every 5 min in session windows |
+| 20:00 & 21:45 Mon–Fri | `eod_close.mjs` | force-close all positions |
+| 20:30 Mon–Fri | `run_eod_hermes.sh` | eod_agent + hermes_reflect (scale_risk disabled) |
+| 20:35 Mon–Fri | `daily_report_cron.sh` | EOD email — **that day's trades only** (replaced the rolling-30d email) |
+| every 5 min | `scanner_freshness_check.sh` | respawns scanner if stale/dead |
+| every 5 min | `scripts/vm/watchdog.mjs` | heals dead chart tab (path fixed 2026-06-01) |
+
+**Open issues** — (1) GER40 name mapping (→ unmapped id188); (2) the `goal.json` $500k/55-day target is mathematically incompatible with capital preservation — consider steady-state (targetReturn30d 0.05).
 
 ---
 

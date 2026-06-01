@@ -778,6 +778,7 @@ export async function getAllClosedDeals(fromMs, toMs = Date.now(), { windowDays 
             symbolId:   sid,
             symbolName: (ctName && (CTRADER_NAME_REV[ctName] || ctName)) || `id${sid}`,
             execTs:     _toNum(d.executionTimestamp),
+            execPrice:  d.executionPrice,
             net,
             balance:        _toNum(cpd.balance) / scale,   // account balance AFTER this deal (cTrader ledger)
             balanceVersion: _toNum(cpd.balanceVersion),
@@ -800,6 +801,14 @@ export async function getAllClosedDeals(fromMs, toMs = Date.now(), { windowDays 
  * the cTrader ledger. This is the authoritative figure for the daily-drawdown
  * kill-switch — trades.csv P&L is unreliable (often VOID/0).
  */
+/** Resolve a raw cTrader symbolId to its name (incl. archived/delisted symbols). */
+export async function getSymbolNameById(id) {
+  await connect();
+  const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId, includeArchivedSymbols: true });
+  const hit = (res.symbol || []).find(s => Number(s.symbolId) === Number(id));
+  return hit ? { id: Number(id), name: hit.symbolName, enabled: hit.enabled, baseAssetId: hit.baseAssetId } : null;
+}
+
 export async function getTodayRealizedPnl() {
   const now = new Date();
   const startOfDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0);

@@ -134,6 +134,8 @@ Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines')
 
 The trading system runs on an Oracle Cloud VM (ubuntu@132.145.44.68). TradingView runs as Google Chrome (not Electron) managed by systemd.
 
+> **Live status:** see the **Current Operational Status** section at the top of [TRADING_SYSTEM.md](TRADING_SYSTEM.md) for up-to-date account state, params, blocks, ORB dry-run, automations, and known issues. Order execution is via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`); TradingView/CDP is chart-reading only.
+
 ### Services on the VM
 
 | Service | Purpose |
