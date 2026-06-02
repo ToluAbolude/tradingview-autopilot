@@ -281,6 +281,10 @@ export function resetCycleState() {
 // Persisted to disk so the block survives scanner restarts.
 const BROKER_BLOCK_FILE   = join(DATA_ROOT, 'broker_rejects.json');
 const BROKER_BLOCK_TTL_MS = 4 * 60 * 60 * 1000;  // 4 hours — long enough to outlast a transient session/liquidity issue
+// A symbol the broker doesn't carry on this account ("not in account symbol list")
+// is effectively permanent — block it for 30d so we stop re-attempting it every
+// scan cycle. Still auto-expires in case the account later enables the symbol.
+const BROKER_UNSUPPORTED_TTL_MS = 30 * 24 * 60 * 60 * 1000;  // 30 days
 
 function loadBrokerBlocks() {
   if (!existsSync(BROKER_BLOCK_FILE)) return {};
@@ -292,9 +296,9 @@ function saveBrokerBlocks(map) {
   try { writeFileSync(BROKER_BLOCK_FILE, JSON.stringify(map, null, 2)); } catch (_) {}
 }
 
-function blockSymbolTemporarily(symbol, reason) {
+function blockSymbolTemporarily(symbol, reason, ttlMs = BROKER_BLOCK_TTL_MS) {
   const blocks = loadBrokerBlocks();
-  blocks[symbol] = { until: Date.now() + BROKER_BLOCK_TTL_MS, reason, blockedAt: new Date().toISOString() };
+  blocks[symbol] = { until: Date.now() + ttlMs, reason, blockedAt: new Date().toISOString() };
   saveBrokerBlocks(blocks);
 }
 
@@ -619,6 +623,15 @@ export async function attemptInlineTrade(setup) {
       log(`✓ cTrader Approach B: position ${r.positionId} (${totalUnits} lots, SL=${setup.sl}) + ${r.tpOrderIds.length}/${validTps.length} TP limits placed at ${validTps.join(', ')}`);
       if (r.failedTps.length) log(`⚠ failed TP limits: ${r.failedTps.map(f => `${f.tpPrice}(${f.error})`).join('; ')}`);
     } catch (e) {
+      // Symbol not enabled on the cTrader account is a permanent condition — the
+      // TV-DOM fallback hits the same broker (and a Demo panel that can't trade it
+      // either), so it only spams "Non-tradable symbol" popups. Block the symbol
+      // and bail instead of thrashing the per-leg DOM loop.
+      if (/not in account symbol list/i.test(e.message)) {
+        blockSymbolTemporarily(setup.label, 'cTrader: symbol not in account symbol list', BROKER_UNSUPPORTED_TTL_MS);
+        log(`✗ cTrader rejects ${setup.label} (not in account symbol list) — blocked ${BROKER_UNSUPPORTED_TTL_MS / 86400000}d, skipping DOM fallback`);
+        return;
+      }
       log(`✗ cTrader Approach B failed (${e.message}) — falling back to per-leg loop`);
       // fall through to per-leg loop below
     }
