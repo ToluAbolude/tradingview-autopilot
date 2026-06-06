@@ -104,17 +104,35 @@ function sessionWindow(openUTC, now) {
 }
 
 // ── Detect the first close beyond the opening range ──────────────────────────
-function detectBreakout(bars, start, orEnd, nowMs) {
+// `bars` must include pre-session history (the runner fetches from start-4d) so
+// the EMA200 with-trend filter is meaningful.
+function detectBreakout(bars, start, orEnd, nowMs, withTrend = true) {
   const orBars = bars.filter(b => b.t >= start && b.t < orEnd);
   if (orBars.length < MIN_OR_BARS) return { status: 'or_incomplete', orBars: orBars.length };
   const orHigh = Math.max(...orBars.map(b => b.h));
   const orLow  = Math.min(...orBars.map(b => b.l));
   if (!(orHigh > orLow)) return { status: 'or_flat' };
 
-  const post = bars.filter(b => b.t >= orEnd).sort((a, b) => a.t - b.t);
-  for (const b of post) {
-    if (b.c > orHigh) return { status: 'breakout', dir: 'long',  entry: b.c, sl: orLow,  orHigh, orLow, barT: b.t };
-    if (b.c < orLow)  return { status: 'breakout', dir: 'short', entry: b.c, sl: orHigh, orHigh, orLow, barT: b.t };
+  // EMA200 over the full series for the with-trend filter — A/B-validated to lift
+  // expectancy (US30 London @2R +0.18R→+0.28R, PF 1.30→1.49). The entry must sit
+  // on the trade-direction side of the EMA.
+  const sorted = bars.slice().sort((a, b) => a.t - b.t);
+  const PERIOD = 200, k = 2 / (PERIOD + 1);
+  let ema = null; const emaAt = new Map();
+  for (const b of sorted) { ema = ema == null ? b.c : b.c * k + ema * (1 - k); emaAt.set(b.t, ema); }
+
+  for (const b of sorted) {
+    if (b.t < orEnd) continue;
+    let dir = null, sl = null;
+    if (b.c > orHigh) { dir = 'long';  sl = orLow;  }
+    else if (b.c < orLow) { dir = 'short'; sl = orHigh; }
+    else continue;
+    const emaV = emaAt.get(b.t);
+    const trendOK = !withTrend || emaV == null || (dir === 'long' ? b.c > emaV : b.c < emaV);
+    const base = { dir, entry: b.c, sl, orHigh, orLow, barT: b.t, ema: emaV == null ? null : +emaV.toFixed(5) };
+    // ORB takes only the FIRST break of the day. If it's counter-trend, skip the
+    // whole day (matches the backtest's with-trend `byRT` semantics).
+    return { status: trendOK ? 'breakout' : 'counter_trend', ...base };
   }
   return { status: 'no_breakout', orHigh, orLow };
 }
@@ -138,6 +156,33 @@ async function main() {
   let equity = 10000;
   try { const eq = await bridge.getEquity(); equity = eq.equity || eq.balance || equity; } catch (_) {}
 
+  // ── Per-day loss kill-switch ────────────────────────────────────────────────
+  // The ORB roster can fire ~9 configs/day at riskPct each with no built-in cap.
+  // Halt ALL new ORB entries for the day once today's REALISED account P&L
+  // (cTrader ledger — same source as inline_trader's drawdown halt) is down more
+  // than orbMaxDailyLossPct. Protects against a bad day without touching the
+  // per-trade risk %. Realised-only (open trades realise when their SL/TP hits);
+  // gates on whole-account daily P&L so it also catches combined ORB+scanner
+  // damage. Dry-run never trades, so the switch only matters when LIVE.
+  if (LIVE) {
+    const MAX_DAILY_LOSS_PCT = params.orbMaxDailyLossPct ?? 10;
+    try {
+      const todayPnl = await bridge.getTodayRealizedPnl();
+      const ddPct    = (todayPnl / Math.max(1, equity)) * 100;
+      if (ddPct <= -MAX_DAILY_LOSS_PCT) {
+        log(`🛑 ORB KILL-SWITCH: today realised P&L $${todayPnl.toFixed(0)} = ${ddPct.toFixed(1)}% (limit -${MAX_DAILY_LOSS_PCT}%). No more ORB entries today.`);
+        saveState(state);
+        log('═══ ORB RUNNER halted (kill-switch) ═══');
+        process.exit(0);
+      }
+      log(`Kill-switch OK: today realised ${ddPct.toFixed(1)}% (limit -${MAX_DAILY_LOSS_PCT}%).`);
+    } catch (e) {
+      // Fail-open (matches inline_trader) so a transient cTrader read hiccup
+      // doesn't silently disable ORB — but log loudly so a blind switch is visible.
+      log(`⚠ ORB kill-switch check FAILED (${e.message}) — proceeding WITHOUT it this tick`);
+    }
+  }
+
   for (const pairing of PAIRINGS) {
     const { start, orEnd, brkEnd } = sessionWindow(pairing.openUTC, now);
     // Only act once the OR has closed and we're still inside the breakout window.
@@ -149,10 +194,18 @@ async function main() {
 
       let bars;
       try {
-        bars = await bridge.getTrendbars(symbol, { period: 'M5', fromMs: start, toMs: nowMs });
+        // Fetch ~4 days of history so EMA200 (with-trend filter) is meaningful;
+        // OR/breakout detection still only uses bars at/after the session open.
+        bars = await bridge.getTrendbars(symbol, { period: 'M5', fromMs: start - 4 * 86400000, toMs: nowMs });
       } catch (e) { log(`  ${symbol} ${pairing.session}: bars error — ${e.message}`); continue; }
 
-      const r = detectBreakout(bars, start, orEnd, nowMs);
+      const withTrend = params.orbWithTrend !== false;   // default ON (A/B-validated)
+      const r = detectBreakout(bars, start, orEnd, nowMs, withTrend);
+      if (r.status === 'counter_trend') {
+        log(`  ${symbol} ${pairing.session}: first breakout ${r.dir} is counter-trend (EMA200 ${r.ema}) — skip day, mark done`);
+        state[key] = { entered: true, skipped: 'counter_trend', dir: r.dir, ema: r.ema, ts: now.toISOString() };
+        continue;
+      }
       if (r.status !== 'breakout') continue;
 
       // Don't chase a stale breakout — keep entries near the actual break.
