@@ -70,6 +70,13 @@ function backtestInstrument(rawBars, openUTC) {
   // TradingView bar timestamps are unix SECONDS — normalize to ms for Date math.
   const bars = rawBars.map(b => ({ ...b, t: b.t < 1e12 ? b.t * 1000 : b.t }));
 
+  // With-trend filter: EMA over the entry-TF close series. A breakout is
+  // "with-trend" when entry sits on the same side of the EMA as the trade
+  // direction. Attached per-bar so the live runner can compute it identically.
+  const EMA_PERIOD = 200;
+  { const k = 2 / (EMA_PERIOD + 1); let e = null;
+    for (const b of [...bars].sort((a, c) => a.t - c.t)) { e = e == null ? b.c : b.c * k + e * (1 - k); b.ema = e; } }
+
   // Group bars by UTC day
   const byDay = new Map();
   for (const b of bars) {
@@ -78,9 +85,12 @@ function backtestInstrument(rawBars, openUTC) {
     byDay.get(k).push(b);
   }
 
-  // Per R-target accumulators
-  const acc = {};
-  for (const R of R_TARGETS) acc[R] = { n: 0, w: 0, l: 0, grossWin: 0, grossLoss: 0, netR: 0 };
+  // Per R-target accumulators — acc = all breakouts, accT = with-trend only
+  const acc = {}, accT = {};
+  for (const R of R_TARGETS) {
+    acc[R]  = { n: 0, w: 0, l: 0, grossWin: 0, grossLoss: 0, netR: 0 };
+    accT[R] = { n: 0, w: 0, l: 0, grossWin: 0, grossLoss: 0, netR: 0 };
+  }
   let daysWithBreakout = 0, daysEvaluated = 0;
   const minOrBars = Math.max(2, Math.floor(ORB_DURATION_MIN / tfMin) - 1); // tolerate 1 missing
 
@@ -114,6 +124,10 @@ function backtestInstrument(rawBars, openUTC) {
     const risk  = Math.abs(entry - sl);
     if (!(risk > 0)) continue;
 
+    const trendOK = entryBar.ema == null ? true
+                  : dir === 'long' ? entry > entryBar.ema
+                  : entry < entryBar.ema;
+
     // Forward bars until hard close
     const fwd = dayBars.filter(b => b.t > entryBar.t && b.t <= holdEnd).sort((a, b) => a.t - b.t);
 
@@ -131,24 +145,23 @@ function backtestInstrument(rawBars, openUTC) {
         const last = fwd.length ? fwd[fwd.length - 1].c : entry;
         outcomeR = (dir === 'long' ? (last - entry) : (entry - last)) / risk;
       }
-      const a = acc[R];
-      a.n++; a.netR += outcomeR;
-      if (outcomeR > 0) { a.w++; a.grossWin += outcomeR; }
-      else              { a.l++; a.grossLoss += Math.abs(outcomeR); }
+      for (const a of (trendOK ? [acc[R], accT[R]] : [acc[R]])) {
+        a.n++; a.netR += outcomeR;
+        if (outcomeR > 0) { a.w++; a.grossWin += outcomeR; }
+        else              { a.l++; a.grossLoss += Math.abs(outcomeR); }
+      }
     }
   }
 
-  const out = { daysEvaluated, daysWithBreakout, byR: {} };
-  for (const R of R_TARGETS) {
-    const a = acc[R];
-    out.byR[R] = {
-      n: a.n, w: a.w, l: a.l,
-      wr:  a.n ? Math.round(a.w / a.n * 1000) / 10 : 0,
-      pf:  a.grossLoss > 0 ? Math.round(a.grossWin / a.grossLoss * 100) / 100 : (a.grossWin > 0 ? Infinity : 0),
-      netR: Math.round(a.netR * 100) / 100,
-      expR: a.n ? Math.round(a.netR / a.n * 100) / 100 : 0,   // expectancy per trade in R
-    };
-  }
+  const summ = a => ({
+    n: a.n, w: a.w, l: a.l,
+    wr:  a.n ? Math.round(a.w / a.n * 1000) / 10 : 0,
+    pf:  a.grossLoss > 0 ? Math.round(a.grossWin / a.grossLoss * 100) / 100 : (a.grossWin > 0 ? Infinity : 0),
+    netR: Math.round(a.netR * 100) / 100,
+    expR: a.n ? Math.round(a.netR / a.n * 100) / 100 : 0,   // expectancy per trade in R
+  });
+  const out = { daysEvaluated, daysWithBreakout, byR: {}, byRT: {} };
+  for (const R of R_TARGETS) { out.byR[R] = summ(acc[R]); out.byRT[R] = summ(accT[R]); }
   return out;
 }
 
@@ -228,7 +241,22 @@ async function main() {
     console.log(`  ${session.padEnd(7)} → ${top ? `${top.sym} @ ${top.bt.R}R (expR ${top.bt.expR}, wr ${top.bt.wr}%, n ${top.bt.n})` : 'no positive-edge instrument'}`);
   }
 
-  const payload = { ts: new Date().toISOString(), tf: TF, daysWindow: DAYS, orMin: ORB_DURATION_MIN, breakoutWindowH: BREAKOUT_WINDOW_H, holdUntilUTC: HOLD_UNTIL_UTC, sessions: SESSIONS, results };
+  // ── A/B: does the with-trend (EMA200) filter improve the positive configs? ──
+  console.log('\n=== WITH-TREND (EMA200) FILTER A/B — positive baseline configs (baseline n>=20), sorted by baseline expR ===');
+  console.log('  config                baseline                with-trend filter');
+  const abRows = [];
+  for (const r of results) for (const R of R_TARGETS) {
+    const b = r.byR[R];
+    if (b.n >= 20 && b.expR > 0) abRows.push({ key: `${r.sym} ${r.session} @${R}R`, b, t: r.byRT[R] });
+  }
+  abRows.sort((a, z) => z.b.expR - a.b.expR);
+  for (const { key, b, t } of abRows) {
+    const better = (t.n >= 12 && t.expR > b.expR);
+    const tag = t.n < 12 ? ' (low-n, ignore)' : better ? '  ✅ filter helps' : '  · no improvement';
+    console.log(`  ${key.padEnd(20)} expR=${String(b.expR).padStart(6)} pf=${String(b.pf).padStart(5)} n=${String(b.n).padStart(3)}  →  expR=${String(t.expR).padStart(6)} pf=${String(t.pf).padStart(5)} n=${String(t.n).padStart(3)}${tag}`);
+  }
+
+  const payload = { ts: new Date().toISOString(), tf: TF, daysWindow: DAYS, orMin: ORB_DURATION_MIN, breakoutWindowH: BREAKOUT_WINDOW_H, holdUntilUTC: HOLD_UNTIL_UTC, sessions: SESSIONS, trendFilter: 'EMA200-aligned (byRT)', results };
   writeFileSync(join(OUT_DIR, 'orb_backtest.json'), JSON.stringify(payload, null, 2));
   console.log(`\nSnapshot → ${join(OUT_DIR, 'orb_backtest.json')}`);
   process.exit(0);

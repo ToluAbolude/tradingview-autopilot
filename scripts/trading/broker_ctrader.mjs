@@ -210,6 +210,22 @@ export async function connect() {
   return _readyPromise;
 }
 
+/**
+ * Force a fresh connection. A long-lived socket can STALL — TLS stays up (no
+ * 'end'/'error' fires, so `_ready` remains true) while requests silently time
+ * out. `connect()` then returns immediately without healing it. reconnect()
+ * destroys the stale socket, resets connection state, and re-establishes.
+ * Symbol/account caches persist (account-stable). Call this on a request timeout
+ * in the placement path before retrying.
+ */
+export async function reconnect() {
+  try { _socket?.destroy(); } catch (_) {}
+  _ready = false;
+  _socket = null;
+  _readyPromise = null;
+  return connect();
+}
+
 // ── Public API (matches execute_trade.mjs surface) ──────────────────────────
 
 // Symbol metadata cache.
@@ -254,7 +270,15 @@ async function _symbolMetaFor(name) {
   await _loadSymbolList();
   const id = _symbolIdMap.get(cTraderName);
   if (id == null) throw new Error(`cTrader: symbol "${name}" (cTrader name: "${cTraderName}") not in account symbol list.`);
-  const res = await send('ProtoOASymbolByIdReq', { ctidTraderAccountId: _accountId, symbolId: [id] });
+  // Runs on the critical order-placement path. On the scanner's long-lived
+  // connection this intermittently timed out at the 10s default, cascading into
+  // the TV-DOM fallback (phantom fills / silent rejects on ADAUSD/US30/NAS100/
+  // NZDCAD). Longer timeout + retries so it resolves and CACHES once.
+  let res;
+  for (let attempt = 1; ; attempt++) {
+    try { res = await send('ProtoOASymbolByIdReq', { ctidTraderAccountId: _accountId, symbolId: [id] }, { timeoutMs: 25_000 }); break; }
+    catch (e) { if (attempt >= 3) throw e; await new Promise(r => setTimeout(r, 600 * attempt)); }
+  }
   const full = (res.symbol || [])[0];
   if (!full) throw new Error(`cTrader: ProtoOASymbolByIdReq returned no symbol for ${name} (id=${id}).`);
   const meta = {
@@ -396,7 +420,7 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
     relativeStopLoss:   slDist,
     relativeTakeProfit: tpDist,
     timeInForce: 3,                   // IMMEDIATE_OR_CANCEL
-  });
+  }, { timeoutMs: 25_000 });
   const positionId = _toNum(openRes?.position?.positionId);
   if (!positionId) throw new Error(`placeMultiTpPosition: open did not return positionId — ${JSON.stringify(openRes).slice(0,200)}`);
 
@@ -807,6 +831,36 @@ export async function getSymbolNameById(id) {
   const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId, includeArchivedSymbols: true });
   const hit = (res.symbol || []).find(s => Number(s.symbolId) === Number(id));
   return hit ? { id: Number(id), name: hit.symbolName, enabled: hit.enabled, baseAssetId: hit.baseAssetId } : null;
+}
+
+/**
+ * Read-only tradability spec for a scanner symbol name. Surfaces whether the
+ * symbol is on the account at all (`found`), its `enabled` flag, `tradingMode`
+ * (ProtoOATradingMode enum; non-zero = some restriction / CLOSE_ONLY), volume
+ * constraints, and trading-schedule interval count. Used to decide the tradable
+ * universe from the broker's own truth instead of inferring it from silent rejects.
+ */
+export async function getSymbolSpec(name) {
+  await connect();
+  const cTraderName = CTRADER_NAME_MAP[name] || name;
+  const list = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId, includeArchivedSymbols: true });
+  const light = (list.symbol || []).find(s => s.symbolName === cTraderName);
+  if (!light) return { name, cTraderName, found: false };
+  const id = Number(light.symbolId);
+  let full = {};
+  try {
+    const r = await send('ProtoOASymbolByIdReq', { ctidTraderAccountId: _accountId, symbolId: [id] });
+    full = (r.symbol || [])[0] || {};
+  } catch (e) { full = { _err: e.message }; }
+  return {
+    name, cTraderName, found: true, id,
+    enabled: light.enabled,
+    tradingMode: full.tradingMode,
+    minVolume: Number(full.minVolume || 0),
+    stepVolume: Number(full.stepVolume || 0),
+    lotSize: Number(full.lotSize || 0),
+    scheduleIntervals: (full.schedule || []).length,
+  };
 }
 
 export async function getTodayRealizedPnl() {

@@ -469,6 +469,30 @@ export async function attemptInlineTrade(setup) {
     } catch (e) { log(`${parentSym} bias check error: ${e.message} (continuing — fail-open)`); }
   }
 
+  // ── 5f. With-trend bias gate ───────────────────────────────────────────────
+  // edge_replay.mjs (2026-06-05, 481 real setups): counter-trend longs = −0.194R
+  // (PF 0.68) vs with-trend = +0.246R (PF 1.63). Reject any setup that fights the
+  // symbol's own daily bias when conviction is meaningful. Generalises the
+  // "shorts win" regime finding into "don't fade the trend". Behind a flag so it
+  // can be disabled; fail-open if the watchlist is missing/stale.
+  if (PARAMS.requireWithTrendBias) {
+    try {
+      const WL_FILE = join(DATA_ROOT, 'daily_watchlist.json');
+      if (existsSync(WL_FILE)) {
+        const wl = JSON.parse(readFileSync(WL_FILE, 'utf8'));
+        const today = new Date().toISOString().slice(0, 10);
+        if (wl.date === today && Array.isArray(wl.instruments)) {
+          const inst = wl.instruments.find(i => i.label === setup.label);
+          const minBias = PARAMS.minBiasScore ?? 4;
+          if (inst && inst.biasDir && (inst.biasScore ?? 0) >= minBias && inst.biasDir !== setup.dir) {
+            log(`Counter-trend: ${setup.label} ${setup.dir} fights daily bias ${inst.biasDir} (score ${inst.biasScore} ≥ ${minBias}). Skip.`);
+            return;
+          }
+        }
+      }
+    } catch (e) { log(`with-trend bias gate error: ${e.message} (fail-open)`); }
+  }
+
   // ── 6. Loss cooldown ───────────────────────────────────────────────────────
   const cooldowns = getRecentLossCooldowns();
   if (cooldowns.has(setup.label)) {
@@ -623,17 +647,39 @@ export async function attemptInlineTrade(setup) {
       log(`✓ cTrader Approach B: position ${r.positionId} (${totalUnits} lots, SL=${setup.sl}) + ${r.tpOrderIds.length}/${validTps.length} TP limits placed at ${validTps.join(', ')}`);
       if (r.failedTps.length) log(`⚠ failed TP limits: ${r.failedTps.map(f => `${f.tpPrice}(${f.error})`).join('; ')}`);
     } catch (e) {
-      // Symbol not enabled on the cTrader account is a permanent condition — the
-      // TV-DOM fallback hits the same broker (and a Demo panel that can't trade it
-      // either), so it only spams "Non-tradable symbol" popups. Block the symbol
-      // and bail instead of thrashing the per-leg DOM loop.
+      // Symbol not enabled on the cTrader account is a permanent condition — block + bail.
       if (/not in account symbol list/i.test(e.message)) {
         blockSymbolTemporarily(setup.label, 'cTrader: symbol not in account symbol list', BROKER_UNSUPPORTED_TTL_MS);
         log(`✗ cTrader rejects ${setup.label} (not in account symbol list) — blocked ${BROKER_UNSUPPORTED_TTL_MS / 86400000}d, skipping DOM fallback`);
         return;
       }
-      log(`✗ cTrader Approach B failed (${e.message}) — falling back to per-leg loop`);
-      // fall through to per-leg loop below
+      // Transient failure — almost always a request timeout on a stalled
+      // long-lived connection. Force a reconnect and retry ONCE. We must NOT fall
+      // through to the TV-DOM per-leg loop: on the cTrader provider it reports
+      // "placed" without actually filling (the phantom-fill / silent-reject bug
+      // that lost ~90% of orders). A clean skip is correct — the setup re-prints
+      // next scan and we retry on a healthy connection.
+      log(`⚠ cTrader placement error (${e.message}) — reconnecting + retrying once`);
+      try {
+        const bridge = await import('./broker_ctrader.mjs');
+        try { await bridge.reconnect(); } catch (re) { log(`reconnect failed: ${re.message}`); }
+        const validTps  = legs.filter(l => l.tp).map(l => l.tp);
+        const totalUnits = legLots.reduce((a, b) => a + b, 0);
+        const legUnits   = legLots.slice(0, validTps.length);
+        const r = await bridge.placeMultiTpPosition({
+          symbol: setup.label, direction: setup.dir, totalUnits, legUnits,
+          entry: setup.entry, slPrice: setup.sl, tpPrices: validTps,
+        });
+        placed = validTps.length - r.failedTps.length;
+        log(`✓ cTrader Approach B (after reconnect): position ${r.positionId} + ${r.tpOrderIds.length}/${validTps.length} TP limits`);
+        if (r.failedTps.length) log(`⚠ failed TP limits: ${r.failedTps.map(f => `${f.tpPrice}(${f.error})`).join('; ')}`);
+      } catch (e2) {
+        if (/not in account symbol list/i.test(e2.message)) {
+          blockSymbolTemporarily(setup.label, 'cTrader: symbol not in account symbol list', BROKER_UNSUPPORTED_TTL_MS);
+        }
+        log(`✗ cTrader placement failed after reconnect+retry (${e2.message}) — SKIPPING (no DOM phantom-fill).`);
+        return;
+      }
     }
   }
 

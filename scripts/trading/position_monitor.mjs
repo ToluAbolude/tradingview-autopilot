@@ -34,6 +34,7 @@ const TRADE_TIME  = args.tradeTime || null;
 const MONITOR_START_MS = Date.now();   // for cTrader deal-history filtering
 
 const USE_CTRADER = process.env.BROKER_PROVIDER === 'ctrader';
+let _ctSymbolId = null;   // cached cTrader symbolId for SYMBOL (resolved once)
 
 try { mkdirSync(join(DATA_ROOT, 'trade_log'), { recursive: true }); } catch(_) {}
 
@@ -93,6 +94,29 @@ async function getOpenPositions() {
 
 // ── Check if this monitor's symbol still has an open position ──
 async function symbolHasOpenPosition() {
+  // cTrader API is the execution venue's source of truth. The TV/BlackBull UI
+  // panel (DOM scrape) is a different surface that lags/mismatches and has been
+  // false-flagging real fills as BROKER_SILENT_REJECT. Prefer cTrader positions.
+  // Fail-safes: a read error → assume still open (never create a false VOID);
+  // an unresolvable symbol id → fall through to the legacy DOM path.
+  if (USE_CTRADER) {
+    try {
+      const bridge = await import('./broker_ctrader.mjs');
+      if (_ctSymbolId == null) {
+        const sp = await bridge.getSymbolSpec(SYMBOL);
+        _ctSymbolId = (sp && sp.found) ? sp.id : -1;
+      }
+      if (_ctSymbolId !== -1) {
+        const positions = await bridge.getPositions();
+        const mine = positions.filter(p => p.symbolId === _ctSymbolId);
+        return { found: mine.length > 0, positions: mine, all: positions };
+      }
+      // id unresolved → fall through to DOM path
+    } catch (e) {
+      log(`cTrader position check error: ${e.message} — assuming still open`);
+      return { found: true, positions: [], all: [] }; // fail-safe: no false VOID on read error
+    }
+  }
   try {
     const json = await getOpenPositions();
     const positions = JSON.parse(json || '[]');
