@@ -178,7 +178,10 @@
       "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=20 scripts/trading/orb_preview.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
       "Bash(node --check scripts/trading/morning_review.mjs)",
       "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=20 scripts/trading/morning_review.mjs scripts/trading/morning_review_cron.sh ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)",
-      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:/tmp/wl_check.mjs\" ubuntu@132.145.44.68:/tmp/wl_check.mjs)"
+      "Bash(scp -i ~/.ssh/id_rsa_oracle \"c:/tmp/wl_check.mjs\" ubuntu@132.145.44.68:/tmp/wl_check.mjs)",
+      "mcp__claude_ai_Higgsfield__video_analysis_create",
+      "Bash(node --check scripts/trading/kurisko_flag_runner.mjs)",
+      "Bash(scp -i ~/.ssh/id_rsa_oracle -o ConnectTimeout=15 scripts/trading/kurisko_flag_runner.mjs ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
