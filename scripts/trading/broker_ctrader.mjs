@@ -291,6 +291,97 @@ async function _symbolMetaFor(name) {
   return meta;
 }
 
+// ── Order safety gate ──────────────────────────────────────────────────────────
+// Every entry from every runner (inline_trader, session_runner, orb_runner,
+// kurisko_flag_runner) passes through placeOrder/placeMultiTpPosition, so this
+// is the one chokepoint that can make the historical blowup classes structurally
+// impossible (2026-04-30 USDJPY −$3.9k, 2026-05-20 XAGUSD −$4.9k, 2026-06-06
+// USDCHF −$5.7k — all: oversized lots off a collapsed SL distance, stacked
+// re-entries on a frozen chart signal, entries priced off a dead data feed).
+// Throws Error('ORDER_SAFETY_REJECT …') — callers already log placement errors.
+
+function _instrumentClass(sym) {
+  const s = String(sym).toUpperCase();
+  if (/XAU|GOLD|XAG|SILVER|COPPER/.test(s)) return 'METAL';
+  if (/WTI|USOIL|CRUDE|BRENT|UKOIL|NGAS/.test(s)) return 'OIL';
+  if (/NAS100|US30|SPX500|UK100|GER40|GER30|JP225|AUS200|HK50|EUSTX50|DAX|FTSE/.test(s)) return 'INDEX';
+  if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/.test(s)) return 'CRYPTO';
+  return 'FX';
+}
+
+const _SAFETY = {
+  // Min SL distance as a fraction of entry price. The June 6 USDCHF signal had a
+  // 1-pip SL (0.013%) off a frozen ATR, which exploded risk-based sizing to the
+  // 10-lot cap. FX floor 0.08% ≈ 6–8 pips on majors.
+  minSlFrac: { FX: 0.0008, METAL: 0.0012, OIL: 0.004, INDEX: 0.0015, CRYPTO: 0.003 },
+  // Absolute per-order lot caps — a backstop for sizing bugs, not a tuning knob.
+  // 3 FX lots = $300k notional; the old cap of 10 allowed $1M on a $7k account.
+  maxLots: { FX: 3, METAL: 2, OIL: 5, INDEX: 30, CRYPTO: 3 },
+  // Max |chart entry − live broker M1 close| as a fraction of price. The frozen
+  // TV chart on June 6 quoted 0.7958 while the real market walked away from it.
+  priceTol: { FX: 0.004, METAL: 0.01, OIL: 0.015, INDEX: 0.01, CRYPTO: 0.02 },
+  maxBarAgeMs: 30 * 60 * 1000,
+};
+
+export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false }) {
+  const cls = _instrumentClass(symbol);
+  const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
+
+  if (!Number.isFinite(slPrice) || slPrice <= 0) {
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: missing/invalid slPrice (${slPrice})`);
+  }
+
+  if (Number.isFinite(entry) && entry > 0) {
+    if (dir === 'long' && slPrice >= entry) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: long SL ${slPrice} not below entry ${entry}`);
+    }
+    if (dir === 'short' && slPrice <= entry) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: short SL ${slPrice} not above entry ${entry}`);
+    }
+    const slFrac = Math.abs(entry - slPrice) / entry;
+    if (slFrac < _SAFETY.minSlFrac[cls]) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: SL distance ${(slFrac * 100).toFixed(3)}% of price < min ${(_SAFETY.minSlFrac[cls] * 100).toFixed(2)}% for ${cls} — collapsed/stale SL`);
+    }
+  }
+
+  if (Number.isFinite(units) && units > _SAFETY.maxLots[cls]) {
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: ${units} lots > hard cap ${_SAFETY.maxLots[cls]} for ${cls}`);
+  }
+
+  // Anti-stacking: one position per symbol across ALL runners. The June 6 loop
+  // re-fired the same signal 11 times because VOID-marked attempts never hit
+  // the daily caps.
+  if (!allowStack) {
+    const openVol = await getOpenVolumeForSymbol(symbol).catch(() => 0);
+    if (openVol > 0) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: existing open volume ${openVol} — no stacking`);
+    }
+  }
+
+  // Price sanity vs the broker's own M1 bars (frozen-chart guard). Fail-open on
+  // API errors so a trendbars outage can't halt trading — the other guards above
+  // still apply.
+  if (Number.isFinite(entry) && entry > 0) {
+    try {
+      const bars = await getTrendbars(symbol, { period: 'M1', fromMs: Date.now() - 2 * 3600 * 1000 });
+      const last = bars[bars.length - 1];
+      if (last) {
+        const ageMs = Date.now() - last.t;
+        if (ageMs > _SAFETY.maxBarAgeMs) {
+          throw new Error(`ORDER_SAFETY_REJECT ${symbol}: last broker bar is ${Math.round(ageMs / 60000)}m old — market halted or feed dead`);
+        }
+        const dev = Math.abs(entry - last.c) / last.c;
+        if (dev > _SAFETY.priceTol[cls]) {
+          throw new Error(`ORDER_SAFETY_REJECT ${symbol}: chart entry ${entry} deviates ${(dev * 100).toFixed(2)}% from broker price ${last.c} — frozen chart data`);
+        }
+      }
+    } catch (e) {
+      if (/ORDER_SAFETY_REJECT/.test(e.message)) throw e;
+      console.error(`[cTrader] safety price-check skipped for ${symbol}: ${e.message}`);
+    }
+  }
+}
+
 /**
  * Place a market order.
  *   entry  = expected entry price (used to convert absolute slPrice/tpPrice
@@ -303,6 +394,7 @@ async function _symbolMetaFor(name) {
 export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice }) {
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
+  await assertOrderSafety({ symbol, direction, units, entry, slPrice });
   const meta = await _symbolMetaFor(symbol);
   const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
   // Quantize to broker step + enforce min volume
@@ -369,6 +461,7 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
   await connect();
   if (!slPrice) throw new Error('slPrice required.');
   if (!Array.isArray(tpPrices) || tpPrices.length === 0) throw new Error('tpPrices must be a non-empty array.');
+  await assertOrderSafety({ symbol, direction, units: totalUnits, entry, slPrice });
 
   const meta = await _symbolMetaFor(symbol);
   const tradeSide  = (direction === 'long' || direction === 'buy') ? 1 : 2;  // BUY | SELL

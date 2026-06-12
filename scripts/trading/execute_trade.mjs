@@ -438,6 +438,10 @@ export async function placeOrder({
       console.log(`  ✓ cTrader: ${direction.toUpperCase()} ${units} ${symbol} | TP:${tpPrice} SL:${slPrice} | positionId=${posId}`);
       return { provider: 'ctrader', positionId: posId, raw: res };
     } catch (e) {
+      // A safety rejection is a deliberate refusal, NOT a transport failure —
+      // never route around it via the TV-DOM (the DOM path reads the same
+      // frozen UI that produces the bad signals the gate exists to stop).
+      if (/ORDER_SAFETY_REJECT/.test(e.message)) throw e;
       console.error(`  ✗ cTrader placeOrder failed (${e.message}) — falling back to TV-DOM`);
       // intentional fallthrough
     }

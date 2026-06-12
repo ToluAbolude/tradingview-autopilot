@@ -117,9 +117,12 @@ function getDailySymbolCounts() {
     if (!line.trim() || !line.startsWith(todayStr)) continue;
     const cols   = line.split(',');
     const symbol = (cols[2] || '').trim();
-    const result = (cols[10] || '').trim();
-    // Only count placed trades (W or L), not VOID/?
-    if (!symbol || symbol === 'NONE' || !['W', 'L'].includes(result)) continue;
+    // Count EVERY placement attempt — W, L, VOID, and still-open (blank result).
+    // The 2026-06-06 USDCHF loop fired 11 times in one day because each attempt
+    // got marked VOID ~90s later and VOIDs never hit the caps. An attempt that
+    // reached the broker consumed real spread/slippage whether or not the
+    // monitor could match it afterwards.
+    if (!symbol || symbol === 'NONE') continue;
     counts[symbol] = (counts[symbol] || 0) + 1;
   }
   return counts;
@@ -134,8 +137,9 @@ function getDailyTotalCount() {
   for (const line of lines) {
     if (!line.trim() || !line.startsWith(todayStr)) continue;
     const cols   = line.split(',');
-    const result = (cols[10] || '').trim();
-    if (['W', 'L'].includes(result)) count++;
+    const symbol = (cols[2] || '').trim();
+    // Every attempt counts (incl. VOID and still-open) — see getDailySymbolCounts.
+    if (symbol && symbol !== 'NONE') count++;
   }
   return count;
 }
@@ -195,7 +199,13 @@ function logTrade(entry) {
 function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
   const MIN_LOT  = 0.01;
   const LOT_STEP = 0.01;
-  const MAX_LOTS = 10;
+  // Per-class hard caps (mirrors broker_ctrader assertOrderSafety). The old flat
+  // cap of 10 let a collapsed-SL signal size to $1M FX notional on a $7k account.
+  const MAX_FX     = 3;
+  const MAX_METAL  = 2;
+  const MAX_OIL    = 5;
+  const MAX_INDEX  = 10;
+  const MAX_CRYPTO = 3;
   const riskAmt  = accountEquity * (riskPct / 100);
   const slDist   = Math.abs(entryPrice - slPrice);
   if (slDist === 0) return MIN_LOT;
@@ -203,17 +213,17 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
 
   if (/XAU|GOLD/.test(sym)) {
     let lots = riskAmt / (100 * slDist);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_METAL);
   } else if (/NAS100|NAS|NDX|NQ/.test(sym) || /US30|DOW|YM/.test(sym)) {
     let lots = riskAmt / slDist;
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_INDEX);
   } else if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC/.test(sym)) {
     let lots = riskAmt / slDist;
     // Crypto risk cap at 1%
     const maxRisk = accountEquity * 0.01;
     const maxLots = Math.floor((maxRisk / slDist) / LOT_STEP) * LOT_STEP;
     lots = Math.min(lots, maxLots);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_CRYPTO);
   } else if (/WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym)) {
     // BlackBull oil: whole-integer lots only, min 1.0 per leg. We run 3 legs so
     // total must be ≥3, but the total itself can be any integer (3,4,5,…); legs
@@ -223,23 +233,23 @@ function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
     const slPips = slDist / 0.01;
     let lots = riskAmt / (10.0 * slPips);
     lots = Math.floor(lots / OIL_STEP) * OIL_STEP;
-    return Math.min(Math.max(lots, OIL_MIN_TOTAL_LOTS), MAX_LOTS);
+    return Math.min(Math.max(lots, OIL_MIN_TOTAL_LOTS), MAX_OIL);
   } else if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) {
     let lots = riskAmt / slDist;
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_INDEX);
   } else if (/JPY/.test(sym)) {
     const slPips = slDist / 0.01;
     let lots = riskAmt / (6.50 * slPips);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_FX);
   } else if (/XAG|SILVER/.test(sym)) {
     // XAGUSD: 1 lot = 5000 oz
     let lots = riskAmt / (5000 * slDist);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_METAL);
   } else {
     // Standard forex
     const slPips = slDist / 0.0001;
     let lots = riskAmt / (10.0 * slPips);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
+    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_FX);
   }
 }
 
@@ -330,6 +340,11 @@ export async function attemptInlineTrade(setup) {
   const utcMins = h * 60 + now.getUTCMinutes();
 
   if (day === 0 && h < 22) { log('Sunday market not open. Skip.'); return; }
+  // Saturday hard block — FX/CFD markets are closed; cTrader QUEUES market
+  // orders placed on Saturday and fills them at the illiquid Sunday open.
+  // The 2026-06-06 (Saturday) USDCHF signals off a frozen chart filled this way
+  // and were swept for −$5,659 at the Sunday open.
+  if (day === 6) { log('Saturday — markets closed, orders would queue to Sunday open. Skip.'); return; }
   if (h >= 20 && day !== 0) { log('Past 20:00 UTC EOD cutoff. Skip.'); return; }
   if (day !== 0 && h === 19 && now.getUTCMinutes() >= 30) { log('Past 19:30 last-entry cutoff. Skip.'); return; }
   if (day === 5 && utcMins >= 21 * 60) { log('Friday 21:00 UTC cutoff. Skip.'); return; }
@@ -528,6 +543,24 @@ export async function attemptInlineTrade(setup) {
     log(`Same-symbol+dir attempt cooldown active (${minsLeft}m left). Skip.`); return;
   }
 
+  // ── 6d. Identical-signal 24h block (frozen-data guard, persisted) ──────────
+  // A signal with the exact same entry AND SL hours later means the chart feed
+  // is frozen, not that the market revisited the level to the pip. On
+  // 2026-06-06 the same USDCHF 0.7958/0.7957 signal fired 11 times over 7h.
+  // Persisted to disk so it survives scanner restarts (the in-memory cooldown
+  // above does not).
+  const dupKey  = `${setup.label}|${setup.dir}|${setup.entry}|${setup.sl}`;
+  const dupFile = join(DATA_ROOT, 'attempted_orders.json');
+  let dupMap = {};
+  try { if (existsSync(dupFile)) dupMap = JSON.parse(readFileSync(dupFile, 'utf8')); } catch (_) {}
+  const DUP_TTL_MS = 24 * 60 * 60 * 1000;
+  for (const k of Object.keys(dupMap)) if (Date.now() - dupMap[k] > DUP_TTL_MS) delete dupMap[k];
+  if (dupMap[dupKey]) {
+    const hrsAgo = ((Date.now() - dupMap[dupKey]) / 3600000).toFixed(1);
+    log(`Identical signal (entry=${setup.entry} sl=${setup.sl}) already attempted ${hrsAgo}h ago — frozen chart data suspected. Skip.`);
+    return;
+  }
+
   // ── 7. Blocked symbols ─────────────────────────────────────────────────────
   if (PARAMS.blockedSymbols?.includes(setup.label)) {
     log(`${setup.label} is blocked by params. Skip.`); return;
@@ -599,6 +632,28 @@ export async function attemptInlineTrade(setup) {
   const sym = setup.label.toUpperCase();
   const perLegMin = /WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym) ? 1.0 : 0.01;
   const legStep   = perLegMin;
+
+  // ── Pre-submit SL sanity (also enforced broker-side in broker_ctrader's
+  // assertOrderSafety; duplicated here so the TV-DOM fallback path is covered).
+  // A collapsed SL distance (frozen ATR) explodes risk-based sizing — the
+  // 2026-06-06 USDCHF signal had a 1-pip SL → 10 lots → −$5,659.
+  const _minSlFrac =
+    /XAU|GOLD|XAG|SILVER|COPPER/.test(sym) ? 0.0012 :
+    /WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym) ? 0.004 :
+    /NAS100|US30|SPX500|UK100|GER40|JP225|AUS200|HK50|DAX|FTSE/.test(sym) ? 0.0015 :
+    /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX/.test(sym) ? 0.003 : 0.0008;
+  const _slFrac = Math.abs(setup.entry - setup.sl) / setup.entry;
+  if (!Number.isFinite(_slFrac) || _slFrac < _minSlFrac) {
+    log(`REJECT: SL distance ${(_slFrac * 100).toFixed(3)}% of price < min ${(_minSlFrac * 100).toFixed(2)}% — collapsed/stale SL, sizing would explode. Skip.`);
+    return;
+  }
+
+  // Record this exact signal so an identical re-fire is refused for 24h (6d).
+  try {
+    dupMap[dupKey] = Date.now();
+    writeFileSync(dupFile, JSON.stringify(dupMap, null, 2));
+  } catch (e) { log(`attempted_orders.json write failed: ${e.message}`); }
+
   const totalLots = calcLots(setup.label, riskPct, equity, setup.entry, setup.sl);
   // Split into 3 legs; for oil this may be uneven (e.g. 5 → [1,2,2]).
   // If 3 legs at minLeg won't fit (shouldn't happen — calcLots enforces ≥ 3 for oil

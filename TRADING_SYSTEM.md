@@ -14,24 +14,27 @@ _Last updated: 2026-06-01_
 
 ---
 
-## Current Operational Status (2026-06-01)
+## Current Operational Status (2026-06-11)
 
-**Account** — cTrader **demo** (acct 2118552): started **$10,000** (Apr 15) → peaked **$15,090** → currently **~$6,655** (net ≈ −$3,345 since April). Authoritative P&L via `pnl_reconcile.mjs` / `broker_ctrader.getAllClosedDeals()` (reconciles to the broker balance ledger).
+**Account** — cTrader **demo** (acct 2118552): started **$10,000** (Apr 15) → peaked **$15,090** → currently **~$1,074** (net ≈ −$8,900). Authoritative P&L via `pnl_reconcile.mjs` / `broker_ctrader.getAllClosedDeals()`. **Recommend resetting the demo balance to $10k** — at $1k, min-lot granularity distorts sizing stats.
 
-**Root cause of the drawdown** — overtrading on a negative edge. Trades/week 9 → 104 → 149; win rate 22% → 15%; weekly profit factor 7.0 → 0.46. Two blow-up days (XAGUSD −$4,949 on May 20; USDJPY −$3,856 on Apr 30) plus all-day churn gave back the +51% peak. Edge was in **selectivity**, not volume.
+**Loss anatomy** — three execution-bug blowups account for −$14.5k of the −$8.9k net (the system is profitable without them): USDJPY −$3,856 (Apr 30), XAGUSD −$4,949 (May 20), **USDCHF −$5,659 (Jun 6–7)**. The June 6 chain: chart feed froze on a **Saturday** (no Saturday gate existed) → same stale signal fired 11×, 1-pip SL → 10-lot sizing → every attempt marked VOID (caps only counted W/L, so the loop never tripped them) → cTrader queued the orders into the **Sunday open**, where the 1-pip SLs were swept with 10-lot slippage. The signal layer itself (Jun 8–11, small size) is roughly breakeven.
 
-**Scanner** — LIVE (resumed 2026-06-01 after a pause). Selectivity rebuild + operator overrides:
+**2026-06-11 safety rebuild (deployed):**
 
-| Param | Value | Note |
-|---|---|---|
-| scoreThreshold | 9 | selective |
-| riskPct | [5, 3.5, 2.5]% | operator override — against advice on a negative edge |
-| maxDailyTotal / maxDailyPerSymbol | 4 / 1 | per-symbol 1 kills the 25-trades-in-a-day pattern |
-| maxConcurrent | 3 | |
-| slAtrMult | 1.5 | wider stops (was 0.75) |
-| maxDailyDrawdownPct | 20 | kill-switch ≈ off given the 4-trade cap (~13.5% max daily loss) |
+| Layer | Guard |
+|---|---|
+| `broker_ctrader.assertOrderSafety()` (all runners) | SL required + correct side; min SL distance by class (FX 0.08%); per-class lot caps (FX 3, was 10); anti-stacking (no new order while symbol has open volume); price-sanity vs live broker M1 bars (rejects frozen-chart entries deviating >0.4% FX, and any market with bars >30 min old) |
+| `inline_trader` | EVERY attempt (incl. VOID/open) counts toward daily caps; 24h identical-signal block (persisted `attempted_orders.json`); pre-submit SL-distance check (covers TV-DOM path); **Saturday hard block**; per-class lot caps in `calcLots` |
+| `execute_trade` | ORDER_SAFETY_REJECT is never routed around via the TV-DOM fallback |
+| `eod_close` | cTrader-API-first close with **verify-flat + 3 retries + CRITICAL log**; new `eod_close_cron.sh` (sources creds); **Saturday 00:30 UTC `--weekend-check` backstop cron** |
+| `naked_guard_cron.sh` | `timeout -k 15 110` (777 hung guard processes were strangling the VM on Jun 11 — killed) |
 
-**Blocked symbols** — XAGUSD, WTI, HK50, USDCAD, LTCUSD, ETHUSD, GER40, AUS200, NZDCHF, NZDUSD, id188, XRPUSD, EURUSD. (`id188` = an unmapped DAX/GER40 contract, price ~24.5k; the GER40→GER30 name gap routes fills to it.)
+**Scanner** — LIVE, params v21: scoreThreshold 11, requireWithTrendBias, sessions **NY + LONDON-NY-OVERLAP only** (overlap re-enabled 2026-06-11; hermes had blocked it off stats poisoned by the USDCHF bug trades), riskPct [5, 3.5, 2.5] (operator), maxDailyTotal/PerSymbol 4/1, **maxDailyDrawdownPct 6 (kill-switch armed; was 20 ≈ off)**.
+
+**Edge (validated)** — `edge_replay.mjs` + cTrader ledger + FundedNext 17k-trader study all converge: **BTCUSD (+$5.5k lifetime, the only consistent winner) and indices, NY/overlap, with-trend, score ≥ 11, few trades**. Longs/London/Asian/metals/FX-majors bleed. 1-minute scalping rejected (spread cost ≈ 24% of a 5-pip target). Next evidence-backed upgrade: relative-volume ("in play") filter on the ORB runner, per Zarattini/Barbon/Aziz.
+
+**Blocked symbols** — XAGUSD, WTI, HK50, USDCAD, LTCUSD, ETHUSD, GER40, AUS200, NZDCHF, NZDUSD, id188, XRPUSD, EURUSD, COPPER, BRENT, DOTUSD, SOLUSD, AVAXUSD, USDCHF, NZDCAD, AUDJPY, **USDJPY, GBPUSD, AUDUSD** (added 2026-06-11). (`id188` = an unmapped DAX/GER40 contract; the GER40→GER30 name gap routes fills to it.)
 
 **Kill-switch fixed** — the daily-drawdown halt now reads REAL cTrader P&L (`getTodayRealizedPnl()`); it previously summed `trades.csv` (mostly VOID/0) and was blind through a −9.6% day.
 

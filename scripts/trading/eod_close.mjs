@@ -34,9 +34,13 @@ function log(msg) {
 
 log('═══ EOD CLOSE — day-trade enforcer ═══');
 
-// Only run on weekdays
+// --weekend-check: Saturday-morning backstop pass that flattens anything that
+// survived Friday (positions held over a weekend gap cost −$5,659 on 2026-06-07).
+const WEEKEND_CHECK = process.argv.includes('--weekend-check');
+
+// Only run on weekdays (unless this is the weekend backstop pass)
 const dayOfWeek = now.getUTCDay();
-if (dayOfWeek === 0 || dayOfWeek === 6) {
+if ((dayOfWeek === 0 || dayOfWeek === 6) && !WEEKEND_CHECK) {
   log('Weekend — skipping');
   process.exit(0);
 }
@@ -132,7 +136,46 @@ async function attemptClose() {
   return { clicked, confirmed };
 }
 
-// ── Main ──
+// ── cTrader API path (source of truth) ─────────────────────────────────────────
+// The TV-DOM path below clicks buttons in a UI that can freeze or lag the
+// broker. When cTrader credentials are available, close via the API and VERIFY
+// the account is actually flat — retrying and logging CRITICAL if not.
+async function ctraderFlatten() {
+  const bridge = await import('./broker_ctrader.mjs');
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const positions = await bridge.getPositions();
+    if (positions.length === 0) {
+      log(attempt === 1 ? 'cTrader: account is flat — nothing to close.' : `✓ cTrader verified flat (attempt ${attempt}).`);
+      return true;
+    }
+    log(`cTrader: ${positions.length} open position(s) — closing (attempt ${attempt})…`);
+    try { await bridge.closeAllPositions(); } catch (e) { log(`  closeAllPositions error: ${e.message}`); }
+    await sleep(4000);
+  }
+  const remaining = await bridge.getPositions().catch(() => null);
+  if (remaining && remaining.length > 0) {
+    log(`✗ CRITICAL NOT FLAT: ${remaining.length} position(s) still open after 3 cTrader close attempts — overnight/weekend gap risk! ` +
+        JSON.stringify(remaining.map(p => ({ id: p.positionId, symbolId: p.symbolId, vol: p.volumeCents, dir: p.direction }))));
+    return false;
+  }
+  log('✓ cTrader verified flat.');
+  return true;
+}
+
+let ctraderDone = false;
+try {
+  await ctraderFlatten();
+  ctraderDone = true;
+} catch (e) {
+  log(`cTrader path unavailable (${e.message}) — falling back to TV-DOM close.`);
+}
+if (ctraderDone) {
+  log('═══ EOD CLOSE done ═══');
+  try { (await getClient()).close(); } catch (_) {}
+  process.exit(0);
+}
+
+// ── Main (TV-DOM fallback) ──
 const eqBefore = await getEquity().catch(() => ({}));
 log(`Before: equity=${eqBefore.equity} balance=${eqBefore.balance} float=${eqBefore.unrealisedPnl}`);
 
@@ -181,3 +224,4 @@ if (!open) {
 
 log('═══ EOD CLOSE done ═══');
 try { (await getClient()).close(); } catch(_) {}
+process.exit(0);
