@@ -1,0 +1,104 @@
+#cloud-config
+# =============================================================================
+#  TradingMCP — AWS EC2 Cloud-Init (LIGHTWEIGHT, cTrader-only, NO Chrome)
+#  Ubuntu 22.04/24.04 LTS · t3.micro (free tier, 1 GB) is enough for this.
+#
+#  PASTE THIS into:
+#    AWS Console → EC2 → Launch instance → Advanced details → User data
+#  (or:  aws ec2 run-instances ... --user-data file://aws-cloud-init.yaml)
+#
+#  WHAT THIS RUNS (a complete cTrader trading daemon, all on the isolated demo
+#  account 2131377 — and what it deliberately does NOT):
+#    ✓ Node.js 20 + the repo + a 2 GB swap file (vital on a 1 GB box)
+#    ✓ confirm_runner       every 5m   — 4 per-strategy combos, demo brackets
+#    ✓ confirm_naked_guard  every 5m   — close any position missing SL/TP
+#    ✓ confirm_eod_close    Fri/wknd   — flatten before/over the weekend
+#    ✓ confirm_report       21:30 UTC  — per-strategy R table (data/confirm_results.md)
+#    ✗ NO Chromium / Xvfb / VNC — the TradingView CDP scanner is NOT migrated
+#      here (it needs ~2-4 GB RAM; keep that on your local PC, or use a paid
+#      t3.small/medium if you truly need it on the cloud).
+#    ✗ NO old trading runners (session_runner/orb/leap/decision) — they'd place
+#      other trades and pollute the per-strategy attribution.
+#
+#  TWO MANUAL STEPS AFTER FIRST BOOT (secrets are never put in user-data):
+#    1. Create /home/ubuntu/.ctrader_confirm.env with your cTrader creds
+#       (CTRADER_ACCOUNT_ID=2131377, CTRADER_ENV=demo — see template at bottom).
+#    2. cd ~/tradingview-autopilot && npm install
+#    Then it trades on the next 5-min tick. Dry-run first by removing --live
+#    from /home/ubuntu/run_confirm.sh.
+# =============================================================================
+
+timezone: Europe/London
+package_update: true
+package_upgrade: false
+
+packages:
+  - curl
+  - git
+  - build-essential        # for any native npm deps (protobufjs has prebuilds, but safe)
+  - ca-certificates
+
+write_files:
+  # Generic job wrapper the crons call — sources the isolated demo creds, then
+  # runs any scripts/trading/<script> with args. Keeps every job on the SAME
+  # dedicated account/env, isolated from anything else.
+  #   usage: run_confirm_job.sh <script.mjs> [args...]
+  - path: /home/ubuntu/run_confirm_job.sh
+    owner: ubuntu:ubuntu
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      ENV_FILE="/home/ubuntu/.ctrader_confirm.env"
+      [ -f "$ENV_FILE" ] || { echo "$(date -u +%FT%TZ) missing $ENV_FILE — skipping"; exit 0; }
+      set -a; . "$ENV_FILE"; set +a
+      cd /home/ubuntu/tradingview-autopilot || exit 1
+      SCRIPT="$1"; shift
+      exec /usr/bin/node "scripts/trading/$SCRIPT" "$@"
+
+runcmd:
+  # --- 2 GB swap (a 1 GB instance will OOM Node under load without this) ---
+  - [ bash, -c, "fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab" ]
+
+  # --- Node.js 20 (NodeSource) ---
+  - [ bash, -c, "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs" ]
+
+  # --- Project dirs ---
+  - [ bash, -c, "mkdir -p /home/ubuntu/trading-data && chown -R ubuntu:ubuntu /home/ubuntu/trading-data" ]
+
+  # --- Clone the repo (PUBLIC clone shown; for a PRIVATE repo, scp it from your
+  #     PC instead:  scp -r ./tradingview-mcp-jackson ubuntu@<ip>:~/tradingview-autopilot ) ---
+  - [ bash, -c, "sudo -u ubuntu git clone https://github.com/ToluAbolude/tradingview-autopilot.git /home/ubuntu/tradingview-autopilot || echo 'clone failed (private repo? scp it instead)'" ]
+
+  # --- npm install (best-effort here; re-run by hand if it needs creds/network) ---
+  - [ bash, -c, "cd /home/ubuntu/tradingview-autopilot && sudo -u ubuntu npm install --omit=dev || true" ]
+
+  # --- Install the confirm-daemon crons for user ubuntu (idempotent) ---
+  #   runner   every 5m            : evaluate 4 combos, place demo brackets
+  #   naked    every 5m (staggered): close any position missing SL/TP
+  #   eod      every 30m Fri/Sat/Sun: flatten before/over the weekend
+  #   report   weekdays 21:30 UTC  : per-strategy R table
+  - [ bash, -c, "W=/home/ubuntu/run_confirm_job.sh; L=/home/ubuntu/trading-data; ( sudo -u ubuntu crontab -l 2>/dev/null | grep -v run_confirm_job.sh ; printf '%s\\n' \"*/5 * * * * $W confirm_runner.mjs --live >> $L/confirm.log 2>&1\" \"2-59/5 * * * * $W confirm_naked_guard.mjs >> $L/naked.log 2>&1\" \"*/30 * * * 5,6,0 $W confirm_eod_close.mjs >> $L/eod.log 2>&1\" \"30 21 * * 1-5 $W confirm_report.mjs --days 30 >> $L/report.log 2>&1\" ) | sudo -u ubuntu crontab -" ]
+
+  - [ bash, -c, "echo 'AWS cloud-init done. Next: create ~/.ctrader_confirm.env, then npm install.' > /home/ubuntu/SETUP_NEXT.txt && chown ubuntu:ubuntu /home/ubuntu/SETUP_NEXT.txt" ]
+
+final_message: |
+  TradingMCP (cTrader daemon) ready in $UPTIME s.
+  TODO on the box:
+    1) nano ~/.ctrader_confirm.env   # creds, CTRADER_ACCOUNT_ID=2131377, CTRADER_ENV=demo
+    2) cd ~/tradingview-autopilot && npm install
+    3) Sanity check (dry-run, no order):
+       set -a; . ~/.ctrader_confirm.env; set +a; node scripts/trading/confirm_runner.mjs
+  Crons: runner+naked every 5m, eod Fri/wknd, report 21:30 UTC.
+  Tail:  tail -f ~/trading-data/confirm.log
+  Report: cat ~/trading-data/confirm_results.md
+
+# -----------------------------------------------------------------------------
+#  ~/.ctrader_confirm.env TEMPLATE (create by hand after boot — DO NOT commit):
+#    CTRADER_CLIENT_ID=<same as before>
+#    CTRADER_CLIENT_SECRET=<same as before>
+#    CTRADER_ACCESS_TOKEN=<new token that grants 2131377>
+#    CTRADER_REFRESH_TOKEN=<new refresh token>
+#    CTRADER_ACCOUNT_ID=2131377
+#    CTRADER_ENV=demo
+#    BROKER_PROVIDER=ctrader
+# -----------------------------------------------------------------------------

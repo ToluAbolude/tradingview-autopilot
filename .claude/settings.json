@@ -189,7 +189,13 @@
       "PowerShell(Get-Process *)",
       "PowerShell(Select-String *)",
       "PowerShell(Get-Content *)",
-      "PowerShell(Test-NetConnection *)"
+      "PowerShell(Test-NetConnection *)",
+      "Bash(nlm setup *)",
+      "Bash(nlm login *)",
+      "Bash(nlm doctor *)",
+      "Bash(python -c ' *)",
+      "Bash(graphify update *)",
+      "Bash(graphify query *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
@@ -199,7 +205,9 @@
       "C:\\Users\\Tda-d\\strategy-lab\\src\\data",
       "C:\\Users\\Tda-d\\strategy-lab\\tests",
       "C:\\Users\\Tda-d\\strategy-lab\\src\\strategies",
-      "C:\\Users\\Tda-d\\strategy-lab\\scripts"
+      "C:\\Users\\Tda-d\\strategy-lab\\scripts",
+      "C:\\Users\\Tda-d\\tradingview-mcp-jackson\\graphify-out",
+      "c:\\Users\\Tda-d\\.claude\\projects\\c--Users-Tda-d-tradingview-mcp-jackson\\memory"
     ]
   }
 }

@@ -743,6 +743,26 @@ export async function getEquity() {
   };
 }
 
+/** List every trading account the current access token grants (demo + live). */
+export async function listAccounts() {
+  await connect();
+  const res = await send('ProtoOAGetAccountListByAccessTokenReq', { accessToken: process.env.CTRADER_ACCESS_TOKEN });
+  return (res?.ctidTraderAccount || []).map(a => ({
+    traderLogin:         Number(a.traderLogin),
+    ctidTraderAccountId: Number(a.ctidTraderAccountId),
+    isLive:              !!a.isLive,
+  }));
+}
+
+/** Balance for a specific granted account (auths it, reads ProtoOATrader). */
+export async function getAccountBalance(ctidTraderAccountId) {
+  await connect();
+  await send('ProtoOAAccountAuthReq', { ctidTraderAccountId, accessToken: process.env.CTRADER_ACCESS_TOKEN });
+  const res = await send('ProtoOATraderReq', { ctidTraderAccountId });
+  const t = res.trader || {};
+  return { balance: Number(t.balance || 0) / 100, depositAssetId: t.depositAssetId };
+}
+
 /**
  * Sum REAL net PnL of all closing deals for `symbolName` since `fromMs` (unix ms).
  * grossProfit/commission/swap are int64 cents; if `moneyDigits` is set on the

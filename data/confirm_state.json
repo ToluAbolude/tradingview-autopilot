@@ -1,0 +1,18 @@
+{
+  "orb:NZDCAD:1781901900000": {
+    "t": 1781901900000,
+    "evaluated": true
+  },
+  "wor_break_retest:GBPJPY:1781901900000": {
+    "t": 1781901900000,
+    "evaluated": true
+  },
+  "jooviers_smarttrail_scalper:US30:1781887500000": {
+    "t": 1781887500000,
+    "evaluated": true
+  },
+  "jackson_gold:XAUUSD:1781888400000": {
+    "t": 1781888400000,
+    "evaluated": true
+  }
+}
