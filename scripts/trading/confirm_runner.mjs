@@ -6,11 +6,11 @@
  * fires its own trade whenever its own criteria are met, so we can attribute the
  * live (demo) result back to a single strategy and rank them honestly.
  *
- * Combos (from the strategy-lab 90d matrix, 2026-06-15):
- *   orb                         / NZDCAD / M15   (n=103 PF1.81 +27.3R)
- *   wor_break_retest            / GBPJPY / M15   (n=96  PF1.47 +23.1R)
- *   jooviers_smarttrail_scalper / US30   / M15   (n=56  PF1.73 +12.8R)
- *   jackson_gold                / XAUUSD / M15   (n=51  PF1.80 +11.8R)
+ * Combos — 1h (H1) set (best 1h combos from the strategy-lab 90d matrix):
+ *   wor_break_retest    / AUDUSD / H1   (PF2.53 n=25)
+ *   jackson_gold        / XAUUSD / H1   (PF2.19 WR75%)
+ *   amd_ote             / GBPUSD / H1   (PF1.71 n=43)
+ *   confluence_trifecta / EURUSD / H1   (PF1.87 n=37)
  *
  * Each tick (cron, every 5 min): for each combo, pull M15 bars, run the strategy's
  * pure generateSignals(); if a signal printed on the LAST CLOSED bar and we have
@@ -58,20 +58,24 @@ const LIVE             = process.argv.includes('--live');   // default: dry-run
 const CONFIRM_RISK_PCT = Number(process.env.CONFIRM_RISK_PCT || 0.25);
 const TARGET_R         = 2;
 
-// ── The combos under test (each is an INDEPENDENT per-strategy trade) ────────
+// ── The combos under test (each is an INDEPENDENT per-strategy trade) ─────────
+// 1h (H1) set — switched from 15m for less noise (2026-06). ORB + the smarttrail
+// scalper were dropped: both are intraday-only (5m/15m) and can't run at 1h, so
+// they were replaced by the strongest 1h strategies from the 90d backtest
+// (amd_ote/GBPUSD PF1.71, confluence_trifecta/EURUSD PF1.87). wor + jackson kept.
 const COMBOS = [
-  { strategy: 'orb',                         symbol: 'NZDCAD', tf: '15' },
-  { strategy: 'wor_break_retest',            symbol: 'GBPJPY', tf: '15' },
-  { strategy: 'jooviers_smarttrail_scalper', symbol: 'US30',   tf: '15' },
-  { strategy: 'jackson_gold',                symbol: 'XAUUSD', tf: '15' },
+  { strategy: 'wor_break_retest',    symbol: 'AUDUSD', tf: '60' },   // PF2.53 n=25
+  { strategy: 'jackson_gold',        symbol: 'XAUUSD', tf: '60' },   // PF2.19 WR75%
+  { strategy: 'amd_ote',             symbol: 'GBPUSD', tf: '60' },   // PF1.71 n=43
+  { strategy: 'confluence_trifecta', symbol: 'EURUSD', tf: '60' },   // PF1.87 n=37
 ];
 
-// Minimal instrument metadata (mirrors strategy-lab/config/instruments.json for
-// just these symbols) — jooviers reads ctx.instrument; others read ctx.sessions.
+// Minimal instrument metadata (only confluence/jooviers read ctx.instrument;
+// the current 4 read ctx.params only, but keep this correct for completeness).
 const INSTRUMENTS = {
-  NZDCAD: { symbol: 'NZDCAD', class: 'fx_cross' },
-  GBPJPY: { symbol: 'GBPJPY', class: 'fx_cross' },
-  US30:   { symbol: 'US30',   class: 'index', aliases: ['US30', 'DJ30', 'US Wall Street 30'] },
+  AUDUSD: { symbol: 'AUDUSD', class: 'fx' },
+  GBPUSD: { symbol: 'GBPUSD', class: 'fx' },
+  EURUSD: { symbol: 'EURUSD', class: 'fx' },
   XAUUSD: { symbol: 'XAUUSD', class: 'metal', aliases: ['XAUUSD', 'GOLD'] },
 };
 const SESSIONS = { ASIA: '00:00', LONDON: '07:00', NY: '13:30' };

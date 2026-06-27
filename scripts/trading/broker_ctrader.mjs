@@ -688,6 +688,7 @@ export async function getPositions() {
     takeProfit:  p.takeProfit,
     swap:        _toNum(p.swap),
     commission:  _toNum(p.commission),
+    openTimestamp: _toNum(p.tradeData?.openTimestamp),   // unix ms — for anchoring the chart screenshot at the real entry candle
   }));
 }
 
