@@ -161,7 +161,6 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 - `scripts/vm/proxy_tunnel.ps1` — Starts SSH reverse SOCKS5 proxy (VM port 1080 → home IP). Only needed during BlackBull reconnection.
 - `scripts/vm/reconnect_blackbull.ps1` — Full automated reconnect script (starts tunnel, clicks Connect, closes tunnel)
 - `scripts/vm/sync_cookies.mjs` — Extracts cookies from local Chrome (port 9223) and injects into VM Chrome (port 9222)
-- `scripts/vm/watchdog.mjs` — Runs every 5 min via cron; checks TradingView + BlackBull are alive, heals if not
 
 ### SSH access
 

@@ -123,7 +123,7 @@ strategies** (the strategy pages, and each linked PDF added as extracted text). 
 | 20:30 Mon–Fri | `run_eod_hermes.sh` | eod_agent + hermes_reflect (scale_risk disabled) |
 | 20:35 Mon–Fri | `daily_report_cron.sh` | EOD email — **that day's trades only** (replaced the rolling-30d email) |
 | every 5 min | `scanner_freshness_check.sh` | respawns scanner if stale/dead |
-| every 5 min | `scripts/vm/watchdog.mjs` | heals dead chart tab (path fixed 2026-06-01) |
+| every 5 min | `cdp_watchdog.sh` | restarts tv_browser after 3 consecutive CDP failures (heals dead chart tab) |
 
 **Open issues** — (1) GER40 name mapping (→ unmapped id188); (2) the `goal.json` $500k/55-day target is mathematically incompatible with capital preservation — consider steady-state (targetReturn30d 0.05).
 
@@ -166,7 +166,7 @@ Oracle Cloud VM (ubuntu@145.241.220.213)
 |----------|------|--------|---------|
 | `*/15` | Mon–Fri | `session_runner.mjs` | Main scan cycle |
 | `*/15 22-23` | Sun | `session_runner.mjs` | Forex Sunday open (Asian session) |
-| `*/5` | Daily | `scripts/vm/watchdog.mjs` | Keep TradingView + BlackBull alive |
+| `*/5` | Daily | `cdp_watchdog.sh` | Restart tv_browser after 3 consecutive CDP failures |
 | 09:00 | Mon–Fri | `run_jobs.sh` | Job pipeline |
 | 20:00 | Mon–Fri | `eod_close.mjs` | EOD force-close (first pass) |
 | 20:30 | Mon–Fri | `review_params.mjs` | Daily parameter review |
