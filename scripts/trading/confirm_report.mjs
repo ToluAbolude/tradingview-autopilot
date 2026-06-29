@@ -21,17 +21,20 @@ const OUT_MD      = join(DATA_ROOT, 'confirm_results.md');
 const DAYS = Number((process.argv.find(a => a.startsWith('--days=')) || '').split('=')[1]
   || (process.argv.includes('--days') ? process.argv[process.argv.indexOf('--days') + 1] : '') || 30);
 
-// Only count trades AFTER the fixes (1h combos + placement-bug fix). The earlier
-// week was the immediate-close bug — not a valid test. Same cutoff as the weekly review.
-const EXP_START = Date.parse(process.env.EXPERIMENT_START || '2026-06-27T00:00:00Z');
+// Only count trades that actually ran as a valid 2R test. `bracketed === true` means
+// SL+TP genuinely attached. Every trade before 2026-06-29 opened NAKED and was
+// force-closed (scratch — the bracket-attach bug, fixed 2026-06-29), so it is NOT a
+// test of the strategy and must be excluded. The date is a backstop; the flag is the
+// real gate. Same rule as the weekly review.
+const EXP_START = Date.parse(process.env.EXPERIMENT_START || '2026-06-29T00:00:00Z');
 function loadPlaced() {
   if (!existsSync(SIGNALS_LOG)) return [];
   return readFileSync(SIGNALS_LOG, 'utf8').trim().split('\n').filter(Boolean)
     .map(l => { try { return JSON.parse(l); } catch { return null; } })
-    // A captured positionId means the order opened — attribute by that, NOT the
-    // `placed` flag (early versions set placed=false when the SL/TP amend hadn't
-    // settled within the naked-check window even though the trade ran fine).
-    .filter(r => r && r.mode === 'live-demo' && r.positionId && Date.parse(r.ts) >= EXP_START);
+    // A positionId alone is NOT enough — the naked-closed scratch trades also got one.
+    // Require bracketed === true: the order opened AND had both SL+TP attached, so it
+    // ran as a real -1R/+2R bracket. Anything else is the bug, not a sample.
+    .filter(r => r && r.mode === 'live-demo' && r.positionId && r.bracketed === true && Date.parse(r.ts) >= EXP_START);
 }
 
 async function main() {

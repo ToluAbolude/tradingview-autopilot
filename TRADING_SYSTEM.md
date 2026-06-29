@@ -70,8 +70,19 @@ Every trade on **both** accounts is auto-logged to a Notion DB with an annotated
   Cron every 10 min per account via `run_notion_sync.sh <ctrader_env>`.
 - **Phase 2 — Friday review (`confirm_weekly_review.mjs`):** Fri 21:00 UTC; writes a Notion
   page with each strategy's stats and a **PASS ✅ / WATCH 🟡 / CUT ❌** verdict (the pass rule
-  above). Counts only trades after the **2026-06-27** cutoff (excludes the earlier
-  placement-bug week). Cron via `run_notion_job.sh .ctrader_confirm.env confirm_weekly_review.mjs`.
+  above). Counts only trades with **`bracketed === true`** (a genuine SL+TP'd 2R sample), with a
+  date backstop of **2026-06-29**. Same filter in `confirm_report.mjs`. Cron via
+  `run_notion_job.sh .ctrader_confirm.env confirm_weekly_review.mjs`.
+
+  > **Bracket-attach bug (fixed 2026-06-29).** Every confirm trade before 2026-06-29 (0/6
+  > lifetime) opened **naked** and was force-closed ~8–10s later by the never-naked guard —
+  > pure scratch trades, not a test of any strategy. Root cause: `broker_ctrader.placeOrder`
+  > fired the SL/TP amend immediately after the open, while the position was still settling, so
+  > cTrader silently no-op'd it; a single stale-socket reconcile then made the readback show
+  > naked. Fix: `placeOrder` now polls-and-verifies the bracket via `getPositions()` (retrying,
+  > with a one-shot `reconnect()` on a stale-socket miss). The earlier "fixed before 2026-06-27"
+  > note was wrong. The forward-test has **no valid samples before 2026-06-29** — don't trust any
+  > per-strategy verdict until fresh bracketed trades accumulate.
 - **Phase 3 — past-trade reference (`confirm_reference.mjs`):** each new trade card carries a
   "📌 Past on <SYMBOL>" section — prior trades, win rate, per-direction breakdown, and a
   plain-English takeaway — pulled from the journal so each entry is informed by history.
