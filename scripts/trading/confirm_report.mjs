@@ -21,6 +21,9 @@ const OUT_MD      = join(DATA_ROOT, 'confirm_results.md');
 const DAYS = Number((process.argv.find(a => a.startsWith('--days=')) || '').split('=')[1]
   || (process.argv.includes('--days') ? process.argv[process.argv.indexOf('--days') + 1] : '') || 30);
 
+// Only count trades AFTER the fixes (1h combos + placement-bug fix). The earlier
+// week was the immediate-close bug — not a valid test. Same cutoff as the weekly review.
+const EXP_START = Date.parse(process.env.EXPERIMENT_START || '2026-06-27T00:00:00Z');
 function loadPlaced() {
   if (!existsSync(SIGNALS_LOG)) return [];
   return readFileSync(SIGNALS_LOG, 'utf8').trim().split('\n').filter(Boolean)
@@ -28,7 +31,7 @@ function loadPlaced() {
     // A captured positionId means the order opened — attribute by that, NOT the
     // `placed` flag (early versions set placed=false when the SL/TP amend hadn't
     // settled within the naked-check window even though the trade ran fine).
-    .filter(r => r && r.mode === 'live-demo' && r.positionId);
+    .filter(r => r && r.mode === 'live-demo' && r.positionId && Date.parse(r.ts) >= EXP_START);
 }
 
 async function main() {

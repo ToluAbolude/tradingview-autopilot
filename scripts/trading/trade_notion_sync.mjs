@@ -18,6 +18,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import os from 'os';
+import { referenceForSymbol } from './confirm_reference.mjs';   // Phase 3: past-trade reference
 
 const IS_LINUX  = os.platform() === 'linux';
 const DATA_ROOT = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
@@ -71,9 +72,18 @@ async function createTradePage(t, uploadId) {
     "Position ID": { rich_text: [{ text: { content: String(t.positionId) } }] },
   };
   if (uploadId) props["Screenshot"] = { files: [{ type: "file_upload", name: "trade.png", file_upload: { id: uploadId } }] };
+  // Phase 3: surface this instrument's past trades in the new trade's body ("what worked").
+  let children = [];
+  try {
+    const ref = await referenceForSymbol(t.symbol);
+    if (ref?.lines?.length) {
+      children = ref.lines.map(l => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ text: { content: l.slice(0, 1900) } }] } }));
+      if (ref.takeaway) log(`📌 ${t.symbol} ref: ${ref.takeaway}`);
+    }
+  } catch (e) { log(`ref lookup failed ${t.symbol}: ${e.message}`); }
   const r = await nfetch('https://api.notion.com/v1/pages', { method: 'POST',
     headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NV, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ parent: { database_id: NOTION_DB }, properties: props }) });
+    body: JSON.stringify({ parent: { database_id: NOTION_DB }, properties: props, ...(children.length ? { children } : {}) }) });
   if (!r.ok) throw new Error(`page create ${r.status} ${r.j.message}`);
   return r.j.id;
 }

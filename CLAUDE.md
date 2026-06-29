@@ -132,25 +132,29 @@ Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines')
 
 ## VM Infrastructure
 
-The trading system runs on an Oracle Cloud VM (ubuntu@132.145.44.68). TradingView runs as Google Chrome (not Electron) managed by systemd.
+The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB)** VM at **ubuntu@145.241.220.213** (the old 1 GB box 132.145.44.68 was terminated). TradingView runs as Chromium on virtual display `:99`, managed by systemd. The repo on the VM is `/home/ubuntu/tradingview-autopilot`.
 
-> **Live status:** see the **Current Operational Status** section at the top of [TRADING_SYSTEM.md](TRADING_SYSTEM.md) for up-to-date account state, params, blocks, ORB dry-run, automations, and known issues. Order execution is via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`); TradingView/CDP is chart-reading only.
+> **Live status:** see the **Current Operational Status (2026-06-28)** section at the top of [TRADING_SYSTEM.md](TRADING_SYSTEM.md) for the VM, the per-strategy experiment (cTrader demo 2131377), the Notion trade journal (Phases 1–3), VNC, params, blocks, and automations. Order execution is via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`); TradingView/CDP is chart-reading only.
 
 ### Services on the VM
 
 | Service | Purpose |
 | --- | --- |
-| `xvfb.service` | Virtual display :1 at 1920×1080, 96 DPI |
-| `openbox.service` | Window manager — provides minimize/maximize/close controls |
-| `tradingview.service` | Google Chrome with CDP on port 9222 |
-| `market_scanner.mjs` | Node.js scanner process (tmux session "tradingview") |
+| `tv_browser.service` | Chromium + Xvfb (display `:99`) with CDP on port 9222 |
+| `x11vnc.service` | VNC for display `:99` on `localhost:5900` (no pw, via SSH tunnel) |
+| `cdp_watchdog.sh` (cron) | Restarts `tv_browser` only after **3 consecutive** CDP failures |
+| `market_scanner.mjs` | Node.js scanner (acct 2118552) |
+| `confirm_runner.mjs` (cron) | Per-strategy experiment, acct 2131377 (4×H1 + ORB/M15) |
+| `trade_notion_sync.mjs` (cron, 10 min) | Logs every trade to Notion with a screenshot |
+| `confirm_weekly_review.mjs` (cron, Fri 21:00) | Per-strategy PASS/WATCH/CUT review → Notion |
 
 ### Key files on VM
 
-- `/etc/systemd/system/tradingview.service` — Chrome launch config (proxy PAC, scale factor, etc.)
-- `/home/ubuntu/proxy.pac` — Routes `*.blackbull.com` and `*.ctrader.com` through SOCKS5 proxy; all other traffic goes direct
+- `/etc/systemd/system/tv_browser.service` — Chromium + Xvfb launch config (display :99, CDP 9222)
+- `/etc/systemd/system/x11vnc.service` — VNC server for display :99 (localhost:5900)
+- `~/.ctrader_confirm.env` / `~/.ctrader.env` / `~/.notion.env` — broker + Notion secrets (chmod 600, never in repo)
 - `/home/ubuntu/trading-data/scanner.log` — Live scanner output
-- `/home/ubuntu/trading-data/live_signals.json` — Current signals
+- `/home/ubuntu/trading-data/confirm_signals.jsonl` — Per-strategy experiment signals/trades
 
 ### Key files on local PC
 
@@ -162,20 +166,27 @@ The trading system runs on an Oracle Cloud VM (ubuntu@132.145.44.68). TradingVie
 ### SSH access
 
 ```bash
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213
 ```
 
 ### VNC access (for manual UI interaction)
 
+`x11vnc.service` serves display `:99` on `localhost:5900` (no password, localhost-only, auto-starts on boot). Tunnel + connect:
+
 ```bash
-ssh -i ~/.ssh/id_rsa_oracle -L 6080:localhost:6080 -N ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle -L 5900:localhost:5900 ubuntu@145.241.220.213 -N
 ```
 
-Then open <http://localhost:6080/vnc.html> in browser.
+Then point **RealVNC Viewer** at `localhost:5900` (leave the SSH window open while connected).
 
 ---
 
 ## BlackBull Markets Broker — Reconnection Guide
+
+> **⚠️ SUPERSEDED / HISTORICAL.** Order execution moved to the **cTrader Open API**
+> (`scripts/trading/broker_ctrader.mjs`) and the new VM does not run the BlackBull/TradingView
+> DOM path or the SOCKS5 proxy. This section is kept only for historical reference; it does not
+> apply to the current `145.241.220.213` setup.
 
 ### Why it disconnects
 

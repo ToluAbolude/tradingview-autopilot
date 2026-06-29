@@ -5,12 +5,83 @@ Live automated day-trading system running on an Oracle Cloud VM. Scans 22 instru
 structured orders via BlackBull Markets through TradingView Desktop. All positions are closed
 by 20:00 UTC — no overnight exposure.
 
-_Last updated: 2026-06-01_
+_Last updated: 2026-06-28_
 
 > **NOTE:** sections below this status block predate the cTrader migration and may be stale.
 > Order execution is now via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`),
 > not the TradingView/BlackBull DOM path. TradingView (Chrome on the VM, CDP 9222) is used for
 > **chart reading only**.
+
+---
+
+## Current Operational Status (2026-06-28)
+
+> Supersedes the 2026-06-11 block below. The whole stack was migrated to a new VM, and a
+> **per-strategy experiment** + a **Notion trade journal** were added.
+
+### Infrastructure — new VM
+
+- **Host:** Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB)** at **`ubuntu@145.241.220.213`**.
+  The old 1 GB box (145.241.220.213) has been terminated. The repo on the VM lives at
+  `/home/ubuntu/tradingview-autopilot`.
+- **TradingView:** Chromium + Xvfb (display `:99`) + CDP `:9222` — chart reading only.
+  `tv_browser.service` runs it; `cdp_watchdog.sh` restarts it only after **3 consecutive**
+  CDP failures (~15 min), so a transient blip no longer restarts the browser.
+- **VNC:** `x11vnc.service` (systemd, auto-starts on boot) serves display `:99` on
+  **`localhost:5900`** (no password, localhost-only, `-loop`). Connect via SSH tunnel:
+  `ssh -i ~/.ssh/id_rsa_oracle -L 5900:localhost:5900 ubuntu@145.241.220.213 -N`, then point
+  RealVNC at `localhost:5900`.
+
+### Per-strategy experiment (`scripts/trading/confirm_runner.mjs`)
+
+Voting/confluence is **dropped** here — each strategy trades **independently** on a dedicated
+demo so we can see which one actually earns, then concentrate capital on the winners.
+
+- **Account:** cTrader demo **2131377** (isolated from the scanner's 2118552). Risk
+  `CONFIRM_RISK_PCT = 0.1%`, one shot per bar, hard demo-only gate + daily kill-switch.
+- **Combos** (best of the strategy-lab 90-day matrix):
+
+  | Strategy | Symbol | TF | Notes |
+  |---|---|---|---|
+  | wor_break_retest | AUDUSD | H1 | |
+  | jackson_gold | XAUUSD | H1 | |
+  | amd_ote | GBPUSD | H1 | |
+  | confluence_trifecta | EURUSD | H1 | |
+  | **orb** | **NZDCAD** | **M15** | intraday opening-range; **self-gates to session-open breakout windows** |
+  | wor_break_retest_ntz | GBPJPY | H1 | A/B variant — Chart Fanatics **NTZ** filter (only trade expansion *outside* the prior-day range) |
+  | amd_ote_newsgated | USDJPY | H1 | A/B variant — only fires in the **post-news window** (5–180 min) of a high-impact event (`news_checker.mjs`) |
+
+  *A/B variants run the same base strategy on a **fresh symbol** (so anti-stacking never collides with the base combo) plus one extra runner-level gate, recorded under their own `label`. The news gate reuses `news_checker.mjs` — whose currency field was fixed 2026-06-28 (FF JSON uses `country`, not `currency`; the filter had been a silent no-op, which also means the **scanner's news-avoidance filter only starts working after its next restart**).*
+
+- **Guards:** `confirm_naked_guard.mjs` (never-naked), `confirm_eod_close.mjs` (cTrader-first
+  close + weekend backstop), `confirm_report.mjs` (per-strategy n / WR / ExpR / PF).
+- **Pass/fail target:** a strategy *passes* with **n ≥ 25, ExpR > 0, PF ≥ 1.5** over ~4 weeks;
+  goal is **≥ 2 passing** → those get real capital, the rest are cut (not retried).
+
+### Notion trade journal (`scripts/trading/trade_notion_sync.mjs` + reviews)
+
+Every trade on **both** accounts is auto-logged to a Notion DB with an annotated chart.
+
+- **Phase 1 — log + screenshot:** a new position → a TradingView screenshot anchored at the
+  real entry candle, drawn with the Long/Short Position tool + bold **ENTRY / SL / TP** labels,
+  with the price axis set directly (`getMainSourcePriceScale().setVisiblePriceRange`) so all
+  three levels are always in frame → a Notion row (instrument, strategy, direction, entry/SL/TP,
+  screenshot). On close the row is reconciled with **Result R** + win/loss + an outcome shot.
+  Cron every 10 min per account via `run_notion_sync.sh <ctrader_env>`.
+- **Phase 2 — Friday review (`confirm_weekly_review.mjs`):** Fri 21:00 UTC; writes a Notion
+  page with each strategy's stats and a **PASS ✅ / WATCH 🟡 / CUT ❌** verdict (the pass rule
+  above). Counts only trades after the **2026-06-27** cutoff (excludes the earlier
+  placement-bug week). Cron via `run_notion_job.sh .ctrader_confirm.env confirm_weekly_review.mjs`.
+- **Phase 3 — past-trade reference (`confirm_reference.mjs`):** each new trade card carries a
+  "📌 Past on <SYMBOL>" section — prior trades, win rate, per-direction breakdown, and a
+  plain-English takeaway — pulled from the journal so each entry is informed by history.
+- Secrets live in VM `~/.notion.env` (`NOTION_TOKEN`, `NOTION_DB`) — never in the repo.
+
+### Knowledge base
+
+NotebookLM **"Trading Notebook"** holds the trading-theory library plus **37 Chart Fanatics
+strategies** (the strategy pages, and each linked PDF added as extracted text). Managed via the
+`nlm` CLI / notebooklm-mcp (auth is short-lived — re-run `nlm login` when it expires).
 
 ---
 
@@ -61,7 +132,7 @@ _Last updated: 2026-06-01_
 ## Architecture
 
 ```
-Oracle Cloud VM (ubuntu@132.145.44.68)
+Oracle Cloud VM (ubuntu@145.241.220.213)
 │
 ├── Xvfb (virtual display :1)
 │   └── TradingView Desktop (Electron, CDP port 9222)
@@ -317,9 +388,9 @@ if the table shows a signal, the scanner will catch it.
 **Inject updated Pine to TradingView:**
 ```bash
 scp -i ~/.ssh/id_rsa_oracle scripts/strategy_dashboard.pine \
-  ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/strategy_dashboard.pine
+  ubuntu@145.241.220.213:/home/ubuntu/tradingview-mcp-jackson/scripts/strategy_dashboard.pine
 
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213 \
   "cd /home/ubuntu/tradingview-mcp-jackson && DISPLAY=:1 node inject_pine.mjs"
 ```
 
@@ -331,15 +402,15 @@ ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \
 # Deploy scanner + params
 scp -i ~/.ssh/id_rsa_oracle \
   scripts/trading/setup_finder.mjs \
-  ubuntu@132.145.44.68:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs
+  ubuntu@145.241.220.213:/home/ubuntu/tradingview-mcp-jackson/scripts/trading/setup_finder.mjs
 
 scp -i ~/.ssh/id_rsa_oracle \
   data/trading_params.json \
-  ubuntu@132.145.44.68:/home/ubuntu/trading-data/trading_params.json
+  ubuntu@145.241.220.213:/home/ubuntu/trading-data/trading_params.json
 
 # IMPORTANT: market_scanner.mjs caches setup_finder.mjs at startup.
 # After updating setup_finder.mjs, always restart market_scanner:
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213 \
   "pkill -f market_scanner.mjs; sleep 1; \
    cd /home/ubuntu/tradingview-mcp-jackson && \
    DISPLAY=:1 nohup node scripts/trading/market_scanner.mjs \
@@ -352,18 +423,18 @@ ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \
 
 ```bash
 # Live scan output
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 "tail -f /home/ubuntu/trading-data/scanner.log"
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213 "tail -f /home/ubuntu/trading-data/scanner.log"
 
 # Session runner (trade placement) log
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 "tail -f /home/ubuntu/trading-data/cron_runner.log"
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213 "tail -f /home/ubuntu/trading-data/cron_runner.log"
 
 # Current active signals
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 "cat /home/ubuntu/trading-data/live_signals.json"
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213 "cat /home/ubuntu/trading-data/live_signals.json"
 
 # Trade history
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 "cat /home/ubuntu/trading-data/trade_log/trades.csv"
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213 "cat /home/ubuntu/trading-data/trade_log/trades.csv"
 
 # Check running processes
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68 \
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213 \
   "ps aux | grep -E 'market_scanner|session_runner' | grep -v grep"
 ```

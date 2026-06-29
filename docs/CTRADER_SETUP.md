@@ -61,7 +61,7 @@ The access token is valid for **~30 days**. The refresh token can extend it inde
 ## Step 3 — Put credentials on the VM
 
 ```bash
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213
 cat > ~/.ctrader.env <<'EOF'
 CTRADER_CLIENT_ID=<from step 1>
 CTRADER_CLIENT_SECRET=<from step 1>
@@ -78,7 +78,7 @@ chmod 600 ~/.ctrader.env
 ## Step 4 — Smoke-test the connection
 
 ```bash
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213
 cd tradingview-mcp-jackson
 set -a; . ~/.ctrader.env; set +a
 node scripts/trading/broker_ctrader.mjs --equity

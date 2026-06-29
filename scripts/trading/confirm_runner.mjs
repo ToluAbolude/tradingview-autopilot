@@ -7,10 +7,13 @@
  * live (demo) result back to a single strategy and rank them honestly.
  *
  * Combos — 1h (H1) set (best 1h combos from the strategy-lab 90d matrix):
- *   wor_break_retest    / AUDUSD / H1   (PF2.53 n=25)
- *   jackson_gold        / XAUUSD / H1   (PF2.19 WR75%)
- *   amd_ote             / GBPUSD / H1   (PF1.71 n=43)
- *   confluence_trifecta / EURUSD / H1   (PF1.87 n=37)
+ *   wor_break_retest    / AUDUSD / H1    (PF2.53 n=25)
+ *   jackson_gold        / XAUUSD / H1    (PF2.19 WR75%)
+ *   amd_ote             / GBPUSD / H1    (PF1.71 n=43)
+ *   confluence_trifecta / EURUSD / H1    (PF1.87 n=37)
+ *   orb                 / NZDCAD / M15   (PF1.81 n=103) — intraday, session-gated
+ *   wor_break_retest_ntz / GBPJPY / H1   — A/B: base + NTZ (prior-day-range expansion) filter
+ *   amd_ote_newsgated    / USDJPY / H1   — A/B: base + high-impact-news gate (news_checker)
  *
  * Each tick (cron, every 5 min): for each combo, pull M15 bars, run the strategy's
  * pure generateSignals(); if a signal printed on the LAST CLOSED bar and we have
@@ -43,6 +46,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
+import { fetchHighImpactNews, filterForSymbol } from './news_checker.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IS_LINUX  = os.platform() === 'linux';
@@ -68,15 +72,26 @@ const COMBOS = [
   { strategy: 'jackson_gold',        symbol: 'XAUUSD', tf: '60' },   // PF2.19 WR75%
   { strategy: 'amd_ote',             symbol: 'GBPUSD', tf: '60' },   // PF1.71 n=43
   { strategy: 'confluence_trifecta', symbol: 'EURUSD', tf: '60' },   // PF1.87 n=37
+  // ORB kept on 15m (intraday opening-range): it self-gates to the session-open
+  // breakout windows via ctx.sessions, so it only fires when ORB should fire.
+  { strategy: 'orb',                 symbol: 'NZDCAD', tf: '15' },   // PF1.81 n=103 +27.3R
+  // ── Filtered A/B variants (Chart Fanatics playbook filters), on FRESH symbols so
+  // they never collide with the base combos via anti-stacking. Same base strategy +
+  // an extra runner-level gate; recorded under their own `label` for attribution.
+  { strategy: 'wor_break_retest', symbol: 'GBPJPY', tf: '60', label: 'wor_break_retest_ntz', filter: 'priorDayRange' },  // NTZ: only trade expansion OUTSIDE the prior-day range
+  { strategy: 'amd_ote',          symbol: 'USDJPY', tf: '60', label: 'amd_ote_newsgated',    filter: 'newsRequire'   },  // only in the post-news window of a high-impact USD/JPY event
 ];
 
-// Minimal instrument metadata (only confluence/jooviers read ctx.instrument;
-// the current 4 read ctx.params only, but keep this correct for completeness).
+// Minimal instrument metadata (orb reads ctx.sessions+tf; confluence reads ctx.instrument;
+// the rest read ctx.params only, but keep this correct for completeness).
 const INSTRUMENTS = {
   AUDUSD: { symbol: 'AUDUSD', class: 'fx' },
   GBPUSD: { symbol: 'GBPUSD', class: 'fx' },
   EURUSD: { symbol: 'EURUSD', class: 'fx' },
   XAUUSD: { symbol: 'XAUUSD', class: 'metal', aliases: ['XAUUSD', 'GOLD'] },
+  NZDCAD: { symbol: 'NZDCAD', class: 'fx_cross' },
+  GBPJPY: { symbol: 'GBPJPY', class: 'fx' },
+  USDJPY: { symbol: 'USDJPY', class: 'fx' },
 };
 const SESSIONS = { ASIA: '00:00', LONDON: '07:00', NY: '13:30' };
 const TF_PERIOD = { '5': 'M5', '15': 'M15', '30': 'M30', '60': 'H1', '240': 'H4' };
@@ -106,6 +121,42 @@ function calcLots(symbol, riskPct, equity, entry, sl) {
   if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) return q(riskAmt / slDist);
   if (/JPY/.test(sym))                                        return q(riskAmt / (6.50 * (slDist / 0.01)));
   return q(riskAmt / (10.0 * (slDist / 0.0001)));   // standard forex (incl. fx crosses)
+}
+
+// ── Filtered-variant gates (Chart Fanatics playbook filters) ──────────────────
+// NTZ: the most recent prior UTC day's high/low from the bars (skips weekend gaps).
+function priorDayHL(bars, refTs) {
+  const ref = new Date(refTs);
+  const refDayStart = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), ref.getUTCDate());
+  const byDay = {};
+  for (const b of bars) {
+    if (b.t >= refDayStart) continue;
+    const d = new Date(b.t);
+    const k = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    (byDay[k] ||= []).push(b);
+  }
+  const days = Object.keys(byDay).map(Number).sort((a, b) => b - a);
+  if (!days.length) return null;
+  const prev = byDay[days[0]];
+  return { hi: Math.max(...prev.map(b => b.h)), lo: Math.min(...prev.map(b => b.l)) };
+}
+function evTimeMs(ev) {                       // FF date may be full-ISO or date + time
+  let t = Date.parse(ev.date);
+  if (isNaN(t) && ev.time) t = Date.parse(`${ev.date} ${ev.time}`);
+  return t;
+}
+// newsRequire: a high-impact event for the symbol's currencies fired recently
+// (post-spike window) — the Chart Fanatics "trade the move AFTER the news" rule.
+function newsRecent(events, symbol, nowMs, { minMin = 5, maxMin = 180 } = {}) {
+  let relevant = events;
+  try { relevant = filterForSymbol(events, symbol); } catch (_) {}
+  for (const ev of relevant) {
+    const t = evTimeMs(ev);
+    if (isNaN(t)) continue;
+    const ageMin = (nowMs - t) / 60000;
+    if (ageMin >= minMin && ageMin <= maxMin) return true;
+  }
+  return false;
 }
 
 async function loadStrategies() {
@@ -158,11 +209,19 @@ async function main() {
 
   const strategies = await loadStrategies();
 
+  // Fetch the high-impact calendar once per tick if any combo is news-gated.
+  let newsEvents = null;
+  if (COMBOS.some(c => c.filter === 'newsRequire')) {
+    try { newsEvents = await fetchHighImpactNews(); log(`News: ${newsEvents.length} high-impact event(s) this week.`); }
+    catch (e) { newsEvents = []; log(`⚠ news fetch failed (${e.message}) — news-gated combos skip this tick`); }
+  }
+
   for (const combo of COMBOS) {
     const { strategy, symbol, tf } = combo;
+    const label = combo.label || strategy;        // attribution name (variant or base)
     const period = TF_PERIOD[tf], tfMs = TF_MS[tf];
-    const strat = strategies[strategy];
-    const tag = `${strategy}/${symbol}/${tf}`;
+    const strat = strategies[strategy];            // generateSignals comes from the BASE module
+    const tag = `${label}/${symbol}/${tf}`;
 
     let bars;
     try {
@@ -173,7 +232,7 @@ async function main() {
     const closed = (bars || []).filter(b => nowMs >= b.t + tfMs);
     if (closed.length < 60) { log(`  ${tag}: only ${closed.length} closed bars — skip`); continue; }
     const lastClosed = closed[closed.length - 1];
-    const key = `${strategy}:${symbol}:${lastClosed.t}`;
+    const key = `${label}:${symbol}:${lastClosed.t}`;
     if (state[key]) continue;   // already evaluated this bar
 
     let signals;
@@ -187,6 +246,16 @@ async function main() {
     if (!fresh.length) continue;
     const sig = fresh[fresh.length - 1];
 
+    // ── Filtered-variant gate (A/B vs the base combos); skips otherwise-valid signals ──
+    if (combo.filter === 'priorDayRange') {
+      const pd = priorDayHL(closed, sig.ts);
+      const ok = pd && (sig.dir === 'long' ? sig.entry > pd.hi : sig.entry < pd.lo);
+      if (!ok) { log(`  ${tag} [NTZ]: entry inside prior-day range (balance/chop) — skip`); continue; }
+    }
+    if (combo.filter === 'newsRequire') {
+      if (!newsRecent(newsEvents || [], symbol, nowMs)) { log(`  ${tag} [news]: no recent high-impact ${symbol} news — skip`); continue; }
+    }
+
     const risk = Math.abs(sig.entry - sig.sl);
     if (risk <= 0) { log(`  ${tag}: zero-risk signal — skip`); continue; }
     const tp   = sig.dir === 'long' ? sig.entry + TARGET_R * risk : sig.entry - TARGET_R * risk;
@@ -194,7 +263,7 @@ async function main() {
 
     const record = {
       ts: now.toISOString(), mode: LIVE ? 'live-demo' : 'dry-run',
-      strategy, symbol, tf, dir: sig.dir,
+      strategy: label, symbol, tf, dir: sig.dir,
       entry: +sig.entry.toFixed(5), sl: +sig.sl.toFixed(5), tp: +tp.toFixed(5),
       riskR: TARGET_R, lots, riskPct: CONFIRM_RISK_PCT, equity: +equity.toFixed(2),
       reason: sig.reason || null, barT: lastClosed.t,

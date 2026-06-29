@@ -14,7 +14,7 @@ Claude Code acts as the brain — scanning instruments, scoring setups, placing 
 
 **Broker:** BlackBull Markets  
 **Account currency:** GBP  
-**VM:** `ubuntu@132.145.44.68` (Oracle Cloud, always-on)  
+**VM:** `ubuntu@145.241.220.213` (Oracle Cloud, always-on)  
 **SSH key:** `~/.ssh/id_rsa_oracle`
 
 ---
@@ -338,7 +338,7 @@ Update `FULL_SCAN_LIST` order in `setup_finder.mjs` to match new rankings. Keep 
 ### On the VM (production)
 The cron jobs run automatically. To check status:
 ```bash
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213
 tail -f /home/ubuntu/trading-data/trade_log/trades.csv
 ```
 
@@ -348,7 +348,7 @@ x11vnc runs on the VM at display `:1` (port 5901), bound to localhost only. To c
 
 **Step 1 — Open an SSH tunnel** (run in a local terminal, leave it open):
 ```bash
-ssh -i ~/.ssh/id_rsa_oracle -L 5901:localhost:5901 -N ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle -L 5901:localhost:5901 -N ubuntu@145.241.220.213
 ```
 
 **Step 2 — Open RealVNC Viewer** and connect to:
@@ -420,7 +420,7 @@ Signs the broker IS connected (what to look for after reconnecting):
 
 SSH in and run this quick CDP script to click the broker panel:
 ```bash
-ssh -i ~/.ssh/id_rsa_oracle ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle ubuntu@145.241.220.213
 cat > /tmp/reconnect_broker.mjs << 'EOF'
 import CDP from "/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js";
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -579,7 +579,7 @@ Connect via VNC to see the TradingView screen directly:
 
 ```bash
 # Local terminal (keep open):
-ssh -i ~/.ssh/id_rsa_oracle -L 5901:localhost:5901 -N ubuntu@132.145.44.68
+ssh -i ~/.ssh/id_rsa_oracle -L 5901:localhost:5901 -N ubuntu@145.241.220.213
 # Then open RealVNC Viewer → connect to localhost:5901
 ```
 

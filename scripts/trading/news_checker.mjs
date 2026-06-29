@@ -26,7 +26,10 @@ export async function fetchHighImpactNews() {
     return highImpact.map(e => ({
       date:     e.date,
       time:     e.time,
-      currency: e.currency,
+      // FF's JSON field is `country` and it holds the CURRENCY CODE (USD/GBP/JPY…).
+      // It was read as `e.currency` (always undefined) → filterForSymbol matched
+      // nothing → this news filter was silently a no-op. Fall back to `country`.
+      currency: e.currency || e.country,
       title:    e.title,
       forecast: e.forecast,
       previous: e.previous,
