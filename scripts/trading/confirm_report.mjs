@@ -96,4 +96,4 @@ async function main() {
   console.log(`Wrote ${OUT_MD}`);
 }
 
-main().catch(e => { console.error('confirm_report failed:', e); process.exit(1); });
+main().then(() => process.exit(0)).catch(e => { console.error('confirm_report failed:', e); process.exit(1); });

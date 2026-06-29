@@ -210,7 +210,9 @@ async function main() {
   log('=== DAILY SELECTOR DONE ===\n');
 }
 
-main().catch(e => {
-  log(`Fatal: ${e.message}\n${e.stack}`);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))   // setup_finder's CDP/cTrader socket keeps the event loop alive; exit explicitly so the cron doesn't leak a zombie node each run
+  .catch(e => {
+    log(`Fatal: ${e.message}\n${e.stack}`);
+    process.exit(1);
+  });
