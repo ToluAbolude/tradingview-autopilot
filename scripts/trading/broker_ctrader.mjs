@@ -422,18 +422,38 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
     return send('ProtoOANewOrderReq', req);
   }
 
-  // Two-step fallback: open naked, then amend with absolute SL/TP after fill.
+  // Two-step fallback: open naked, then amend with absolute SL/TP AFTER the fill.
+  // A single amend fired immediately after the open response does NOT persist —
+  // the position is still settling and the SL/TP silently read back as 0 (this was
+  // the 0/5-bracketed bug: every confirm trade opened naked and got force-closed).
+  // Poll-and-amend: (re)send the absolute SL/TP and confirm via getPositions() that
+  // BOTH actually attached, retrying for a few seconds before giving up.
   const orderRes = await send('ProtoOANewOrderReq', req);
   const posId = Number(orderRes?.position?.positionId);
   if (!posId) return orderRes;
-  try {
-    await send('ProtoOAAmendPositionSLTPReq', {
-      ctidTraderAccountId: _accountId, positionId: posId,
-      stopLoss: slPrice, takeProfit: tpPrice,
-    });
-  } catch (e) {
-    console.error(`[cTrader] placeOrder: amend SL/TP failed for ${posId}: ${e.message}`);
+  let bracketed = false, refreshed = false;
+  for (let i = 0; i < 6 && !bracketed; i++) {
+    await new Promise(r => setTimeout(r, 1200));
+    try {
+      await send('ProtoOAAmendPositionSLTPReq', {
+        ctidTraderAccountId: _accountId, positionId: posId,
+        stopLoss: slPrice, takeProfit: tpPrice,
+      });
+    } catch (e) {
+      console.error(`[cTrader] placeOrder: amend SL/TP attempt ${i + 1} failed for ${posId}: ${e.message}`);
+    }
+    let p = null;
+    try { p = (await getPositions()).find(x => x.positionId === posId); } catch (_) {}
+    bracketed = !!(p && p.stopLoss && p.takeProfit);
+    // The amend resolves but the position keeps reading NAKED when the cTrader socket
+    // has gone stale — its reconcile/amend silently lag (see reconnect() docs). In the
+    // confirm runner placeOrder runs after ~20 round-trips (kill-switch + 7 getTrendbars),
+    // so the socket can be degraded by placement time; this was the 14:00 force-close.
+    // Refresh the socket ONCE on the first miss, then keep retrying on the fresh one.
+    if (!bracketed && !refreshed) { refreshed = true; try { await reconnect(); } catch (_) {} }
   }
+  if (!bracketed) console.error(`[cTrader] placeOrder: SL/TP NOT attached after retries for position ${posId}`);
+  orderRes._bracketed = bracketed;
   return orderRes;
 }
 

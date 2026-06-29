@@ -1067,63 +1067,106 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     }
   }
 
-  // ── L. Trendline break/bounce — two-pivot structural line ──
-  // Break  (+2): price crossed a trendline (reversal signal — higher conviction)
-  // Bounce (+1): price touching but still inside a trendline (continuation signal)
+  // ── L. Trendline break/bounce — best-fit multi-touch line (zone-confirmed) ──
+  // Mirrors the "Auto Trendlines — Zone & Break" Pine indicator on the chart:
+  //  • best-fit line over recent pivots, maximizing touches with a containment check
+  //    (no high pierces above a resistance line; no low pierces below a support line)
+  //  • 3+ touches to be tradeable (1 = accident, 2 = coincidence)
+  //  • trendlines are ZONES: break = body CLOSE beyond the zone (a wick poke is a
+  //    liquidity grab, NOT a break); bounce = wick into the zone then close rejected out
+  // Break  (+2): confirmed close beyond the zone, crossing this bar (reversal — higher conviction)
+  // Bounce (+1): rejection at the zone (with-trend continuation)
   {
-    const pivLen = 5;
-    const findPivots = (type) => {
-      const pivots = [];
-      for (let i = n - pivLen - 1; i >= pivLen && pivots.length < 2; i--) {
+    const pivLen   = 5;
+    const maxPiv   = 8;               // recent pivots considered for the fit
+    const minTouch = 3;               // 3+ touches required
+    const minSpan  = 10;              // line must span ≥ this many bars
+    const tol      = atr[n] * 0.5;    // touch tolerance   (indicator i_touchtol)
+    const zoneHalf = atr[n] * 0.25;   // zone half-width    (indicator i_zone)
+
+    // Confirmed pivots up to bar n (no lookahead: a pivot at i is known only at i+pivLen ≤ n)
+    const pivotsOf = (type) => {
+      const out = [];
+      for (let i = pivLen; i <= n - pivLen; i++) {
         let ok = true;
         for (let j = i - pivLen; j <= i + pivLen; j++) {
           if (j !== i && (type === 'high' ? bars[j].h >= bars[i].h : bars[j].l <= bars[i].l)) { ok = false; break; }
         }
-        if (ok) pivots.push({ idx: i, price: type === 'high' ? bars[i].h : bars[i].l });
+        if (ok) out.push({ idx: i, price: type === 'high' ? bars[i].h : bars[i].l });
       }
-      return pivots;
+      return out.slice(-maxPiv);
     };
 
-    if (dir === 'long') {
-      // Break: price broke above a downward-sloping resistance trendline
-      const highs = findPivots('high');
-      if (highs.length === 2) {
-        const slope = (highs[0].price - highs[1].price) / (highs[0].idx - highs[1].idx);
-        const proj  = highs[0].price + slope * (n - highs[0].idx);
-        if (slope < 0 && last.c > proj) {
-          score += (SC.L_trendline_break ?? 2);
-          reasons.push('Trendline break (resistance)'); strats.push('L');
+    // Best-fit line = the most-touched, price-containing pivot pair (classic slope only).
+    const fit = (type) => {
+      const pv = pivotsOf(type);
+      if (pv.length < 2) return null;
+      let best = null;
+      for (let a = 0; a < pv.length - 1; a++) {
+        for (let b = a + 1; b < pv.length; b++) {
+          const span = pv[b].idx - pv[a].idx;
+          if (span < minSpan) continue;
+          const slope = (pv[b].price - pv[a].price) / span;
+          if (type === 'high' && slope > 0) continue;   // resistance must slope down
+          if (type === 'low'  && slope < 0) continue;   // support must slope up
+          let touches = 0, contained = true;
+          for (const p of pv) {
+            const diff = p.price - (pv[a].price + slope * (p.idx - pv[a].idx));
+            if (type === 'high' ? diff > tol : diff < -tol) { contained = false; break; }
+            if (Math.abs(diff) <= tol) touches++;
+          }
+          if (!contained || touches < minTouch) continue;
+          if (!best || touches > best.touches || (touches === best.touches && span > best.span)) {
+            best = { x1: pv[a].idx, y1: pv[a].price, slope, touches, span };
+          }
         }
       }
-      // Bounce: price near an upward-sloping support trendline (trend continuation)
-      const lows = findPivots('low');
-      if (lows.length === 2 && !strats.includes('L')) {
-        const slope = (lows[0].price - lows[1].price) / (lows[0].idx - lows[1].idx);
-        const proj  = lows[0].price + slope * (n - lows[0].idx);
-        if (slope > 0 && last.l >= proj && last.l <= proj + atr[n] * 0.5) {
-          score += (SC.L_trendline_bounce ?? 1);
-          reasons.push('Trendline support (continuation)'); strats.push('L');
+      if (!best) return null;
+      best.at = (i) => best.y1 + best.slope * (i - best.x1);
+      return best;
+    };
+
+    const prev = bars[n - 1];
+    if (dir === 'long') {
+      // Break ABOVE a downward resistance line: close beyond zone top, crossing up this bar
+      const res = fit('high');
+      if (res) {
+        const top = res.at(n) + zoneHalf, topPrev = res.at(n - 1) + zoneHalf;
+        if (last.c > top && prev.c <= topPrev) {
+          score += (SC.L_trendline_break ?? 2);
+          reasons.push(`Trendline break (resistance ×${res.touches})`); strats.push('L');
+        }
+      }
+      // Bounce off an upward support line: wick into zone, close rejected back above (bullish)
+      if (!strats.includes('L')) {
+        const sup = fit('low');
+        if (sup) {
+          const top = sup.at(n) + zoneHalf;
+          if (last.l <= top && last.c > top && last.c > last.o) {
+            score += (SC.L_trendline_bounce ?? 1);
+            reasons.push(`Trendline support ×${sup.touches} (continuation)`); strats.push('L');
+          }
         }
       }
     } else {
-      // Break: price broke below an upward-sloping support trendline
-      const lows = findPivots('low');
-      if (lows.length === 2) {
-        const slope = (lows[0].price - lows[1].price) / (lows[0].idx - lows[1].idx);
-        const proj  = lows[0].price + slope * (n - lows[0].idx);
-        if (slope > 0 && last.c < proj) {
+      // Break BELOW an upward support line: close beyond zone bottom, crossing down this bar
+      const sup = fit('low');
+      if (sup) {
+        const bot = sup.at(n) - zoneHalf, botPrev = sup.at(n - 1) - zoneHalf;
+        if (last.c < bot && prev.c >= botPrev) {
           score += (SC.L_trendline_break ?? 2);
-          reasons.push('Trendline break (support)'); strats.push('L');
+          reasons.push(`Trendline break (support ×${sup.touches})`); strats.push('L');
         }
       }
-      // Bounce: price near a downward-sloping resistance trendline (trend continuation)
-      const highs = findPivots('high');
-      if (highs.length === 2 && !strats.includes('L')) {
-        const slope = (highs[0].price - highs[1].price) / (highs[0].idx - highs[1].idx);
-        const proj  = highs[0].price + slope * (n - highs[0].idx);
-        if (slope < 0 && last.h <= proj && last.h >= proj - atr[n] * 0.5) {
-          score += (SC.L_trendline_bounce ?? 1);
-          reasons.push('Trendline resistance (continuation)'); strats.push('L');
+      // Bounce off a downward resistance line: wick into zone, close rejected back below (bearish)
+      if (!strats.includes('L')) {
+        const res = fit('high');
+        if (res) {
+          const bot = res.at(n) - zoneHalf;
+          if (last.h >= bot && last.c < bot && last.c < last.o) {
+            score += (SC.L_trendline_bounce ?? 1);
+            reasons.push(`Trendline resistance ×${res.touches} (continuation)`); strats.push('L');
+          }
         }
       }
     }

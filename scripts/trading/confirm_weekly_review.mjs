@@ -24,14 +24,16 @@ const TOKEN = process.env.NOTION_TOKEN, DB = process.env.NOTION_DB, NV = '2022-0
 const DAYS = Number((process.argv.find(a => a.startsWith('--days=')) || '').split('=')[1] || 28);
 const MIN_N = 25, MIN_PF = 1.5;   // the agreed pass bar
 
-// Only count trades AFTER the fixes (1h combos + placement-bug fix). Earlier trades
-// were the immediate-close bug and are not a valid test of the strategies.
-const EXP_START = Date.parse(process.env.EXPERIMENT_START || '2026-06-27T00:00:00Z');
+// Only count trades that ran as a valid 2R test: bracketed === true (SL+TP genuinely
+// attached). Every trade before 2026-06-29 opened NAKED and was force-closed (scratch
+// — the bracket-attach bug, fixed 2026-06-29), so it is excluded by that flag. The
+// date is a backstop; the flag is the real gate.
+const EXP_START = Date.parse(process.env.EXPERIMENT_START || '2026-06-29T00:00:00Z');
 function loadPlaced() {
   if (!existsSync(SIGNALS)) return [];
   return readFileSync(SIGNALS, 'utf8').trim().split('\n').filter(Boolean)
     .map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(r => r && r.mode === 'live-demo' && r.positionId && Date.parse(r.ts) >= EXP_START);
+    .filter(r => r && r.mode === 'live-demo' && r.positionId && r.bracketed === true && Date.parse(r.ts) >= EXP_START);
 }
 
 async function main() {
