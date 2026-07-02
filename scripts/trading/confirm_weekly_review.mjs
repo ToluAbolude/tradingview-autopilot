@@ -15,6 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
+import { ensureWeekDb, isoWeekInfo } from './notion_week.mjs';   // review → this week's sub-folder
 
 const IS_LINUX  = os.platform() === 'linux';
 const DATA_ROOT = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
@@ -79,14 +80,17 @@ async function main() {
   writeFileSync(OUT_MD, body + '\n');
 
   if (TOKEN && DB) {
+    const weekDb = await ensureWeekDb(console.log);          // put the review IN this week's sub-folder
+    const dbId = weekDb || DB;                                // flat-DB fallback if page not shared
     const children = lines.filter(Boolean).map(l => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ text: { content: l.slice(0, 1900) } }] } }));
+    const props = { "Name": { title: [{ text: { content: `📊 Weekly Review — ${isoWeekInfo().key}` } }] } };
+    if (weekDb) props["Status"] = { select: { name: 'review' } };          // week-DB schema uses Status
+    else props["Tags"] = { multi_select: [{ name: 'review' }] };           // legacy flat-DB schema
     const r = await fetch('https://api.notion.com/v1/pages', { method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}`, 'Notion-Version': NV, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parent: { database_id: DB },
-        properties: { "Name": { title: [{ text: { content: `📊 Weekly Review ${new Date().toISOString().slice(0, 10)}` } }] }, "Tags": { multi_select: [{ name: 'review' }] } },
-        children }) });
+      body: JSON.stringify({ parent: { database_id: dbId }, properties: props, children }) });
     const j = await r.json().catch(() => ({}));
-    console.log(r.ok ? `Notion review page: ${j.url}` : `Notion error ${r.status} ${j.code} ${j.message}`);
+    console.log(r.ok ? `Notion review → ${weekDb ? 'week folder' : 'flat DB'}: ${j.url}` : `Notion error ${r.status} ${j.code} ${j.message}`);
   }
   process.exit(0);
 }

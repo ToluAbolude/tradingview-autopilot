@@ -1,0 +1,300 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  SUPPORT & RESISTANCE ZONES   (standalone)
+//
+//  The S&R engine extracted from "Strategy Dashboard — Trend · S&R · FVG"
+//  (the C-block), with nothing else attached — no trend, no FVG, no scoring.
+//
+//  METHOD (BigBeluga-style wick-to-body zones):
+//   • Resistance zone = pivot-high WICK tip  →  body top of the nearest candle
+//   • Support    zone = pivot-low  WICK tip  →  body bottom of the nearest candle
+//   • Retest:  a new pivot landing inside an existing zone strengthens it (↻ N×)
+//              instead of creating a duplicate zone.
+//   • Broken (⚡):  a candle BODY closes beyond the wick tip (not just a wick poke).
+//   • Flipped (↕): after a break, price retests and the close holds on the new
+//              side → the zone polarity flips (S→R or R→S) and recolours.
+//   • Optional PDH / PDL zones (previous-day high/low) for session S&R.
+// ════════════════════════════════════════════════════════════════════════════
+//@version=6
+indicator("Support & Resistance Zones",
+          shorttitle       = "S&R Zones",
+          overlay          = true,
+          max_boxes_count  = 500,
+          max_lines_count  = 100,
+          max_labels_count = 100)
+
+// ── Inputs ──────────────────────────────────────────────────────────────────
+grp = "Display"
+show_pivots  = input.bool(true,  "Pivot S/R zones",            group=grp)
+show_marks   = input.bool(true,  "Pivot markers (▲▼)",         group=grp)
+show_pdh_pdl = input.bool(true,  "PDH / PDL zones",            group=grp)
+show_table   = input.bool(true,  "Nearest-level table",        group=grp)
+maxSR        = input.int(6, "Max S&R zones (total)", minval=2, maxval=20, group=grp)
+pivLen       = input.int(5, "Pivot lookback (bars each side)", minval=2, maxval=50, group=grp,
+                  tooltip="Larger = more significant swings, fewer zones.")
+extendBars   = input.int(20, "Extend zones right (bars)", minval=0, maxval=200, group=grp)
+tbl_pos      = input.string("top_right", "Table position",
+                  options=["top_right","top_left","bottom_right","bottom_left"], group=grp)
+
+// ── Base ─────────────────────────────────────────────────────────────────────
+atr14 = ta.atr(14)
+ph    = ta.pivothigh(high, pivLen, pivLen)
+pl    = ta.pivotlow(low,   pivLen, pivLen)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  PIVOT S/R ZONE BOOKKEEPING
+// ════════════════════════════════════════════════════════════════════════════
+var float[] suppLvls    = array.new_float(0)   // wick tip (zone bottom)
+var float[] suppBody    = array.new_float(0)   // body level (zone top)
+var int[]   suppBars    = array.new_int(0)
+var int[]   suppRetests = array.new_int(0)
+var bool[]  suppBroken  = array.new_bool(0)
+var bool[]  suppFlipped = array.new_bool(0)
+var float[] resLvls     = array.new_float(0)   // wick tip (zone top)
+var float[] resBody     = array.new_float(0)   // body level (zone bottom)
+var int[]   resBars     = array.new_int(0)
+var int[]   resRetests  = array.new_int(0)
+var bool[]  resBroken   = array.new_bool(0)
+var bool[]  resFlipped  = array.new_bool(0)
+
+if not na(pl)
+    // Retest: pl falls inside an existing support zone → strengthen, don't duplicate
+    _suppRetest = false
+    if array.size(suppLvls) > 0
+        for _i = 0 to array.size(suppLvls) - 1
+            if pl >= array.get(suppLvls, _i) and pl <= array.get(suppBody, _i)
+                array.set(suppRetests, _i, array.get(suppRetests, _i) + 1)
+                _suppRetest := true
+                break
+    if not _suppRetest
+        if array.size(suppLvls) >= maxSR
+            array.pop(suppLvls)
+            array.pop(suppBody)
+            array.pop(suppBars)
+            array.pop(suppRetests)
+            array.pop(suppBroken)
+            array.pop(suppFlipped)
+        array.unshift(suppLvls, pl)
+        array.unshift(suppBars, bar_index[pivLen])
+        array.unshift(suppRetests, 0)
+        array.unshift(suppBroken, false)
+        array.unshift(suppFlipped, false)
+        // Demand zone top = body bottom of the candle nearest (above) the wick tip
+        _sbv = float(na)
+        _sd  = float(na)
+        for _k = 0 to pivLen
+            _bb = math.min(open[_k], close[_k])
+            _d  = _bb - pl
+            if _d >= 0 and (na(_sd) or _d < _sd)
+                _sd  := _d
+                _sbv := _bb
+        array.unshift(suppBody, na(_sbv) ? math.min(open[pivLen], close[pivLen]) : _sbv)
+
+if not na(ph)
+    // Retest: ph falls inside an existing resistance zone → strengthen, don't duplicate
+    _resRetest = false
+    if array.size(resLvls) > 0
+        for _i = 0 to array.size(resLvls) - 1
+            if ph >= array.get(resBody, _i) and ph <= array.get(resLvls, _i)
+                array.set(resRetests, _i, array.get(resRetests, _i) + 1)
+                _resRetest := true
+                break
+    if not _resRetest
+        if array.size(resLvls) >= maxSR
+            array.pop(resLvls)
+            array.pop(resBody)
+            array.pop(resBars)
+            array.pop(resRetests)
+            array.pop(resBroken)
+            array.pop(resFlipped)
+        array.unshift(resLvls, ph)
+        array.unshift(resBars, bar_index[pivLen])
+        array.unshift(resRetests, 0)
+        array.unshift(resBroken, false)
+        array.unshift(resFlipped, false)
+        // Supply zone bottom = body top of the candle nearest (below) the wick tip
+        _rbv = float(na)
+        _rd  = float(na)
+        for _k = 0 to pivLen
+            _bt = math.max(open[_k], close[_k])
+            _d  = ph - _bt
+            if _d >= 0 and (na(_rd) or _d < _rd)
+                _rd  := _d
+                _rbv := _bt
+        array.unshift(resBody, na(_rbv) ? math.max(open[pivLen], close[pivLen]) : _rbv)
+
+// ── Price currently inside a zone? (for alerts + table state) ──
+atSupport    = false
+atResistance = false
+if array.size(suppLvls) > 0
+    for i = 0 to math.min(array.size(suppLvls) - 1, 7)
+        if close >= array.get(suppLvls, i) and close <= array.get(suppBody, i)
+            atSupport := true
+            break
+if array.size(resLvls) > 0
+    for i = 0 to math.min(array.size(resLvls) - 1, 7)
+        if close >= array.get(resBody, i) and close <= array.get(resLvls, i)
+            atResistance := true
+            break
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ZONE POLARITY FLIP DETECTION
+//   Break  = candle BODY closes beyond the wick tip (a wick poke is not a break).
+//   Flip   = after a break, price retests and the close holds on the new side.
+// ════════════════════════════════════════════════════════════════════════════
+if array.size(resLvls) > 0
+    for _fi = 0 to array.size(resLvls) - 1
+        if not array.get(resFlipped, _fi)
+            _rWick = array.get(resLvls, _fi)
+            _rBody = array.get(resBody, _fi)
+            if not array.get(resBroken, _fi)
+                if math.min(open, close) > _rWick
+                    array.set(resBroken, _fi, true)
+            else
+                if low <= _rWick and close > _rBody
+                    array.set(resFlipped, _fi, true)
+
+if array.size(suppLvls) > 0
+    for _fi = 0 to array.size(suppLvls) - 1
+        if not array.get(suppFlipped, _fi)
+            _sWick = array.get(suppLvls, _fi)
+            _sBody = array.get(suppBody, _fi)
+            if not array.get(suppBroken, _fi)
+                if math.max(open, close) < _sWick
+                    array.set(suppBroken, _fi, true)
+            else
+                if high >= _sWick and close < _sBody
+                    array.set(suppFlipped, _fi, true)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  PIVOT MARKERS
+// ════════════════════════════════════════════════════════════════════════════
+plotshape(show_marks and not na(ph), "Pivot High", style=shape.triangledown,
+          location=location.abovebar, color=color.new(#ef5350, 0), size=size.tiny)
+plotshape(show_marks and not na(pl), "Pivot Low",  style=shape.triangleup,
+          location=location.belowbar, color=color.new(#66bb6a, 0), size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  S/R ZONE BOXES  (delete-and-redraw on the last bar; capped at maxSR total)
+// ════════════════════════════════════════════════════════════════════════════
+var box[] srBoxes = array.new_box(0)
+
+if barstate.islast
+    if array.size(srBoxes) > 0
+        for i = 0 to array.size(srBoxes) - 1
+            box.delete(array.get(srBoxes, i))
+    array.clear(srBoxes)
+
+    _halfR = (maxSR + 1) / 2
+    _capR  = math.min(array.size(resLvls), _halfR)
+    _capS  = math.min(array.size(suppLvls), maxSR - _capR)
+
+    if show_pivots and _capR > 0
+        for i = 0 to _capR - 1
+            wickTop   = array.get(resLvls, i)
+            bodyTop   = array.get(resBody, i)
+            lbi       = array.get(resBars, i)
+            rtCount   = array.get(resRetests, i)
+            isFlipped = array.get(resFlipped, i)
+            isBroken  = array.get(resBroken, i)
+            _zCol   = isFlipped ? #66bb6a : #ef5350
+            _alpha  = isFlipped ? 85 : isBroken ? 93 : rtCount > 0 ? 75 : 88
+            _bAlpha = isFlipped ? 15 : isBroken ? 60 : rtCount > 0 ? 15 : 40
+            _bWidth = isFlipped or rtCount > 0 ? 2 : 1
+            _lbl    = isFlipped ? " ↕ Flipped→Support" : isBroken ? " ⚡ Broken" : rtCount > 0 ? " ↻ " + str.tostring(rtCount) + "× Retest" : " Resistance"
+            _b = box.new(lbi, wickTop, bar_index + extendBars, bodyTop,
+                         border_color=color.new(_zCol, _bAlpha),
+                         bgcolor     =color.new(_zCol, _alpha),
+                         border_width=_bWidth,
+                         text=_lbl, text_color=color.new(_zCol, 10),
+                         text_size=size.tiny, text_halign=text.align_left)
+            array.push(srBoxes, _b)
+
+    if show_pivots and _capS > 0
+        for i = 0 to _capS - 1
+            wickBot   = array.get(suppLvls, i)
+            bodyBot   = array.get(suppBody, i)
+            lbi       = array.get(suppBars, i)
+            rtCount   = array.get(suppRetests, i)
+            isFlipped = array.get(suppFlipped, i)
+            isBroken  = array.get(suppBroken, i)
+            _zCol   = isFlipped ? #ef5350 : #66bb6a
+            _alpha  = isFlipped ? 85 : isBroken ? 93 : rtCount > 0 ? 75 : 88
+            _bAlpha = isFlipped ? 15 : isBroken ? 60 : rtCount > 0 ? 15 : 40
+            _bWidth = isFlipped or rtCount > 0 ? 2 : 1
+            _lbl    = isFlipped ? " ↕ Flipped→Resistance" : isBroken ? " ⚡ Broken" : rtCount > 0 ? " ↻ " + str.tostring(rtCount) + "× Retest" : " Support"
+            _b = box.new(lbi, bodyBot, bar_index + extendBars, wickBot,
+                         border_color=color.new(_zCol, _bAlpha),
+                         bgcolor     =color.new(_zCol, _alpha),
+                         border_width=_bWidth,
+                         text=_lbl, text_color=color.new(_zCol, 10),
+                         text_size=size.tiny, text_halign=text.align_left)
+            array.push(srBoxes, _b)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  PDH / PDL ZONES  (previous-day high/low as session S&R)
+// ════════════════════════════════════════════════════════════════════════════
+PDH = request.security(syminfo.tickerid, "D", high[1])
+PDL = request.security(syminfo.tickerid, "D", low[1])
+
+var box pdhZoneBox = na
+var box pdlZoneBox = na
+if show_pdh_pdl and barstate.islast
+    box.delete(pdhZoneBox)
+    box.delete(pdlZoneBox)
+    pdhZoneBox := box.new(bar_index - 5, PDH + atr14 * 0.3, bar_index + extendBars, PDH - atr14 * 0.3,
+                          border_color=color.new(#ef5350, 30), bgcolor=color.new(#ef5350, 84),
+                          text=" PDH", text_color=color.new(#ef5350, 0),
+                          text_size=size.tiny, text_halign=text.align_left)
+    pdlZoneBox := box.new(bar_index - 5, PDL + atr14 * 0.3, bar_index + extendBars, PDL - atr14 * 0.3,
+                          border_color=color.new(#66bb6a, 30), bgcolor=color.new(#66bb6a, 84),
+                          text=" PDL", text_color=color.new(#66bb6a, 0),
+                          text_size=size.tiny, text_halign=text.align_left)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  NEAREST-LEVEL TABLE  (nearest support below / resistance above price)
+// ════════════════════════════════════════════════════════════════════════════
+f_nearestRes() =>
+    float best = na
+    if array.size(resLvls) > 0
+        for i = 0 to array.size(resLvls) - 1
+            if not array.get(resBroken, i)
+                lvl = array.get(resLvls, i)
+                if lvl >= close and (na(best) or lvl < best)
+                    best := lvl
+    best
+f_nearestSup() =>
+    float best = na
+    if array.size(suppLvls) > 0
+        for i = 0 to array.size(suppLvls) - 1
+            if not array.get(suppBroken, i)
+                lvl = array.get(suppLvls, i)
+                if lvl <= close and (na(best) or lvl > best)
+                    best := lvl
+    best
+
+if show_table and barstate.islast
+    pos = tbl_pos == "top_right"    ? position.top_right    :
+          tbl_pos == "top_left"     ? position.top_left     :
+          tbl_pos == "bottom_right" ? position.bottom_right :
+                                      position.bottom_left
+    nr = f_nearestRes()
+    ns = f_nearestSup()
+    t = table.new(pos, 2, 4, bgcolor=color.new(#0d1117, 5),
+                  frame_color=color.new(#30363d, 0), frame_width=2,
+                  border_color=color.new(#30363d, 50), border_width=1)
+    table.cell(t, 0, 0, "S&R ZONES", text_color=color.white, text_size=size.small, bgcolor=color.new(#161b22, 0))
+    table.cell(t, 1, 0, str.tostring(array.size(resLvls) + array.size(suppLvls)) + " active", text_color=#8b949e, text_size=size.tiny, bgcolor=color.new(#161b22, 0))
+    table.cell(t, 0, 1, "Resistance ▲", text_color=#ef5350, text_size=size.small)
+    table.cell(t, 1, 1, na(nr) ? "—" : str.tostring(nr, format.mintick), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 2, "Support ▼", text_color=#66bb6a, text_size=size.small)
+    table.cell(t, 1, 2, na(ns) ? "—" : str.tostring(ns, format.mintick), text_color=color.white, text_size=size.small)
+    _state = atResistance ? "AT RESISTANCE" : atSupport ? "AT SUPPORT" : "between"
+    _scol  = atResistance ? #ef5350 : atSupport ? #66bb6a : color.gray
+    table.cell(t, 0, 3, "Price", text_color=#8b949e, text_size=size.small)
+    table.cell(t, 1, 3, _state, text_color=_scol, text_size=size.small)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ALERTS
+// ════════════════════════════════════════════════════════════════════════════
+alertcondition(atSupport    and not atSupport[1],    "Entered Support Zone",    "S&R: price entered a support zone")
+alertcondition(atResistance and not atResistance[1], "Entered Resistance Zone", "S&R: price entered a resistance zone")

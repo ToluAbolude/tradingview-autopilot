@@ -30,6 +30,18 @@ const LOCK_FILE   = join(DATA_ROOT, '.tv_chart.lock');
 const SIGNALS_LOG = join(DATA_ROOT, 'confirm_signals.jsonl');
 const NOTION_TOKEN = process.env.NOTION_TOKEN, NOTION_DB = process.env.NOTION_DB, NV = '2022-06-28';
 const CONFIRM_RISK_PCT = Number(process.env.CONFIRM_RISK_PCT || 0.1);
+// Optional: "Trading Notes" parent page → one sub-DATABASE per trading week, each
+// trade a row inside its week. Falls back to the flat NOTION_DB if unset or if the
+// integration can't access the page (share the page with the integration to enable).
+const NOTION_PARENT = process.env.NOTION_PARENT || null;
+const WEEK_DB_FILE  = join(DATA_ROOT, 'notion_week_dbs.json');
+const WEEK_DB_SCHEMA = {
+  "Name": { title: {} }, "Instrument": { rich_text: {} }, "Strategy": { select: {} },
+  "Direction": { select: {} }, "Account": { select: {} }, "Entry": { number: {} },
+  "SL": { number: {} }, "TP": { number: {} }, "Status": { select: {} },
+  "Opened": { date: {} }, "Position ID": { rich_text: {} }, "Screenshot": { files: {} },
+  "Result R": { number: {} },
+};
 
 function log(m) { process.stdout.write(`[${new Date().toISOString()}] ${m}\n`); }
 function loadState() { try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return {}; } }
@@ -59,7 +71,37 @@ async function uploadScreenshot(path) {
   if (!s.ok) throw new Error(`file_upload send ${s.status} ${s.j.message}`);
   return c.j.id;
 }
+// ── Weekly sub-database routing ──────────────────────────────────────────────
+// ISO-week key + human title (Monday–Sunday of the current UTC week).
+function isoWeekInfo(d = new Date()) {
+  const dow = (d.getUTCDay() + 6) % 7;                                   // Mon=0
+  const mon = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - dow));
+  const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
+  const th = new Date(mon); th.setUTCDate(mon.getUTCDate() + 3);          // Thursday → ISO year/week
+  const firstThu = new Date(Date.UTC(th.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((th - firstThu) / 864e5 - 3 + ((firstThu.getUTCDay() + 6) % 7)) / 7);
+  const ds = x => x.toISOString().slice(0, 10);
+  const key = `${th.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+  return { key, title: `${key} · ${ds(mon)}–${ds(sun)}` };
+}
+// Return this week's sub-DB id (create under NOTION_PARENT on first use, cache it).
+// null => caller falls back to the flat NOTION_DB (page not shared / not configured).
+async function ensureWeekDb() {
+  if (!NOTION_PARENT || !NOTION_TOKEN) return null;
+  const { key, title } = isoWeekInfo();
+  let cache = {}; try { cache = JSON.parse(readFileSync(WEEK_DB_FILE, 'utf8')); } catch {}
+  if (cache[key]) return cache[key];
+  const r = await nfetch('https://api.notion.com/v1/databases', { method: 'POST',
+    headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NV, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parent: { type: 'page_id', page_id: NOTION_PARENT }, title: [{ text: { content: title } }], properties: WEEK_DB_SCHEMA }) });
+  if (!r.ok) { log(`week-db create failed (${r.status} ${r.j.message}) — using flat DB`); return null; }
+  cache[key] = r.j.id; try { writeFileSync(WEEK_DB_FILE, JSON.stringify(cache, null, 2)); } catch {}
+  log(`📁 created week DB "${title}"`);
+  return r.j.id;
+}
+
 async function createTradePage(t, uploadId) {
+  const dbId = (await ensureWeekDb()) || NOTION_DB;   // weekly sub-DB if available, else flat DB
   const props = {
     "Name": { title: [{ text: { content: `${t.symbol} · ${t.strategy} · ${t.dir}` } }] },
     "Instrument": { rich_text: [{ text: { content: t.symbol } }] },
@@ -83,7 +125,7 @@ async function createTradePage(t, uploadId) {
   } catch (e) { log(`ref lookup failed ${t.symbol}: ${e.message}`); }
   const r = await nfetch('https://api.notion.com/v1/pages', { method: 'POST',
     headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NV, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ parent: { database_id: NOTION_DB }, properties: props, ...(children.length ? { children } : {}) }) });
+    body: JSON.stringify({ parent: { database_id: dbId }, properties: props, ...(children.length ? { children } : {}) }) });
   if (!r.ok) throw new Error(`page create ${r.status} ${r.j.message}`);
   return r.j.id;
 }

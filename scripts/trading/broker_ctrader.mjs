@@ -323,7 +323,7 @@ const _SAFETY = {
   maxBarAgeMs: 30 * 60 * 1000,
 };
 
-export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false }) {
+export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false }) {
   const cls = _instrumentClass(symbol);
   const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
 
@@ -360,8 +360,9 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
 
   // Price sanity vs the broker's own M1 bars (frozen-chart guard). Fail-open on
   // API errors so a trendbars outage can't halt trading — the other guards above
-  // still apply.
-  if (Number.isFinite(entry) && entry > 0) {
+  // still apply. SKIP for LIMIT orders: a limit rests AWAY from the live price by
+  // design (e.g. at an S&R zone), so a deviation check would wrongly reject it.
+  if (!isLimit && Number.isFinite(entry) && entry > 0) {
     try {
       const bars = await getTrendbars(symbol, { period: 'M1', fromMs: Date.now() - 2 * 3600 * 1000 });
       const last = bars[bars.length - 1];
@@ -391,10 +392,22 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
  *   tpPrice, slPrice = absolute price targets matching the existing
  *                      execute_trade.placeOrder API.
  */
-export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice }) {
+export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null }) {
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
-  await assertOrderSafety({ symbol, direction, units, entry, slPrice });
+  // Clamp to the per-class lot cap instead of letting assertOrderSafety REJECT the
+  // whole trade. A crypto setup sized at 5 lots should PLACE 3 (smaller = safer),
+  // not vanish — the reject was silently killing most crypto scanner setups.
+  const _capCls = _instrumentClass(symbol);
+  const _capLots = _SAFETY.maxLots[_capCls];
+  if (Number.isFinite(_capLots) && Number.isFinite(units) && units > _capLots) {
+    console.error(`[cTrader] ${symbol}: clamping ${units} → ${_capLots} lots (${_capCls} cap)`);
+    units = _capLots;
+  }
+  // For a LIMIT, safety checks use the limit price as the reference (its SL must be
+  // valid vs the limit), and the frozen-chart deviation check is skipped (a limit
+  // rests away from live by design).
+  await assertOrderSafety({ symbol, direction, units, entry: limitPrice != null ? limitPrice : entry, slPrice, isLimit: limitPrice != null });
   const meta = await _symbolMetaFor(symbol);
   const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
   // Quantize to broker step + enforce min volume
@@ -402,6 +415,20 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
   const rawVol = Math.round(units * meta.lotSize);
   const volume = Math.max(minV, Math.floor(rawVol / step) * step);
+
+  // ── LIMIT entry: rest a pending order AT the level (S&R zone), bracket relative
+  //    to the limit price. GOOD_TILL_CANCEL — it waits until price reaches it. ──
+  if (limitPrice != null) {
+    // ABSOLUTE SL/TP on the pending order so they're attached + visible immediately
+    // (relative SL/TP only materialise on fill → risk of a naked fill).
+    return send('ProtoOANewOrderReq', {
+      ctidTraderAccountId: _accountId, symbolId: meta.id,
+      orderType: 2,                                  // LIMIT
+      tradeSide, volume, limitPrice,
+      stopLoss: slPrice, takeProfit: tpPrice,        // absolute prices
+      timeInForce: 1,                                // GOOD_TILL_CANCEL
+    });
+  }
 
   const req = {
     ctidTraderAccountId: _accountId,
