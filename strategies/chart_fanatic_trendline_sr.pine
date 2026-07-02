@@ -1,0 +1,571 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  CHART FANATIC — TRENDLINE + S&R   (strategy)                              ║
+// ║                                                                           ║
+// ║  Combines your two standalone indicators the way they are:                 ║
+// ║    • auto_trendlines.pine          → the diagonal trendline ENGINE         ║
+// ║    • support_resistance_zones.pine → the horizontal S&R CONFIRMATION       ║
+// ║                                                                           ║
+// ║  Built from the Chart Fanatics strategy catalog (chartfanatics.com) — the  ║
+// ║  setups that use TRENDLINES + S&R, fused into one:                          ║
+// ║   • Ali Crooks "Trendline Break POCKET" (HEADLINE, ~58% @ 2R): enter only   ║
+// ║     when (1) price is at a HTF S&R key level, (2) a trendline breaks, and   ║
+// ║     (3) the last opposing swing breaks (momentum shift) → the "pocket".     ║
+// ║   • Brando "Million-Dollar S&R": wick-to-body zones (high wick→high body =  ║
+// ║     resistance, low wick→low body = support); enter on a structure shift    ║
+// ║     after a zone tap; target the prior swing. (= your S&R indicator's zones)║
+// ║   • "My Trend Line Trading Edge": the trendline IS the trailing stop —      ║
+// ║     ride the trend, exit when the line breaks (optional trail mode).        ║
+// ║   • "New 4H Platinum" / Tori Trades: candle RESPECTS the TL and closes back ║
+// ║     on the right side = bounce entry.                                       ║
+// ║                                                                           ║
+// ║  Several of these trade PLATINUM → defaults tuned for PLATINUM FUTURES      ║
+// ║  (PL1!) on the 4H, but the inputs work on any symbol/timeframe.            ║
+// ║                                                                           ║
+// ║  BACKTEST (cf_backtest.mjs, cTrader H4 deep history, 5y 2021–2026, in R):   ║
+// ║   The 2R fixed-TP default was ~flat/negative. The SOURCE-FAITHFUL exit —    ║
+// ║   NO fixed TP, ride the trend on the trailing trendline — is the winner,    ║
+// ║   and LONG-ONLY on the (up-trending) metals is materially better:           ║
+// ║     long-only + gates + no-TP :  XPT PF1.62 +35R | XAU PF1.29 +21R          ║
+// ║                                  XAG PF1.57 +37R  (~95–131 trades/5y)       ║
+// ║   → defaults below use i_use_tp = false. Set "Long Only" on trending        ║
+// ║     markets. (Gross of spread; low ~25% win rate — trend-follower profile.) ║
+// ║                                                                           ║
+// ║  PLAYBOOK                                                                  ║
+// ║   • BREAK  long  : body close ABOVE the resistance-trendline zone          ║
+// ║   • BREAK  short : body close BELOW the support-trendline zone             ║
+// ║   • BOUNCE long  : rejection that closes back ABOVE the support-TL zone     ║
+// ║   • BOUNCE short : rejection that closes back BELOW the resistance-TL zone  ║
+// ║   • S&R gate     : the traded trendline must align with a horizontal S&R   ║
+// ║                    level (Chart Fanatic's "added confirmation")            ║
+// ║   • STOP/EXIT    : initial stop beyond the trend's trendline zone, then    ║
+// ║                    TRAIL the stop along that trendline (never widening)     ║
+// ║   • TP (optional): next S&R zone, floored at a minimum R:R                  ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("Chart Fanatic — Trendline + S&R", shorttitle="CF_TL+SR",
+     overlay            = true,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 2.0,
+     initial_capital    = 100000,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.04,
+     slippage           = 2,
+     pyramiding         = 0,
+     calc_on_every_tick = false,
+     max_lines_count    = 20,
+     max_labels_count   = 30,
+     max_boxes_count    = 20)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — STRATEGY
+// ─────────────────────────────────────────────────────────────────────────────
+var string GP = "① Playbook"
+i_dir       = input.string("Both", "Trade Direction", options=["Both","Long Only","Short Only"], group=GP)
+i_model     = input.string("Both", "Entry Model",      options=["Break","Bounce","Both"], group=GP,
+     tooltip="Break = My Trend Line Edge (close beyond TL zone). Bounce = 4H Platinum respect-and-close. Both = either.")
+i_req_conf  = input.bool(true, "Require S&R confluence", group=GP,
+     tooltip="ON: the traded trendline must align with a horizontal S&R level (Chart Fanatic 'added confirmation').")
+i_conf_atr  = input.float(0.75, "S&R Confluence Distance ×ATR14", minval=0.1, maxval=3.0, step=0.05, group=GP)
+i_req_mss   = input.bool(true, "Require momentum shift (Ali Crooks 'pocket')", group=GP,
+     tooltip="ON: after the trendline break/bounce at a key level, also require a break of the last opposing short-term swing — confirms a real momentum shift, not noise.")
+i_mss_len   = input.int(3, "Momentum-shift swing length", minval=2, maxval=20, group=GP)
+
+var string GR = "② Risk / Exit"
+i_buf       = input.float(0.5, "Stop Buffer ×ATR14",        minval=0.0, maxval=3.0, step=0.1, group=GR)
+i_atrStop   = input.float(2.0, "Fallback Stop ×ATR (no TL)", minval=0.5, maxval=6.0, step=0.25, group=GR)
+i_maxStop   = input.float(4.0, "Max Initial Stop ×ATR",      minval=1.0, maxval=10.0, step=0.5, group=GR,
+     tooltip="Clamp so a far-projecting trendline can't create an unreachable target.")
+i_trail     = input.bool(true,  "Trail stop along the trendline", group=GR,
+     tooltip="My Trend Line Edge: the trendline IS the trailing stop. Never widens.")
+i_use_tp    = input.bool(false, "Use take-profit (next S&R zone)", group=GR,
+     tooltip="Default OFF = pure trend-ride (trailing trendline stop only) — the source's method and the backtest winner. ON = cap exits at the next S&R zone / min R:R (was flat-to-negative in the 5y metals backtest).")
+i_min_rr    = input.float(2.0,  "Minimum R:R floor", minval=0.5, maxval=10.0, step=0.5, group=GR)
+
+var string GF = "③ Filters"
+i_htf       = input.bool(false, "HTF Trend Filter (Daily EMA)", group=GF)
+i_htf_ema   = input.int (50,    "HTF EMA Length", minval=10, maxval=200, group=GF)
+i_ema_len   = input.int (21,    "Pocket EMA (Ali Crooks 21)", minval=5, maxval=200, group=GF,
+     tooltip="Reference EMA Ali Crooks uses for pullback entries inside the pocket. Drawn for context; not a hard gate.")
+i_sess_f    = input.bool(false, "Session filter", group=GF)
+i_sess      = input.session("0000-2359", "Session (exch tz)", group=GF)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — TRENDLINE ENGINE  (ported from auto_trendlines.pine)
+// ─────────────────────────────────────────────────────────────────────────────
+var string GT = "④ Trendline detection"
+tl_plen     = input.int  (5,    "Pivot Lookback",        minval=2, maxval=50, group=GT)
+tl_mintouch = input.int  (2,    "Min Touches (tradeable)", minval=2, maxval=8, group=GT,
+     tooltip="4H Platinum uses 2 touch points; My Trend Line Edge prefers 3-4.")
+tl_minbars  = input.int  (15,   "Min Bars Spanned",      minval=5, maxval=500, group=GT)
+tl_maxpiv   = input.int  (10,   "Pivots Kept Per Side",  minval=4, maxval=20, group=GT)
+tl_classic  = input.bool (true, "Classic slope only",    group=GT)
+tl_maxdist  = input.float(12.0, "Max Distance From Price ×ATR", minval=2, maxval=50, step=0.5, group=GT)
+tl_allow2   = input.bool (true, "Allow 2-touch tentative line", group=GT)
+tl_touchtol = input.float(0.5,  "Touch Tolerance ×ATR14", minval=0.05, maxval=2.0, step=0.05, group=GT)
+tl_zone     = input.float(0.25, "Zone Half-Width ×ATR14", minval=0.0, maxval=2.0, step=0.05, group=GT)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — S&R ENGINE  (ported from support_resistance_zones.pine)
+// ─────────────────────────────────────────────────────────────────────────────
+var string GZ = "⑤ S&R zones"
+sr_pivLen   = input.int(5, "S&R Pivot Lookback", minval=2, maxval=50, group=GZ)
+sr_maxSR    = input.int(6, "Max S&R zones per side", minval=2, maxval=20, group=GZ)
+
+var string GD = "⑥ Display"
+i_show_tl   = input.bool(true, "Show trendlines",     group=GD)
+i_show_sr   = input.bool(true, "Show nearest S&R",    group=GD)
+i_show_sig  = input.bool(true, "Show entry signals",  group=GD)
+i_show_tbl  = input.bool(true, "Show status table",   group=GD)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE
+// ─────────────────────────────────────────────────────────────────────────────
+C_RES = #f23645
+C_SUP = #089981
+
+_atr     = ta.atr(14)
+tol      = tl_touchtol * _atr
+halfZone = tl_zone * _atr
+conf     = i_conf_atr * _atr
+
+// Price of a line through (x1,y1)-(x2,y2) at bar x
+lineAt(int x1, float y1, int x2, float y2, int x) =>
+    x1 == x2 ? y1 : y1 + (y2 - y1) / float(x2 - x1) * float(x - x1)
+
+// True if any level in arr is within `dist` of lvl
+nearAny(float[] arr, float lvl, float dist) =>
+    bool hit = false
+    if not na(lvl) and array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            if math.abs(array.get(arr, i) - lvl) <= dist
+                hit := true
+                break
+    hit
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  TRENDLINE ENGINE  (best-fit, price-containing — from auto_trendlines.pine)
+// ═════════════════════════════════════════════════════════════════════════════
+_ph = ta.pivothigh(high, tl_plen, tl_plen)
+_pl = ta.pivotlow (low,  tl_plen, tl_plen)
+
+var int[]   phx = array.new_int()
+var float[] phy = array.new_float()
+var int[]   plx = array.new_int()
+var float[] ply = array.new_float()
+
+if not na(_ph)
+    array.push(phx, bar_index - tl_plen)
+    array.push(phy, _ph)
+    if array.size(phx) > tl_maxpiv
+        array.shift(phx)
+        array.shift(phy)
+if not na(_pl)
+    array.push(plx, bar_index - tl_plen)
+    array.push(ply, _pl)
+    if array.size(plx) > tl_maxpiv
+        array.shift(plx)
+        array.shift(ply)
+
+findRes() =>
+    int n = array.size(phx)
+    bool  found = false
+    int   bx1 = 0
+    float by1 = 0.0
+    int   bx2 = 0
+    float by2 = 0.0
+    int   bestTouch = 0
+    int   bestSpan  = 0
+    if n >= 2
+        for a = 0 to n - 2
+            for b = a + 1 to n - 1
+                int   x1   = array.get(phx, a)
+                float y1   = array.get(phy, a)
+                int   x2   = array.get(phx, b)
+                float y2   = array.get(phy, b)
+                int   span = x2 - x1
+                float slope = span == 0 ? 0.0 : (y2 - y1) / span
+                bool ok = span >= tl_minbars and not (tl_classic and slope > 0)
+                if ok
+                    int  touches   = 0
+                    bool contained = true
+                    for k = 0 to n - 1
+                        float py   = array.get(phy, k)
+                        float lv   = lineAt(x1, y1, x2, y2, array.get(phx, k))
+                        float diff = py - lv
+                        if diff > tol
+                            contained := false
+                        if math.abs(diff) <= tol
+                            touches += 1
+                    float projNow = lineAt(x1, y1, x2, y2, bar_index)
+                    bool relevant = math.abs(projNow - close) <= tl_maxdist * _atr
+                    if contained and relevant and touches >= (tl_allow2 ? 2 : tl_mintouch) and (touches > bestTouch or (touches == bestTouch and span > bestSpan))
+                        found     := true
+                        bx1       := x1
+                        by1       := y1
+                        bx2       := x2
+                        by2       := y2
+                        bestTouch := touches
+                        bestSpan  := span
+    [found, bx1, by1, bx2, by2, bestTouch]
+
+findSup() =>
+    int n = array.size(plx)
+    bool  found = false
+    int   bx1 = 0
+    float by1 = 0.0
+    int   bx2 = 0
+    float by2 = 0.0
+    int   bestTouch = 0
+    int   bestSpan  = 0
+    if n >= 2
+        for a = 0 to n - 2
+            for b = a + 1 to n - 1
+                int   x1   = array.get(plx, a)
+                float y1   = array.get(ply, a)
+                int   x2   = array.get(plx, b)
+                float y2   = array.get(ply, b)
+                int   span = x2 - x1
+                float slope = span == 0 ? 0.0 : (y2 - y1) / span
+                bool ok = span >= tl_minbars and not (tl_classic and slope < 0)
+                if ok
+                    int  touches   = 0
+                    bool contained = true
+                    for k = 0 to n - 1
+                        float py   = array.get(ply, k)
+                        float lv   = lineAt(x1, y1, x2, y2, array.get(plx, k))
+                        float diff = py - lv
+                        if diff < -tol
+                            contained := false
+                        if math.abs(diff) <= tol
+                            touches += 1
+                    float projNow = lineAt(x1, y1, x2, y2, bar_index)
+                    bool relevant = math.abs(projNow - close) <= tl_maxdist * _atr
+                    if contained and relevant and touches >= (tl_allow2 ? 2 : tl_mintouch) and (touches > bestTouch or (touches == bestTouch and span > bestSpan))
+                        found     := true
+                        bx1       := x1
+                        by1       := y1
+                        bx2       := x2
+                        by2       := y2
+                        bestTouch := touches
+                        bestSpan  := span
+    [found, bx1, by1, bx2, by2, bestTouch]
+
+[rf, rx1, ry1, rx2, ry2, rtouch] = findRes()
+[sf, sx1, sy1, sx2, sy2, stouch] = findSup()
+
+rStrong = rf and rtouch >= tl_mintouch
+sStrong = sf and stouch >= tl_mintouch
+
+resLine = rf ? lineAt(rx1, ry1, rx2, ry2, bar_index) : na
+supLine = sf ? lineAt(sx1, sy1, sx2, sy2, bar_index) : na
+resTop  = resLine + halfZone
+resBot  = resLine - halfZone
+supTop  = supLine + halfZone
+supBot  = supLine - halfZone
+
+// Stability guard — don't trade a break the bar the detector re-fit a new pair
+var int prevRx1 = 0
+var int prevRx2 = 0
+var int prevSx1 = 0
+var int prevSx2 = 0
+resStable = rf and rx1 == prevRx1 and rx2 == prevRx2
+supStable = sf and sx1 == prevSx1 and sx2 == prevSx2
+prevRx1 := rf ? rx1 : prevRx1
+prevRx2 := rf ? rx2 : prevRx2
+prevSx1 := sf ? sx1 : prevSx1
+prevSx2 := sf ? sx2 : prevSx2
+
+// Events (break = body close beyond zone; bounce = rejection that closes back in)
+_resCross   = ta.crossover (close, resTop)
+_supCross   = ta.crossunder(close, supBot)
+breakUp     = resStable and rStrong and _resCross
+breakDn     = supStable and sStrong and _supCross
+bounceLong  = sf and sStrong and low  <= supTop and close > supTop and close > open
+bounceShort = rf and rStrong and high >= resBot and close < resBot and close < open
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  S&R ENGINE  (wick-to-body zones — from support_resistance_zones.pine, lean)
+// ═════════════════════════════════════════════════════════════════════════════
+ph_s = ta.pivothigh(high, sr_pivLen, sr_pivLen)
+pl_s = ta.pivotlow (low,  sr_pivLen, sr_pivLen)
+
+var float[] sr_sup    = array.new_float(0)   // wick tip (support zone bottom)
+var float[] sr_supB   = array.new_float(0)   // body level (support zone top)
+var bool[]  sr_supBrk = array.new_bool(0)
+var float[] sr_res    = array.new_float(0)   // wick tip (resistance zone top)
+var float[] sr_resB   = array.new_float(0)   // body level (resistance zone bottom)
+var bool[]  sr_resBrk = array.new_bool(0)
+
+if not na(pl_s)
+    bool dup = false
+    if array.size(sr_sup) > 0
+        for i = 0 to array.size(sr_sup) - 1
+            if pl_s >= array.get(sr_sup, i) and pl_s <= array.get(sr_supB, i)
+                dup := true
+                break
+    if not dup
+        if array.size(sr_sup) >= sr_maxSR
+            array.pop(sr_sup)
+            array.pop(sr_supB)
+            array.pop(sr_supBrk)
+        array.unshift(sr_sup,  pl_s)
+        array.unshift(sr_supBrk, false)
+        float sbv = na
+        float sd  = na
+        for k = 0 to sr_pivLen
+            float bb = math.min(open[k], close[k])
+            float d  = bb - pl_s
+            if d >= 0 and (na(sd) or d < sd)
+                sd  := d
+                sbv := bb
+        array.unshift(sr_supB, na(sbv) ? math.min(open[sr_pivLen], close[sr_pivLen]) : sbv)
+
+if not na(ph_s)
+    bool dup = false
+    if array.size(sr_res) > 0
+        for i = 0 to array.size(sr_res) - 1
+            if ph_s >= array.get(sr_resB, i) and ph_s <= array.get(sr_res, i)
+                dup := true
+                break
+    if not dup
+        if array.size(sr_res) >= sr_maxSR
+            array.pop(sr_res)
+            array.pop(sr_resB)
+            array.pop(sr_resBrk)
+        array.unshift(sr_res,  ph_s)
+        array.unshift(sr_resBrk, false)
+        float rbv = na
+        float rd  = na
+        for k = 0 to sr_pivLen
+            float bt = math.max(open[k], close[k])
+            float d  = ph_s - bt
+            if d >= 0 and (na(rd) or d < rd)
+                rd  := d
+                rbv := bt
+        array.unshift(sr_resB, na(rbv) ? math.max(open[sr_pivLen], close[sr_pivLen]) : rbv)
+
+// Broken = body closes beyond the wick tip
+if array.size(sr_res) > 0
+    for i = 0 to array.size(sr_res) - 1
+        if not array.get(sr_resBrk, i) and math.min(open, close) > array.get(sr_res, i)
+            array.set(sr_resBrk, i, true)
+if array.size(sr_sup) > 0
+    for i = 0 to array.size(sr_sup) - 1
+        if not array.get(sr_supBrk, i) and math.max(open, close) < array.get(sr_sup, i)
+            array.set(sr_supBrk, i, true)
+
+// Price currently inside a zone
+sr_atSup = false
+sr_atRes = false
+if array.size(sr_sup) > 0
+    for i = 0 to array.size(sr_sup) - 1
+        if close >= array.get(sr_sup, i) and close <= array.get(sr_supB, i)
+            sr_atSup := true
+            break
+if array.size(sr_res) > 0
+    for i = 0 to array.size(sr_res) - 1
+        if close >= array.get(sr_resB, i) and close <= array.get(sr_res, i)
+            sr_atRes := true
+            break
+
+// Nearest non-broken resistance above / support below price (TP targets)
+f_nres() =>
+    float best = na
+    if array.size(sr_res) > 0
+        for i = 0 to array.size(sr_res) - 1
+            if not array.get(sr_resBrk, i)
+                float lvl = array.get(sr_res, i)
+                if lvl >= close and (na(best) or lvl < best)
+                    best := lvl
+    best
+f_nsup() =>
+    float best = na
+    if array.size(sr_sup) > 0
+        for i = 0 to array.size(sr_sup) - 1
+            if not array.get(sr_supBrk, i)
+                float lvl = array.get(sr_sup, i)
+                if lvl <= close and (na(best) or lvl > best)
+                    best := lvl
+    best
+nearRes = f_nres()
+nearSup = f_nsup()
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  MOMENTUM SHIFT  (Ali Crooks "pocket": break of the last opposing swing)
+// ═════════════════════════════════════════════════════════════════════════════
+ema    = ta.ema(close, i_ema_len)
+_msH   = ta.pivothigh(high, i_mss_len, i_mss_len)
+_msL   = ta.pivotlow (low,  i_mss_len, i_mss_len)
+var float lastSwH = na
+var float lastSwL = na
+if not na(_msH)
+    lastSwH := _msH
+if not na(_msL)
+    lastSwL := _msL
+mssUp = not na(lastSwH) and close > lastSwH   // broke last swing high → bullish shift
+mssDn = not na(lastSwL) and close < lastSwL   // broke last swing low  → bearish shift
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  FILTERS
+// ═════════════════════════════════════════════════════════════════════════════
+_dC   = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+_dE   = request.security(syminfo.tickerid, "D", ta.ema(close, i_htf_ema), lookahead=barmerge.lookahead_off)
+f_htf_long  = not i_htf or _dC > _dE
+f_htf_short = not i_htf or _dC < _dE
+f_sess = not i_sess_f or not na(time(timeframe.period, i_sess))
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  CONFLUENCE  (the traded trendline aligns with a horizontal S&R level)
+// ═════════════════════════════════════════════════════════════════════════════
+conf_breakUp     = not i_req_conf or nearAny(sr_res, resLine, conf)
+conf_breakDn     = not i_req_conf or nearAny(sr_sup, supLine, conf)
+conf_bounceLong  = not i_req_conf or sr_atSup or nearAny(sr_sup, supLine, conf)
+conf_bounceShort = not i_req_conf or sr_atRes or nearAny(sr_res, resLine, conf)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SIGNALS
+// ═════════════════════════════════════════════════════════════════════════════
+useBreak  = i_model != "Bounce"
+useBounce = i_model != "Break"
+
+// Pocket confirmation (Ali Crooks): momentum shift gates the BREAK model only.
+// The BOUNCE model carries its own respect-and-close candle confirmation.
+pocketLong  = not i_req_mss or mssUp
+pocketShort = not i_req_mss or mssDn
+
+longBreak   = useBreak  and breakUp     and conf_breakUp     and pocketLong
+longBounce  = useBounce and bounceLong  and conf_bounceLong
+shortBreak  = useBreak  and breakDn     and conf_breakDn     and pocketShort
+shortBounce = useBounce and bounceShort and conf_bounceShort
+
+longSig  = longBreak  or longBounce
+shortSig = shortBreak or shortBounce
+
+longOK   = i_dir != "Short Only" and f_htf_long  and f_sess
+shortOK  = i_dir != "Long Only"  and f_htf_short and f_sess
+
+lEntry = longOK  and longSig
+sEntry = shortOK and shortSig
+npos   = strategy.position_size == 0
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ENTRIES + EXITS  (trendline-trailing stop; optional next-zone TP @ min R:R)
+// ═════════════════════════════════════════════════════════════════════════════
+var float L_stop = na
+var float L_tp   = na
+var float S_stop = na
+var float S_tp   = na
+
+if lEntry and npos
+    // Initial stop: below the support-trendline zone (the new trend's line), clamped
+    float base = sf ? supBot : close - _atr * i_atrStop
+    float st   = math.min(base - i_buf * _atr, close - _atr * 0.5)
+    st        := math.max(st, close - _atr * i_maxStop)
+    float risk = close - st
+    float zoneTP = na(nearRes) ? na : nearRes
+    float floorTP = close + i_min_rr * risk
+    float tp = not i_use_tp ? na : na(zoneTP) ? floorTP : math.max(zoneTP, floorTP)
+    L_stop := st
+    L_tp   := tp
+    strategy.entry("Long", strategy.long, comment = longBreak ? "L break" : "L bounce")
+    strategy.exit ("Long X", "Long", stop = L_stop, limit = L_tp, comment_profit = "TP", comment_loss = "SL")
+    alert("CF TL+S&R: LONG — trendline signal with S&R confluence", alert.freq_once_per_bar)
+
+if sEntry and npos
+    float base = rf ? resTop : close + _atr * i_atrStop
+    float st   = math.max(base + i_buf * _atr, close + _atr * 0.5)
+    st        := math.min(st, close + _atr * i_maxStop)
+    float risk = st - close
+    float zoneTP = na(nearSup) ? na : nearSup
+    float floorTP = close - i_min_rr * risk
+    float tp = not i_use_tp ? na : na(zoneTP) ? floorTP : math.min(zoneTP, floorTP)
+    S_stop := st
+    S_tp   := tp
+    strategy.entry("Short", strategy.short, comment = shortBreak ? "S break" : "S bounce")
+    strategy.exit ("Short X", "Short", stop = S_stop, limit = S_tp, comment_profit = "TP", comment_loss = "SL")
+    alert("CF TL+S&R: SHORT — trendline signal with S&R confluence", alert.freq_once_per_bar)
+
+// Trail the stop along the trendline (never widening) — the Chart Fanatic core
+if strategy.position_size > 0 and i_trail and sf
+    float cand = supBot - i_buf * _atr
+    L_stop := math.max(L_stop, math.min(cand, close - syminfo.mintick))
+    strategy.exit("Long X", "Long", stop = L_stop, limit = L_tp, comment_profit = "TP", comment_loss = "SL")
+
+if strategy.position_size < 0 and i_trail and rf
+    float cand = resTop + i_buf * _atr
+    S_stop := math.min(S_stop, math.max(cand, close + syminfo.mintick))
+    strategy.exit("Short X", "Short", stop = S_stop, limit = S_tp, comment_profit = "TP", comment_loss = "SL")
+
+if strategy.position_size == 0
+    L_stop := na
+    L_tp   := na
+    S_stop := na
+    S_tp   := na
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  VISUALS
+// ═════════════════════════════════════════════════════════════════════════════
+var line resLn = na
+var line supLn = na
+if barstate.islast and i_show_tl
+    line.delete(resLn)
+    line.delete(supLn)
+    int ext = bar_index + 20
+    if rf
+        resLn := line.new(rx1, ry1, ext, lineAt(rx1, ry1, rx2, ry2, ext),
+             color=color.new(C_RES, rStrong ? 0 : 40), width=rStrong ? 2 : 1,
+             style=rStrong ? line.style_solid : line.style_dashed)
+    if sf
+        supLn := line.new(sx1, sy1, ext, lineAt(sx1, sy1, sx2, sy2, ext),
+             color=color.new(C_SUP, sStrong ? 0 : 40), width=sStrong ? 2 : 1,
+             style=sStrong ? line.style_solid : line.style_dashed)
+
+plot(ema, "Pocket EMA", color.new(color.orange, 45), 1)
+plot(i_show_sr ? nearRes : na, "Nearest Resistance", color.new(C_RES, 35), 1, plot.style_linebr)
+plot(i_show_sr ? nearSup : na, "Nearest Support",    color.new(C_SUP, 35), 1, plot.style_linebr)
+plot(strategy.position_size > 0 ? L_stop : strategy.position_size < 0 ? S_stop : na,
+     "Trailing Stop", color.new(color.orange, 15), 2, plot.style_circles)
+
+plotshape(i_show_sig and lEntry and npos, "Long",  shape.triangleup,   location.belowbar, color.new(C_SUP, 0), size=size.small, text="BUY")
+plotshape(i_show_sig and sEntry and npos, "Short", shape.triangledown, location.abovebar, color.new(C_RES, 0), size=size.small, text="SELL")
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  STATUS TABLE
+// ═════════════════════════════════════════════════════════════════════════════
+if barstate.islast and i_show_tbl
+    var table t = table.new(position.top_right, 2, 8, bgcolor=color.new(#0d1117, 10),
+         frame_color=color.new(#30363d, 0), frame_width=1, border_color=color.new(#30363d, 60), border_width=1)
+    table.cell(t, 0, 0, "CF TL+S&R", text_color=color.white, text_size=size.small, bgcolor=color.new(#161b22, 0))
+    table.cell(t, 1, 0, i_model + " · " + i_dir, text_color=#8b949e, text_size=size.tiny, bgcolor=color.new(#161b22, 0))
+
+    string rtxt = rf ? "×" + str.tostring(rtouch) + (rStrong ? "" : "~") + " @ " + str.tostring(resLine, format.mintick) : "—"
+    table.cell(t, 0, 1, "Resistance TL", text_color=C_RES, text_size=size.tiny)
+    table.cell(t, 1, 1, rtxt, text_color=color.white, text_size=size.tiny)
+
+    string stxt = sf ? "×" + str.tostring(stouch) + (sStrong ? "" : "~") + " @ " + str.tostring(supLine, format.mintick) : "—"
+    table.cell(t, 0, 2, "Support TL", text_color=C_SUP, text_size=size.tiny)
+    table.cell(t, 1, 2, stxt, text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "Nearest S&R", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 3, (na(nearSup) ? "—" : str.tostring(nearSup, format.mintick)) + " / " + (na(nearRes) ? "—" : str.tostring(nearRes, format.mintick)), text_color=color.white, text_size=size.tiny)
+
+    string conftxt = sr_atSup ? "AT SUPPORT" : sr_atRes ? "AT RESISTANCE" : "between"
+    table.cell(t, 0, 4, "Price vs S&R", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 4, conftxt, text_color=sr_atSup ? C_SUP : sr_atRes ? C_RES : color.gray, text_size=size.tiny)
+
+    string msstxt = not i_req_mss ? "off" : mssUp ? "▲ shift up" : mssDn ? "▼ shift down" : "—"
+    table.cell(t, 0, 5, "Momentum (pocket)", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 5, msstxt, text_color=mssUp ? C_SUP : mssDn ? C_RES : color.gray, text_size=size.tiny)
+
+    string evt = longBreak ? "BREAK ▲" : shortBreak ? "BREAK ▼" : longBounce ? "Bounce ▲" : shortBounce ? "Bounce ▼" : "—"
+    color  evc = longBreak or longBounce ? C_SUP : shortBreak or shortBounce ? C_RES : color.gray
+    table.cell(t, 0, 6, "Signal", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 6, evt, text_color=evc, text_size=size.tiny)
+
+    float pnl = strategy.netprofit
+    _pos = strategy.position_size
+    table.cell(t, 0, 7, _pos > 0 ? "LONG" : _pos < 0 ? "SHORT" : "FLAT", text_color=_pos > 0 ? C_SUP : _pos < 0 ? C_RES : color.gray, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(math.round(pnl, 0), "#,###") + " USD", text_color=pnl >= 0 ? C_SUP : C_RES, text_size=size.tiny)
+
+// ── Alerts are fired via alert() inside the entry blocks above (alertcondition
+//    has no effect inside a strategy).

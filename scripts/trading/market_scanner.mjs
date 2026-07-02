@@ -30,6 +30,10 @@ const SIGNALS_FILE    = join(DATA_ROOT, 'live_signals.json');
 const SCAN_INTERVAL   = 15 * 60 * 1000;   // 15 minutes
 const MAX_HISTORY     = 500;               // keep last 500 expired signals
 const MIN_SCORE       = 6;                 // per-TF Pass 1 threshold (MTF bonus adds up to +3 on top)
+// --scan-only: look at charts + write live_signals.json every 15 min, but place
+// NO trades (pass no executor to scanForSetups). Visibility/planning without the
+// overtrading risk of continuous auto-execution.
+const SCAN_ONLY       = process.argv.includes('--scan-only');
 
 // How long a signal stays "active" before auto-expiring
 const TTL = { '15': 30 * 60 * 1000, '60': 2 * 60 * 60 * 1000 };
@@ -77,7 +81,7 @@ async function runScan(state) {
 
   let fresh = [];
   try {
-    fresh = await scanForSetups(MIN_SCORE, 1.5, attemptInlineTrade);
+    fresh = await scanForSetups(MIN_SCORE, 1.5, SCAN_ONLY ? null : attemptInlineTrade);
   } catch (e) {
     console.error(`  Scan error: ${e.message}`);
     return state;

@@ -31,6 +31,7 @@ i_minbars  = input.int  (20,  "Min Bars Spanned",               minval=5, maxval
 i_maxpiv   = input.int  (10,  "Pivots Kept Per Side",           minval=4, maxval=20,  group=GD, tooltip="How many recent swing highs/lows to fit through.")
 i_classic  = input.bool (true,"Classic slope only",             group=GD, tooltip="ON: resistance must slope down (lower highs), support up (higher lows). OFF: also allow channel lines.")
 i_maxdist  = input.float(12.0,"Max Distance From Price (×ATR)", minval=2, maxval=50, step=0.5, group=GD, tooltip="Ignore lines projecting far from current price (not actionable).")
+i_allow2   = input.bool (true,"Show 2-touch tentative line",    group=GD, tooltip="When no 3+ touch line qualifies, draw the best price-containing 2-pivot line (dashed/thin) so a trendline is visible on every timeframe. Break/bounce SIGNALS still require the full Min Touches above.")
 
 var string GZ = "② Zone (trendlines are zones, not lines)"
 i_touchtol = input.float(0.5, "Touch Tolerance (×ATR14)",       minval=0.05, maxval=2.0, step=0.05, group=GZ, tooltip="How close a pivot must be to count as a touch.")
@@ -129,7 +130,7 @@ findRes() =>
                             touches += 1
                     float projNow = lineAt(x1, y1, x2, y2, bar_index)
                     bool relevant = math.abs(projNow - close) <= i_maxdist * _atr
-                    if contained and relevant and touches >= i_mintouch and (touches > bestTouch or (touches == bestTouch and span > bestSpan))
+                    if contained and relevant and touches >= (i_allow2 ? 2 : i_mintouch) and (touches > bestTouch or (touches == bestTouch and span > bestSpan))
                         found     := true
                         bx1       := x1
                         by1       := y1
@@ -171,7 +172,7 @@ findSup() =>
                             touches += 1
                     float projNow = lineAt(x1, y1, x2, y2, bar_index)
                     bool relevant = math.abs(projNow - close) <= i_maxdist * _atr
-                    if contained and relevant and touches >= i_mintouch and (touches > bestTouch or (touches == bestTouch and span > bestSpan))
+                    if contained and relevant and touches >= (i_allow2 ? 2 : i_mintouch) and (touches > bestTouch or (touches == bestTouch and span > bestSpan))
                         found     := true
                         bx1       := x1
                         by1       := y1
@@ -183,6 +184,11 @@ findSup() =>
 
 [rf, rx1, ry1, rx2, ry2, rtouch] = findRes()
 [sf, sx1, sy1, sx2, sy2, stouch] = findSup()
+
+// "Strong" = meets the full Min-Touches bar → eligible for break/bounce SIGNALS.
+// A line below that (but ≥2 touches) is drawn as a tentative dashed line only.
+rStrong = rf and rtouch >= i_mintouch
+sStrong = sf and stouch >= i_mintouch
 
 resLine = rf ? lineAt(rx1, ry1, rx2, ry2, bar_index) : na
 supLine = sf ? lineAt(sx1, sy1, sx2, sy2, bar_index) : na
@@ -212,12 +218,12 @@ prevSx2 := sf ? sx2 : prevSx2
 // Evaluate crossovers every bar (never behind `and`) so their history stays consistent.
 _resCross   = ta.crossover (close, resTop)
 _supCross   = ta.crossunder(close, supBot)
-breakUp     = resStable and _resCross
-breakDn     = supStable and _supCross
+breakUp     = resStable and rStrong and _resCross
+breakDn     = supStable and sStrong and _supCross
 pokeUp      = rf and high > resTop and close <= resTop
 pokeDn      = sf and low  < supBot and close >= supBot
-bounceShort = rf and high >= resBot and close < resBot and close < open
-bounceLong  = sf and low  <= supTop and close > supTop and close > open
+bounceShort = rf and rStrong and high >= resBot and close < resBot and close < open
+bounceLong  = sf and sStrong and low  <= supTop and close > supTop and close > open
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VISUALS — lines + zone bands + labels (redrawn on the last bar)
@@ -248,25 +254,25 @@ if barstate.islast
 
     if i_showres and rf
         float ry_end = lineAt(rx1, ry1, rx2, ry2, ext)
-        resMid := line.new(rx1, ry1, ext, ry_end, color=color.new(C_RES, 0), width=2)
-        if i_showzone and halfZone > 0
+        resMid := line.new(rx1, ry1, ext, ry_end, color=color.new(C_RES, rStrong ? 0 : 35), width=rStrong ? 2 : 1, style=rStrong ? line.style_solid : line.style_dashed)
+        if i_showzone and halfZone > 0 and rStrong   // zone only on strong (signal-eligible) lines
             resHi  := line.new(rx1, ry1 + halfZone, ext, ry_end + halfZone, color=color.new(C_RES, 70), width=1)
             resLo  := line.new(rx1, ry1 - halfZone, ext, ry_end - halfZone, color=color.new(C_RES, 70), width=1)
             resFill := linefill.new(resHi, resLo, color=color.new(C_RES, 90))
         if i_showlabel
-            resLbl := label.new(ext, ry_end, "RES  ▼ ×" + str.tostring(rtouch),
-                 style=label.style_label_left, color=color.new(C_RES, 15), textcolor=color.white, size=size.small)
+            resLbl := label.new(ext, ry_end, "RES  ▼ ×" + str.tostring(rtouch) + (rStrong ? "" : " tentative"),
+                 style=label.style_label_left, color=color.new(C_RES, rStrong ? 15 : 45), textcolor=color.white, size=size.small)
 
     if i_showsup and sf
         float sy_end = lineAt(sx1, sy1, sx2, sy2, ext)
-        supMid := line.new(sx1, sy1, ext, sy_end, color=color.new(C_SUP, 0), width=2)
-        if i_showzone and halfZone > 0
+        supMid := line.new(sx1, sy1, ext, sy_end, color=color.new(C_SUP, sStrong ? 0 : 35), width=sStrong ? 2 : 1, style=sStrong ? line.style_solid : line.style_dashed)
+        if i_showzone and halfZone > 0 and sStrong   // zone only on strong (signal-eligible) lines
             supHi  := line.new(sx1, sy1 + halfZone, ext, sy_end + halfZone, color=color.new(C_SUP, 70), width=1)
             supLo  := line.new(sx1, sy1 - halfZone, ext, sy_end - halfZone, color=color.new(C_SUP, 70), width=1)
             supFill := linefill.new(supHi, supLo, color=color.new(C_SUP, 90))
         if i_showlabel
-            supLbl := label.new(ext, sy_end, "SUP  ▲ ×" + str.tostring(stouch),
-                 style=label.style_label_left, color=color.new(C_SUP, 15), textcolor=color.white, size=size.small)
+            supLbl := label.new(ext, sy_end, "SUP  ▲ ×" + str.tostring(stouch) + (sStrong ? "" : " tentative"),
+                 style=label.style_label_left, color=color.new(C_SUP, sStrong ? 15 : 45), textcolor=color.white, size=size.small)
 
 // Faint live line value (so the projected level is visible bar-to-bar too)
 plot(resLine, "Resistance value", color=color.new(C_RES, 55), linewidth=1, style=plot.style_linebr)
@@ -298,13 +304,13 @@ if barstate.islast and i_showtable
     table.cell(tb, 0, 0, "AUTO TRENDLINES", text_color=color.white, text_size=size.small, bgcolor=color.new(#1a1a2e, 0))
     table.cell(tb, 1, 0, str.tostring(i_mintouch) + "+ touch", text_color=color.silver, text_size=size.small, bgcolor=color.new(#1a1a2e, 0))
 
-    string rtxt = rf ? "▼ " + str.tostring(rtouch) + "tch  @ " + str.tostring(resLine, format.mintick) : "— none"
+    string rtxt = rf ? "▼ " + str.tostring(rtouch) + "tch" + (rStrong ? "" : "~") + "  @ " + str.tostring(resLine, format.mintick) : "— none"
     table.cell(tb, 0, 1, "Resistance", text_color=color.new(C_RES, 0), text_size=size.small)
-    table.cell(tb, 1, 1, rtxt, text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 1, rtxt, text_color=rStrong ? color.white : color.silver, text_size=size.small)
 
-    string stxt = sf ? "▲ " + str.tostring(stouch) + "tch  @ " + str.tostring(supLine, format.mintick) : "— none"
+    string stxt = sf ? "▲ " + str.tostring(stouch) + "tch" + (sStrong ? "" : "~") + "  @ " + str.tostring(supLine, format.mintick) : "— none"
     table.cell(tb, 0, 2, "Support", text_color=color.new(C_SUP, 0), text_size=size.small)
-    table.cell(tb, 1, 2, stxt, text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 2, stxt, text_color=sStrong ? color.white : color.silver, text_size=size.small)
 
     string evt = breakUp ? "BREAK ▲" : breakDn ? "BREAK ▼" : bounceLong ? "Bounce ▲" : bounceShort ? "Bounce ▼" : (pokeUp or pokeDn) ? "Wick poke (grab)" : "—"
     color  evc = breakUp or bounceLong ? C_BRK_UP : breakDn or bounceShort ? C_BRK_DN : (pokeUp or pokeDn) ? C_POKE : color.gray

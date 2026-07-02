@@ -271,11 +271,12 @@ async function main() {
 
     if (LIVE) {
       try {
-        // entry:null => two-step open-then-amend with ABSOLUTE SL/TP (proven path;
-        // the relative-SL/TP one-step path mis-set the distance and didn't persist).
-        // placeOrder calls assertOrderSafety internally (incl. anti-stack on same
-        // symbol). The brief naked window is backstopped by naked_position_guard.
-        const res = await bridge.placeOrder({ symbol, direction: sig.dir, units: lots, entry: null, tpPrice: tp, slPrice: sig.sl });
+        // Pass `entry` => ATOMIC path: SL/TP attach on the order itself (relative
+        // distance from fill). This is the SAME path inline_trader uses reliably;
+        // the old entry:null open-then-amend path failed to attach on 45/46 trades
+        // (silent no-op → naked → force-closed), which is why the experiment logged
+        // almost no bracketed trades. placeOrder still runs assertOrderSafety.
+        const res = await bridge.placeOrder({ symbol, direction: sig.dir, units: lots, entry: sig.entry, tpPrice: tp, slPrice: sig.sl });
         record.positionId = Number(res?.position?.positionId || res?.positionId) || null;
         record.placed = !!record.positionId;   // a captured positionId means the order opened
         state[key].positionId = record.positionId;

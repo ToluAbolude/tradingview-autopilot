@@ -6,14 +6,15 @@
  * ([orb_backtest.mjs] / [[project_orb_backtest_findings]]) proved have a real
  * ORB edge, with a 2R target and SL at the opposite OR boundary.
  *
- * Pairings (data-driven; instrument×session matters more than instrument):
- *   ASIA   00:00 UTC → XAUUSD            (expR +0.36, PF 1.69)
- *   LONDON 07:00 UTC → WTI SPX500 US30 AUDUSD NZDUSD AUDJPY GBPJPY (+0.14..+0.29)
- *   NY     13:30 UTC → AUDJPY            (expR +0.24, PF 1.64)
- *
- * NOTE on WTI: it is blocked from the all-day scanner (churn that lost money),
- * but ORB-at-the-open is a distinct, profitable setup — so this runner keeps its
- * OWN allowlist and is intentionally NOT gated by trading_params.blockedSymbols.
+ * Roster (2026-07-02 rebuild): ONLY the configs that survived orb_oos.mjs — i.e.
+ * positive in BOTH time-halves AND robust to removing their top-3 trades. Tuned
+ * for a Tradovate 25k futures prop account (index/gold futures → MGC/MYM/MNQ/MES):
+ *   ASIA   00:00 UTC → XAUUSD@2R (PF1.59), US30@2R (PF1.29), NAS100@1R (WR56%)
+ *   LONDON 07:00 UTC → SPX500@2R (PF1.35 with trend)
+ * DROPPED: NAS100-NY@2R (died out-of-sample), and the old FX/WTI roster (not the
+ * futures instruments a Tradovate account trades). Risk = params.orbRiskPct
+ * (default 0.5% — prop-appropriate; the prop sim needs small size to survive the
+ * trailing drawdown). DRY-RUN logs are the forward-test to mirror on Tradovate.
  *
  * Cadence: run every 5 min via cron. Each tick, for any pairing whose breakout
  * window is currently open, it builds the opening range from cTrader M5 bars,
@@ -46,14 +47,13 @@ const LIVE = process.argv.includes('--live');   // default: dry-run
 // ── Strategy config (from the 90d backtest) ──────────────────────────────────
 const OR_DURATION_MIN  = 30;
 const BREAKOUT_WINDOW_H = 4;     // only enter within 4h of the OR close
-const TARGET_R          = 2;     // 2R beat 1R across almost every winning pairing
 const MAX_ENTRY_AGE_MIN = 15;    // don't chase a breakout older than this (price moved)
 const MIN_OR_BARS       = 4;     // need >=4 of the 6 M5 bars in the 30-min OR
 
+// Each config carries its own R target (NAS100-Asia validated at 1R, rest at 2R).
 const PAIRINGS = [
-  { session: 'ASIA',   openUTC: '00:00', symbols: ['XAUUSD'] },
-  { session: 'LONDON', openUTC: '07:00', symbols: ['WTI', 'SPX500', 'US30', 'AUDUSD', 'NZDUSD', 'AUDJPY', 'GBPJPY'] },
-  { session: 'NY',     openUTC: '13:30', symbols: ['AUDJPY'] },
+  { session: 'ASIA',   openUTC: '00:00', configs: [{ sym: 'XAUUSD', R: 2 }, { sym: 'US30', R: 2 }, { sym: 'NAS100', R: 1 }] },
+  { session: 'LONDON', openUTC: '07:00', configs: [{ sym: 'SPX500', R: 2 }] },
 ];
 
 function log(msg) { process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`); }
@@ -148,7 +148,7 @@ async function main() {
   const bridge = await import('./broker_ctrader.mjs');
   await bridge.connect();
   const params = loadParams();
-  const riskPct = (params.riskPct && params.riskPct[0]) || 2.5;
+  const riskPct = params.orbRiskPct ?? 0.5;   // ORB has its OWN (small) risk, decoupled from the scanner's riskPct
   const state = loadState();
   const today = now.toISOString().slice(0, 10);
   const nowMs = now.getTime();
@@ -188,7 +188,9 @@ async function main() {
     // Only act once the OR has closed and we're still inside the breakout window.
     if (nowMs < orEnd || nowMs > brkEnd) continue;
 
-    for (const symbol of pairing.symbols) {
+    for (const cfg of pairing.configs) {
+      const symbol = cfg.sym;
+      const TARGET_R = cfg.R;
       const key = `${today}:${pairing.session}:${symbol}`;
       if (state[key]?.entered) continue;   // one shot per instrument/session/day
 
@@ -230,7 +232,7 @@ async function main() {
 
       if (LIVE) {
         try {
-          const res = await bridge.placeOrder({ symbol, direction: r.dir, units: lots, entry: null, tpPrice: tp, slPrice: r.sl });
+          const res = await bridge.placeOrder({ symbol, direction: r.dir, units: lots, entry: r.entry, tpPrice: tp, slPrice: r.sl });
           signal.placed = true; signal.positionId = res?.positionId ?? null;
           log(`  ✅ LIVE ${pairing.session} ${symbol} ${r.dir} ${lots}lots entry~${signal.entry} SL ${signal.sl} TP ${signal.tp}`);
         } catch (e) {

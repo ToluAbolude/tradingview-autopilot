@@ -303,10 +303,9 @@ sig_s    = valid_s and score_s >= 6
 trailCol = A_long ? color.new(#00e676, 0) : color.new(#ff1744, 0)
 plot(show_trail ? trail : na, "SmartTrail (A)", color=trailCol, linewidth=2)
 
-// EMAs (always visible — used for ranging gate)
-plot(ema8,  "EMA 8",  color=color.new(#ffeb3b, 0), linewidth=1)
-plot(ema21, "EMA 21", color=color.new(#ffa726, 0), linewidth=1)
-plot(ema50, "EMA 50", color=color.new(#eeeeee, 0), linewidth=2)
+// EMAs are still computed (ema8/21/50) and feed the emaFlat ranging-market gate,
+// but they are no longer plotted — trend context now comes from the standalone
+// Auto Trendlines indicator instead of the EMA 20/21 stack.
 
 // T Weekly EMA
 w1Col = T_long ? color.new(#4dd0e1, 15) : T_short ? color.new(#e57373, 15) : color.new(color.gray, 50)
