@@ -28,6 +28,7 @@ import tls from 'tls';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { fibVetoState, checkFibVeto } from './fib_veto.mjs';
 const require = createRequire(import.meta.url);
 const protobuf = require('protobufjs');
 
@@ -323,6 +324,18 @@ const _SAFETY = {
   maxBarAgeMs: 30 * 60 * 1000,
 };
 
+// H1 leg-state cache for the fib veto — one getTrendbars call per symbol per
+// 10 min, shared across the retry storms the runners produce.
+const _fibVetoCache = new Map();
+async function _fibVetoStateFor(symbol) {
+  const hit = _fibVetoCache.get(symbol);
+  if (hit && Date.now() - hit.ts < 10 * 60 * 1000) return hit.state;
+  const bars = await getTrendbars(symbol, { period: 'H1', fromMs: Date.now() - 40 * 24 * 3600 * 1000, windowDays: 20 });
+  const state = fibVetoState(bars);
+  _fibVetoCache.set(symbol, { ts: Date.now(), state });
+  return state;
+}
+
 export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false }) {
   const cls = _instrumentClass(symbol);
   const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
@@ -355,6 +368,25 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
     const openVol = await getOpenVolumeForSymbol(symbol).catch(() => 0);
     if (openVol > 0) {
       throw new Error(`ORDER_SAFETY_REJECT ${symbol}: existing open volume ${openVol} — no stacking`);
+    }
+  }
+
+  // Fib-depth veto (hard rule, 2026-07-02). fib_backtest (2y H1 × 7 symbols,
+  // 2,943 legs): once an impulse leg has retraced ≥61.8%, it continues only
+  // 38.6% of the time — continuation-direction ("buy the dip"/"sell the
+  // rally") entries are blocked until the leg resolves. Counter-trend entries
+  // pass. Fail-open on data errors like the price check below; the H1 state is
+  // cached 10 min per symbol. Kill switch: FIB_VETO=off.
+  if ((process.env.FIB_VETO || 'on') !== 'off') {
+    try {
+      const st = await _fibVetoStateFor(symbol);
+      const verdict = checkFibVeto(st, dir);
+      if (verdict.vetoed) {
+        throw new Error(`ORDER_SAFETY_REJECT ${symbol}: ${verdict.reason}`);
+      }
+    } catch (e) {
+      if (/ORDER_SAFETY_REJECT/.test(e.message)) throw e;
+      console.error(`[cTrader] fib-veto check skipped for ${symbol}: ${e.message}`);
     }
   }
 

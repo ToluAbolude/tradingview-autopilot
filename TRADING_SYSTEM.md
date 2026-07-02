@@ -90,9 +90,18 @@ Every trade on **both** accounts is auto-logged to a Notion DB with an annotated
 
 ### Knowledge base
 
-NotebookLM **"Trading Notebook"** holds the trading-theory library plus **37 Chart Fanatics
-strategies** (the strategy pages, and each linked PDF added as extracted text). Managed via the
-`nlm` CLI / notebooklm-mcp (auth is short-lived — re-run `nlm login` when it expires).
+NotebookLM notebooks, managed via the `nlm` CLI / notebooklm-mcp (auth is short-lived —
+re-run `nlm login` when it expires):
+
+- **"Chart Fanatics Strategies"** (`5d89abcb-32fc-4a03-8f41-60ddfefa02ff`) — all **40**
+  strategy pages from chartfanatics.com/strategies (URL sources) + the first 10 linked
+  Drive PDF playbooks. **Full at the free-tier cap of 50 sources/notebook.**
+- **"Chart Fanatics PDF Playbooks"** (`9eb2bdbc-b08f-4a5b-8eb7-9b27829f97a8`) — the other
+  **22** Drive PDF playbooks (32 of the 40 pages link one; the 8 newest pages have no PDF).
+- **"Trading Notebook"** (`4e15a5e2-ad76-4466-9779-5c576ebc19aa`) — the trading-theory
+  library (books/PDFs) plus ~15 assorted strategy write-ups. Also full at the 50 cap.
+- **"Trading System"** (`93e8ea93-cf80-4dbe-89ff-edcb3be91f82`) — this repo's live system
+  docs (refresh with `scripts/notebooklm_seed.ps1 -SystemOnly`).
 
 ---
 

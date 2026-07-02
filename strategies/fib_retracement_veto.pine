@@ -1,0 +1,242 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  FIB RETRACEMENT — VETO  (indicator, NOT a trigger)                         ║
+// ║                                                                             ║
+// ║  Backtest-calibrated (fib_backtest.mjs, 2y H1 × 7 symbols, 2,943 legs):     ║
+// ║  pullback depth into an impulse leg discriminates retracement vs reversal, ║
+// ║  but limit entries at fib levels are NOT profitable standalone. So this    ║
+// ║  tool draws the fib grid of the active leg and answers ONE question:       ║
+// ║  "are the odds still with the trend, or is this pullback likely a          ║
+// ║  reversal?" — a VETO for pullback entries, never a buy/sell signal.        ║
+// ║                                                                             ║
+// ║  Measured P(trend continues | pullback reached depth):                     ║
+// ║    23.6%→62% · 38.2%→54.5% · 50%→47% · 61.8%→38.6% · 78.6%→25.8% · 100%→12%║
+// ║  Median continuation pulls back 49%; median reversal runs to 122%.         ║
+// ║                                                                             ║
+// ║  Leg definition = the backtest's: fractal-5 pivots, leg ≥ 3×ATR14,          ║
+// ║  5–100 bars, price fully contained. Resolution: new extreme = CONTINUED,   ║
+// ║  close beyond origin = REVERSED.                                           ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//@version=6
+indicator("Fib Retracement — Veto", shorttitle="FibVeto", overlay=true,
+     max_lines_count=30, max_labels_count=30, max_boxes_count=10, max_bars_back=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+var string GD = "① Leg Detection (backtest params)"
+i_plen    = input.int  (5,   "Pivot Lookback (bars each side)", minval=2, maxval=20,  group=GD)
+i_minleg  = input.float(3.0, "Min Leg Size (×ATR14)",           minval=1, maxval=10, step=0.5, group=GD)
+i_maxbars = input.int  (100, "Max Leg Length (bars)",           minval=10, maxval=300, group=GD)
+i_track   = input.int  (150, "Max Bars to Track Pullback",      minval=20, maxval=500, group=GD)
+
+var string GV = "② Display"
+i_ext      = input.int   (15, "Extend Levels Right (bars)", minval=0, maxval=100, group=GV)
+i_showzone = input.bool  (true, "Shade Veto / Reversal Zones", group=GV)
+i_showlbl  = input.bool  (true, "Level Labels with P(continue)", group=GV)
+i_showtbl  = input.bool  (true, "Verdict Table", group=GV)
+i_tblpos   = input.string("bottom_right", "Table Position", options=["top_right","bottom_right","bottom_left","top_left"], group=GV)
+i_marks    = input.bool  (true, "Mark Resolved Legs (✔/✖)", group=GV)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONSTANTS — fib grid + backtested continuation odds
+// ─────────────────────────────────────────────────────────────────────────────
+var FIBS  = array.from(0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+var PCONT = array.from(62.0,  54.5,  47.0, 38.6,  25.8,  11.7)   // % continue | reached
+C_OK   = #089981
+C_FLIP = #d1a000
+C_VETO = #ff7043
+C_REV  = #f23645
+C_GRAY = color.new(#787b86, 0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PIVOT / LEG STATE
+// ─────────────────────────────────────────────────────────────────────────────
+atr    = ta.atr(14)
+ph     = ta.pivothigh(i_plen, i_plen)
+pl     = ta.pivotlow(i_plen, i_plen)
+pbLow  = ta.lowest(low, i_plen)      // pullback so far between pivot centre and confirm
+pbHigh = ta.highest(high, i_plen)
+
+var float loPx = na
+var int   loIdx = na
+var float hiPx = na
+var int   hiIdx = na
+
+var int    evDir      = 0        // +1 up-leg (fib on dips) · −1 down-leg (fib on rallies)
+var float  evOrg      = na       // leg origin (invalidation)
+var float  evExt      = na       // leg extreme (continuation line)
+var int    evOrgIdx   = na
+var int    evExtIdx   = na
+var int    evStartIdx = na
+var float  evRe       = na       // deepest retrace price so far
+var float  evMaxDepth = 0.0
+var string evStatus   = "none"   // tracking | continued | reversed | timeout
+
+// ── 1. update the tracked pullback ───────────────────────────────────────────
+if evStatus == "tracking"
+    evRe := evDir > 0 ? math.min(evRe, low) : math.max(evRe, high)
+    evMaxDepth := math.abs(evExt - evRe) / math.abs(evExt - evOrg)
+    bool contHit = evDir > 0 ? high > evExt : low < evExt
+    bool revHit  = evDir > 0 ? close < evOrg : close > evOrg
+    if contHit
+        evStatus := "continued"
+    else if revHit
+        evStatus := "reversed"
+    else if bar_index - evStartIdx >= i_track
+        evStatus := "timeout"
+
+contNow = i_marks and evStatus == "continued" and evStatus[1] == "tracking"
+revNow  = i_marks and evStatus == "reversed"  and evStatus[1] == "tracking"
+
+// ── 2. record pivots ─────────────────────────────────────────────────────────
+if not na(pl)
+    loPx := pl
+    loIdx := bar_index - i_plen
+if not na(ph)
+    hiPx := ph
+    hiIdx := bar_index - i_plen
+
+// ── 3. start a new leg when free ─────────────────────────────────────────────
+newLeg = false
+if evStatus != "tracking" and not na(ph) and not na(loPx) and loIdx < hiIdx
+    int legBars = hiIdx - loIdx
+    if legBars >= i_plen and legBars <= i_maxbars and (hiPx - loPx) >= i_minleg * atr
+        bool contained = true
+        for o = 0 to bar_index - loIdx
+            if high[o] > hiPx and o >= i_plen
+                contained := false
+                break
+            if low[o] < loPx
+                contained := false
+                break
+        if contained
+            evDir := 1
+            evOrg := loPx
+            evExt := hiPx
+            evOrgIdx := loIdx
+            evExtIdx := hiIdx
+            evStartIdx := bar_index
+            evRe := pbLow
+            evMaxDepth := math.abs(evExt - evRe) / math.abs(evExt - evOrg)
+            evStatus := "tracking"
+            newLeg := true
+if evStatus != "tracking" and not newLeg and not na(pl) and not na(hiPx) and hiIdx < loIdx
+    int legBars = loIdx - hiIdx
+    if legBars >= i_plen and legBars <= i_maxbars and (hiPx - loPx) >= i_minleg * atr
+        bool contained = true
+        for o = 0 to bar_index - hiIdx
+            if low[o] < loPx and o >= i_plen
+                contained := false
+                break
+            if high[o] > hiPx
+                contained := false
+                break
+        if contained
+            evDir := -1
+            evOrg := hiPx
+            evExt := loPx
+            evOrgIdx := hiIdx
+            evExtIdx := loIdx
+            evStartIdx := bar_index
+            evRe := pbHigh
+            evMaxDepth := math.abs(evExt - evRe) / math.abs(evExt - evOrg)
+            evStatus := "tracking"
+            newLeg := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERDICT — largest fib threshold the pullback has reached → measured odds
+// ─────────────────────────────────────────────────────────────────────────────
+fibPrice(f) => evDir > 0 ? evExt - f * (evExt - evOrg) : evExt + f * (evOrg - evExt)
+
+reachedIdx() =>
+    int idx = -1
+    for i = 0 to array.size(FIBS) - 1
+        if evMaxDepth >= array.get(FIBS, i)
+            idx := i
+    idx
+
+ri = evStatus == "none" ? -1 : reachedIdx()
+pNow = ri >= 0 ? array.get(PCONT, ri) : 70.0
+dipTxt = evDir > 0 ? "buying this dip" : "selling this rally"
+verdictTxt = evStatus == "continued" ? "CONTINUED ✔ — new extreme" :
+     evStatus == "reversed" ? "REVERSED ✖ — origin broken" :
+     evStatus == "timeout"  ? "TIMEOUT — unresolved" :
+     evStatus == "none"     ? "no qualifying leg" :
+     ri <= -1 ? "EARLY — pullback < 23.6%" :
+     ri == 0 ? "✅ SHALLOW — 62% continue" :
+     ri == 1 ? "✅ HEALTHY — 55% continue" :
+     ri == 2 ? "⚠️ COIN FLIP — 47% continue" :
+     ri == 3 ? "⛔ VETO " + dipTxt + " — 39%" :
+     ri == 4 ? "⛔ LIKELY REVERSAL — 26%" :
+     "🔻 STRUCTURE LOST — 12%"
+verdictCol = evStatus == "continued" ? C_OK :
+     evStatus == "reversed" ? C_REV :
+     evStatus == "timeout" or evStatus == "none" ? C_GRAY :
+     ri <= 1 ? C_OK : ri == 2 ? C_FLIP : ri == 3 ? C_VETO : C_REV
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DRAWINGS — one fib grid for the active/most recent leg
+// ─────────────────────────────────────────────────────────────────────────────
+var array<line>  fibLines = array.new<line>()
+var array<label> fibLbls  = array.new<label>()
+var array<box>   fibBoxes = array.new<box>()
+var line legLine = na
+
+lvlColor(int i) => i <= 1 ? color.new(C_OK, 35) : i == 2 ? color.new(C_FLIP, 25) : i == 3 ? color.new(C_VETO, 15) : color.new(C_REV, 15)
+
+if newLeg
+    for ln in fibLines
+        line.delete(ln)
+    for lb in fibLbls
+        label.delete(lb)
+    for bx in fibBoxes
+        box.delete(bx)
+    array.clear(fibLines)
+    array.clear(fibLbls)
+    array.clear(fibBoxes)
+    line.delete(legLine)
+    legLine := line.new(evOrgIdx, evOrg, evExtIdx, evExt, xloc.bar_index, extend.none, C_GRAY, line.style_dotted, 1)
+    for i = 0 to array.size(FIBS) - 1
+        float f = array.get(FIBS, i)
+        float px = fibPrice(f)
+        array.push(fibLines, line.new(evExtIdx, px, bar_index + i_ext, px, xloc.bar_index, extend.none, lvlColor(i), i >= 3 ? line.style_solid : line.style_dashed, i >= 3 ? 2 : 1))
+        if i_showlbl
+            array.push(fibLbls, label.new(bar_index + i_ext, px, str.tostring(f * 100, "#.#") + "%  ·  " + str.tostring(array.get(PCONT, i), "#.#") + "% cont", xloc.bar_index, yloc.price, color.new(color.black, 100), label.style_label_left, lvlColor(i), size.small))
+    if i_showzone
+        array.push(fibBoxes, box.new(evExtIdx, fibPrice(0.618), bar_index + i_ext, fibPrice(0.786), color.new(C_VETO, 100), 0, bgcolor=color.new(C_VETO, 88)))
+        array.push(fibBoxes, box.new(evExtIdx, fibPrice(0.786), bar_index + i_ext, fibPrice(1.0),   color.new(C_REV, 100),  0, bgcolor=color.new(C_REV, 88)))
+
+if evStatus == "tracking" and not newLeg
+    for ln in fibLines
+        line.set_x2(ln, bar_index + i_ext)
+    for lb in fibLbls
+        label.set_x(lb, bar_index + i_ext)
+    for bx in fibBoxes
+        box.set_right(bx, bar_index + i_ext)
+
+plotchar(contNow, "Leg continued", "✔", location.abovebar, color.new(C_OK, 20), size=size.tiny)
+plotchar(revNow,  "Leg reversed",  "✖", location.belowbar, color.new(C_REV, 20), size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERDICT TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+tblPos = i_tblpos == "top_right" ? position.top_right : i_tblpos == "bottom_left" ? position.bottom_left : i_tblpos == "top_left" ? position.top_left : position.bottom_right
+var table tbl = table.new(tblPos, 2, 4, bgcolor=color.new(#131722, 15), border_width=1, border_color=color.new(#787b86, 70))
+
+if i_showtbl and barstate.islast
+    table.cell(tbl, 0, 0, "FIB VETO", text_color=color.white, text_size=size.small, bgcolor=color.new(#2a2e39, 0))
+    table.cell(tbl, 1, 0, evStatus == "none" ? "—" : (evDir > 0 ? "▲ up-leg " : "▼ down-leg ") + str.tostring(math.abs(evExt - evOrg) / atr, "#.#") + "×ATR", text_color=color.white, text_size=size.small, bgcolor=color.new(#2a2e39, 0))
+    table.cell(tbl, 0, 1, "Max depth", text_color=C_GRAY, text_size=size.small)
+    table.cell(tbl, 1, 1, evStatus == "none" ? "—" : str.tostring(evMaxDepth * 100, "#.#") + "%", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 2, "P(continue)", text_color=C_GRAY, text_size=size.small)
+    table.cell(tbl, 1, 2, evStatus == "none" ? "—" : (ri >= 0 ? "≈" + str.tostring(pNow, "#.#") + "%" : "> 62%"), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 3, "Verdict", text_color=C_GRAY, text_size=size.small)
+    table.cell(tbl, 1, 3, verdictTxt, text_color=verdictCol, text_size=size.small)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS — informational vetoes only, never entries
+// ─────────────────────────────────────────────────────────────────────────────
+vetoCross = evStatus == "tracking" and evMaxDepth >= 0.618 and evMaxDepth[1] < 0.618
+revCross  = evStatus == "tracking" and evMaxDepth >= 0.786 and evMaxDepth[1] < 0.786
+alertcondition(vetoCross, "Fib VETO — depth > 61.8%", "Pullback exceeded 61.8% — continuation odds now 39%. Veto pullback entries in trend direction.")
+alertcondition(revCross,  "Fib REVERSAL WARNING — depth > 78.6%", "Pullback exceeded 78.6% — continuation odds now 26%. Treat as likely reversal.")
