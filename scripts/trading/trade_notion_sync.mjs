@@ -7,8 +7,10 @@
  * and the cTrader env. Reuses the repo's CDP chart tools for the screenshot.
  *
  * Flow each run:
- *   1. open positions  -> any new positionId gets a screenshot + a Notion page (Status=open)
- *   2. recently closed -> matching synced rows get Result R + Status (win/loss)
+ *   1. open positions  -> any new positionId gets a Notion page (Status=open, NO screenshot —
+ *      entry shots were tight-cropped and redundant; removed 2026-07-03 per operator)
+ *   2. recently closed -> ONE outcome screenshot (wide frame: context before entry, the
+ *      entry/SL/TP levels, and the path to the exit marker) + Result R + Status (win/loss)
  * State: ~/trading-data/notion_synced_<account>.json  { positionId: { pageId, risk, done } }
  *
  * Screenshotting briefly drives the shared TradingView chart; a lockfile prevents two
@@ -151,27 +153,47 @@ function minTickFor(symbol) {
   return 0.00001; // FX majors/crosses (5-decimal)
 }
 
-// ── TradingView screenshot using the native Long/Short Position tool ───────────
-// Draws the proper risk/reward box (entry → green TP zone, entry → red SL zone),
-// captures it, then removes ONLY that shape (never the user's own drawings).
+// ── TradingView OUTCOME screenshot (taken once the trade has closed) ───────────
+// Frames the WHOLE story: ~60 bars of context before entry, the native R:R box +
+// entry/SL/TP lines, the path of price to the exit, and an exit marker labelled
+// WIN/LOSS with the R multiple. Price axis fits the ACTUAL price action (from the
+// chart's bars), not just the bracket — so nothing relevant is cropped out.
+const TF_SECONDS = { '1': 60, '5': 300, '15': 900, '30': 1800, '60': 3600, '240': 14400, 'D': 86400 };
+const PRE_BARS = 60, POST_BARS = 15, MAX_STORY_BARS = 140;
+
+// Keep the signal's native timeframe unless the trade lasted so long the entry→exit
+// story wouldn't fit in ~MAX_STORY_BARS candles — then step up the ladder.
+function chooseTf(nativeTf, durationSec) {
+  const ladder = ['5', '15', '30', '60', '240', 'D'];
+  let tf = ladder.includes(String(nativeTf)) ? String(nativeTf) : '60';
+  while (durationSec / TF_SECONDS[tf] > MAX_STORY_BARS && ladder.indexOf(tf) < ladder.length - 1) {
+    tf = ladder[ladder.indexOf(tf) + 1];
+  }
+  return tf;
+}
+
 async function screenshotTrade(t) {
   const { setSymbol, setTimeframe, setVisibleRange } = await import(`file://${REPO}/src/core/chart.js`);
   const { drawShape } = await import(`file://${REPO}/src/core/drawing.js`);
   const { captureScreenshot } = await import(`file://${REPO}/src/core/capture.js`);
+  const { getOhlcv } = await import(`file://${REPO}/src/core/data.js`);
   const { evaluate, getChartApi } = await import(`file://${REPO}/src/connection.js`);
+  const entryTime = t.entryTime || Math.floor(Date.now() / 1000);    // unix SECONDS of the entry candle
+  const endTime   = t.exitTime  || Math.floor(Date.now() / 1000);    // exit candle (or now if still open)
+  const tf = chooseTf(t.tf, Math.max(endTime - entryTime, 1));
+  const tfSec = TF_SECONDS[tf];
   await setSymbol({ symbol: t.symbol });
-  if (t.tf) { try { await setTimeframe({ timeframe: String(t.tf) }); } catch {} }
+  try { await setTimeframe({ timeframe: tf }); } catch {}
   await new Promise(r => setTimeout(r, 4500));
   const api = await getChartApi();
   const minTick = minTickFor(t.symbol);
   const stopLevel   = Math.max(1, Math.round(Math.abs(t.entry - t.sl) / minTick));
   const profitLevel = Math.max(1, Math.round(Math.abs(t.tp - t.entry) / minTick));
   const shape = (t.dir === 'long' || t.dir === 'buy') ? 'long_position' : 'short_position';
-  const entryTime = t.entryTime || Math.floor(Date.now() / 1000);    // unix SECONDS of the entry candle
-  const endTime   = t.exitTime  || Math.floor(Date.now() / 1000);    // exit candle (or now if still open)
-  // Frame so the entry candle AND the price action through to exit/now are visible
-  // (shows whether it reached the TP zone or got stopped out).
-  try { await setVisibleRange({ from: entryTime - 36 * 3600, to: endTime + 8 * 3600 }); } catch {}   // zoomed out for context
+  // WIDE frame: plenty of structure before the entry, breathing room after the exit
+  const winFrom = entryTime - PRE_BARS * tfSec;
+  const winTo   = endTime + POST_BARS * tfSec;
+  try { await setVisibleRange({ from: winFrom, to: winTo }); } catch {}
   await new Promise(r => setTimeout(r, 900));
   const ids = [];
   try {
@@ -185,11 +207,24 @@ async function screenshotTrade(t) {
     for (const [price, color, label] of [[t.entry, '#ffffff', `ENTRY ${t.entry}`], [t.sl, '#ff1744', `SL ${t.sl}`], [t.tp, '#00e676', `TP ${t.tp}`]]) {
       try { const r = await drawShape({ shape: 'horizontal_line', point: { time: entryTime, price }, overrides: { linecolor: color, linewidth: 2, showLabel: true, textcolor: color, fontsize: 14, horzLabelsAlign: 'left' }, text: label }); if (r?.entity_id) ids.push(r.entity_id); } catch {}
     }
+    // 3) exit marker: where and how the trade ended (win/loss + R)
+    if (t.exitTime && t.outcome) {
+      const exitColor = t.outcome === 'WIN' ? '#00e676' : '#ff1744';
+      const exitLabel = `EXIT ${t.outcome}${isFinite(t.rMultiple) ? ` ${t.rMultiple >= 0 ? '+' : ''}${t.rMultiple.toFixed(2)}R` : ''}`;
+      try { const r = await drawShape({ shape: 'vertical_line', point: { time: endTime, price: t.entry }, overrides: { linecolor: exitColor, linewidth: 2, textcolor: exitColor, fontsize: 14, showLabel: true }, text: exitLabel }); if (r?.entity_id) ids.push(r.entity_id); } catch {}
+    }
   } catch (e) { log(`draw failed ${t.symbol}: ${e.message}`); }
-  // Set the price axis DIRECTLY so entry/SL/TP all fit with margin — auto-scale
-  // ignores horizontal lines and is dominated by the user's S/R drawings, so SL got clipped.
-  const pmarg = Math.abs(t.tp - t.sl) * 0.30;
-  const pLo = Math.min(t.sl, t.tp) - pmarg, pHi = Math.max(t.sl, t.tp) + pmarg;
+  // Price axis: fit the REAL price action of the framed window PLUS all three levels,
+  // with margin — auto-scale is dominated by the user's S/R drawings (SL got clipped),
+  // and the old bracket-only range cropped the surrounding structure.
+  let hi = Math.max(t.entry, t.sl, t.tp), lo = Math.min(t.entry, t.sl, t.tp);
+  try {
+    const o = await getOhlcv({ count: 300 });
+    const inWin = (o.bars || []).filter(b => b.time >= winFrom && b.time <= winTo);
+    for (const b of (inWin.length ? inWin : (o.bars || []))) { if (b.high > hi) hi = b.high; if (b.low < lo) lo = b.low; }
+  } catch (e) { log(`ohlcv for framing failed ${t.symbol}: ${e.message}`); }
+  const pmarg = (hi - lo) * 0.14 || Math.abs(t.tp - t.sl) * 0.30;   // 14%: enough headroom that levels/candles at the extremes never clip
+  const pLo = lo - pmarg, pHi = hi + pmarg;
   try { await evaluate(`(function(){var s=${api}.getPanes()[0].getMainSourcePriceScale();s.setAutoScale(false);s.setVisiblePriceRange({from:${pLo.toFixed(5)},to:${pHi.toFixed(5)}});return 1;})()`); } catch {}
   await new Promise(r => setTimeout(r, 1500));
   const shot = await captureScreenshot({ filename: `trade_${t.symbol}_${t.positionId}_${Date.now()}`, region: 'chart' });   // crop to the chart pane
@@ -223,16 +258,13 @@ async function main() {
     const t = { positionId: p.positionId, symbol, dir: p.direction, entry: p.entryPrice, sl: p.stopLoss, tp: p.takeProfit, strategy: sig.strategy || 'scanner', tf, entryTime };
     const risk = (sig.equity || 10000) * ((sig.riskPct || CONFIRM_RISK_PCT) / 100);
     try {
-      if (busy()) { log(`chart busy — defer ${symbol}`); continue; }
-      writeFileSync(LOCK_FILE, String(Date.now()));
-      let pngPath = null; try { pngPath = await screenshotTrade(t); } catch (e) { log(`screenshot failed ${symbol}: ${e.message}`); }
-      let uploadId = null; if (pngPath) { try { uploadId = await uploadScreenshot(pngPath); } catch (e) { log(`upload failed: ${e.message}`); } }
-      const pageId = await createTradePage(t, uploadId);
+      // No entry screenshot (removed 2026-07-03): the single wide-frame OUTCOME shot
+      // at close is the record that matters. Row is still journaled at open.
+      const pageId = await createTradePage(t, null);
       state[p.positionId] = { pageId, risk, done: false, symbol, strategy: t.strategy, dir: t.dir, entry: t.entry, sl: t.sl, tp: t.tp, tf, entryTime };
-      log(`✅ synced ${t.strategy}/${symbol} pos=${p.positionId} entryTime=${entryTime} -> Notion ${uploadId ? '+shot' : '(no shot)'}`);
+      log(`✅ synced ${t.strategy}/${symbol} pos=${p.positionId} entryTime=${entryTime} -> Notion (outcome shot on close)`);
       saveState(state);
     } catch (e) { log(`✗ sync ${symbol} pos=${p.positionId}: ${e.message}`); }
-    finally { try { if (existsSync(LOCK_FILE)) writeFileSync(LOCK_FILE, '0'); } catch {} }
   }
 
   // 2) CLOSED positions -> OUTCOME screenshot (entry candle -> exit, shows TP-hit vs stopped-out) + Result R + win/loss
@@ -251,7 +283,7 @@ async function main() {
     let uploadId = null;
     if (!busy() && s.symbol && s.entry) {
       writeFileSync(LOCK_FILE, String(Date.now()));
-      try { const png = await screenshotTrade({ ...s, positionId: posId, exitTime }); if (png) uploadId = await uploadScreenshot(png); }
+      try { const png = await screenshotTrade({ ...s, positionId: posId, exitTime, outcome: R > 0 ? 'WIN' : 'LOSS', rMultiple: R }); if (png) uploadId = await uploadScreenshot(png); }
       catch (e) { log(`outcome shot pos=${posId} failed: ${e.message}`); }
       finally { try { writeFileSync(LOCK_FILE, '0'); } catch {} }
     }

@@ -84,6 +84,33 @@ function parseCsv() {
     .filter(t => t.symbol && t.symbol !== 'NONE' && t.result && t.pnl !== 0);
 }
 
+// Preferred source: replayed outcomes from edge_replay.mjs (setups re-run against
+// real cTrader M5 bars). trades.csv result/pnl are VOID-corrupted, so csv is only
+// a loud fallback. pnl here is in R-MULTIPLES, not dollars.
+const REPLAY_FILE = join(DATA_ROOT, 'replay_results.json');
+const REPLAY_MAX_AGE_H = 24;
+
+function loadReplayTrades() {
+  if (!existsSync(REPLAY_FILE)) return null;
+  try {
+    const rep = JSON.parse(readFileSync(REPLAY_FILE, 'utf8'));
+    const ageH = (Date.now() - Date.parse(rep.generated)) / 3600e3;
+    if (!isFinite(ageH) || ageH > REPLAY_MAX_AGE_H) return null; // stale — wrapper should have regenerated it
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - LOOKBACK_DAYS);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    const trades = (rep.setups || [])
+      .filter(s => s.date >= cutoffStr && isFinite(s.r))
+      .map(s => ({
+        date: s.date, session: s.session, symbol: s.symbol, tf: '',
+        dir: s.dir, score: s.score || 0, entry: 0, sl: 0, tp: '', rr: 0,
+        result: s.r > 0 ? 'WIN' : 'LOSS',
+        pnl: s.r, // R-multiples
+      }));
+    return trades.length ? trades : null;
+  } catch (_) { return null; }
+}
+
 function computeBreakdown(trades, key) {
   const map = {};
   for (const t of trades) {
@@ -111,7 +138,7 @@ function recentScannerActivity() {
   } catch (_) { return 'unreadable'; }
 }
 
-function buildSummary(trades, params) {
+function buildSummary(trades, params, source) {
   const overall    = trades.length ? analyzePerformance(trades) : { total: 0, wr: 0, pf: 0, totalPnl: 0 };
   const bySymbol   = computeBreakdown(trades, 'symbol');
   const bySession  = computeBreakdown(trades, 'session');
@@ -131,6 +158,8 @@ function buildSummary(trades, params) {
   }
 
   return {
+    dataSource: source,
+    pnlUnits: source === 'replay' ? 'R-multiples (replayed against real M5 bars)' : 'dollars (VOID-corrupted log — unreliable)',
     currentParams: params,
     overall: {
       trades: overall.total || trades.length,
@@ -170,14 +199,22 @@ TUNABLE PARAMETERS (your job is to recommend changes to these):
 - blockedSymbols (string array): instruments paused for 30 days.
 - blockedSymbolExpiry (object): expiry dates for blocked symbols.
 - blockedSessions (string array): sessions paused. Valid names (must match exactly): ASIAN, LONDON, LONDON-NY-OVERLAP, NY.
+- blockedSessionExpiry (object): expiry dates for blocked sessions (e.g. {"NY": "2026-08-02"}).
 - stopRuleLosses (int, 1–5): consecutive losses before stopping today.
+
+DATA SOURCE — the summary's dataSource field tells you what the pnl numbers mean:
+- "replay": pnl values are R-MULTIPLES from replaying each setup against real M5 price
+  data (edge_replay.mjs). This is the trustworthy source — reason from it normally.
+- "trades.csv": pnl values are dollars from a log whose result/pnl columns are corrupted
+  by broker VOIDs. Treat every per-symbol/per-session stat as suspect; recommend changes
+  only on overwhelming evidence, and say in your analysis that the source was degraded.
 
 RULES — follow these strictly when making recommendations:
 1. Only recommend changes the data justifies. No changes without sufficient trade count.
 2. scoreThreshold: raise by 1 if WR < 40% AND total trades ≥ 20. Lower by 1 if WR > 70% AND PF > 2 AND trades ≥ 20. Max 12, min 4.
 3. slAtrMult: increase by 0.1–0.2 if PF < 1.2 (stops too tight). Decrease by 0.1 if PF > 2.5. Max 3.0, min 1.0.
-4. blockedSymbols: block for 30 days if WR < 30% over 5+ trades for that symbol. Unblock on expiry.
-5. blockedSessions: block if WR < 35% AND net PnL < 0 over 5+ trades for that session.
+4. blockedSymbols: block for 30 days if WR < 30% over 15+ trades for that symbol AND its net outcome is materially negative (worse than -1.5R in replay mode, or a loss exceeding 1% of account equity in dollar mode). Unblock on expiry.
+5. blockedSessions: block for 30 days if WR < 35% over 15+ trades for that session AND its net outcome is materially negative (same thresholds as rule 4). Record the expiry in blockedSessionExpiry (same shape as blockedSymbolExpiry) and recommend unblocking when it passes. A handful of small losing trades is noise, not a signal — never block on it.
 6. riskPct: DO NOT change. Requires explicit user approval.
 7. tp1Mult / tp2Mult: DO NOT change without strong missed-runner evidence.
 8. stopRuleLosses: only suggest changing if loss streak shows a clear pattern.
@@ -222,9 +259,9 @@ const TOOL_DEF = {
   },
 };
 
-async function runClaudeAgent(trades, params) {
+async function runClaudeAgent(trades, params, source) {
   const client  = new Anthropic();
-  const summary = buildSummary(trades, params);
+  const summary = buildSummary(trades, params, source);
 
   const response = await client.messages.create({
     model:       'claude-opus-4-8',
@@ -237,13 +274,14 @@ async function runClaudeAgent(trades, params) {
 
   const toolUse = response.content.find(b => b.type === 'tool_use');
   if (!toolUse) throw new Error('No tool_use block in Claude response');
-  // the schema leaves current/proposed untyped, so Claude sometimes JSON-stringifies
-  // arrays/numbers ('["NY"]' instead of ["NY"]) — parse those back to real values
+  // tool input can come back slightly malformed (missing recommendations array,
+  // or values JSON-stringified: '["NY"]' instead of ["NY"]) — normalize hard
+  if (!Array.isArray(toolUse.input.recommendations)) toolUse.input.recommendations = [];
   const coerce = v => {
     if (typeof v !== 'string') return v;
     try { const p = JSON.parse(v); return typeof p === 'string' ? v : p; } catch { return v; }
   };
-  for (const r of toolUse.input.recommendations || []) {
+  for (const r of toolUse.input.recommendations) {
     r.current = coerce(r.current);
     r.proposed = coerce(r.proposed);
   }
@@ -311,15 +349,20 @@ async function main() {
     log('⚠  ANTHROPIC_API_KEY not set — running static fallback only');
   }
 
-  const trades = parseCsv();
+  const replayTrades = loadReplayTrades();
+  const source = replayTrades ? 'replay' : 'trades.csv';
+  const trades = replayTrades || parseCsv();
   const params = loadParams();
-  log(`Trades: ${trades.length} (last ${LOOKBACK_DAYS} days) | Params: threshold=${params.scoreThreshold} slMult=${params.slAtrMult}`);
+  if (source === 'trades.csv') {
+    log('⚠  replay_results.json missing/stale — falling back to VOID-corrupted trades.csv stats');
+  }
+  log(`Trades: ${trades.length} (last ${LOOKBACK_DAYS} days, source=${source}) | Params: threshold=${params.scoreThreshold} slMult=${params.slAtrMult}`);
 
   let result;
   if (process.env.ANTHROPIC_API_KEY) {
     try {
       log('Calling Claude claude-opus-4-8 for analysis...');
-      result = await runClaudeAgent(trades, params);
+      result = await runClaudeAgent(trades, params, source);
       log(`Claude analysis: ${result.analysis}`);
       if (result.risk_flag) log(`⚠  Risk flag: ${result.risk_flag}`);
     } catch (err) {
@@ -334,7 +377,8 @@ async function main() {
 
   const report = {
     generatedAt:     new Date().toISOString(),
-    generatedBy:     process.env.ANTHROPIC_API_KEY ? 'eod_agent.mjs (claude-opus-4-7)' : 'eod_agent.mjs (static fallback)',
+    generatedBy:     process.env.ANTHROPIC_API_KEY ? 'eod_agent.mjs (claude-opus-4-8)' : 'eod_agent.mjs (static fallback)',
+    dataSource:      source,
     analysisWindow:  `last ${LOOKBACK_DAYS} days`,
     tradeCount:      trades.length,
     overall:         overall.total ? { wr: overall.wr, pf: overall.pf, totalPnl: overall.totalPnl } : 'insufficient data',

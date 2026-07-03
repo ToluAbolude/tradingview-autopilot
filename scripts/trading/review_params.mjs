@@ -30,8 +30,8 @@ const REVIEW_LOG   = join(DATA_ROOT, 'review_params.log');
 
 const LOOKBACK_DAYS = 30;
 const MIN_TRADES_OVERALL = 20;
-const MIN_TRADES_SYMBOL  = 5;
-const MIN_TRADES_SESSION = 10;
+const MIN_TRADES_SYMBOL  = 15; // raised 5 → 15 on 2026-07-03: 5-trade blocks were firing on noise (NY session incident)
+const MIN_TRADES_SESSION = 15;
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;

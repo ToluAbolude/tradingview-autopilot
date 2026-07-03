@@ -215,6 +215,26 @@ async function main() {
     console.log(`  ${deals.length} closing deals  net=$${net.toFixed(0)}  WR=${(wins / deals.length * 100).toFixed(0)}%  equity now=$${(eq.equity||eq.balance||0).toFixed(0)}`);
   } catch (e) { console.log('  (ground-truth pull failed: ' + e.message + ')'); }
 
+  // Machine-readable results for the nightly reflection stack (eod_agent):
+  // trades.csv result/pnl are VOID-corrupted, so these replayed outcomes are
+  // the trustworthy per-setup record for downstream analysis.
+  const outFile = join(DATA_ROOT, 'replay_results.json');
+  writeFileSync(outFile, JSON.stringify({
+    generated: new Date().toISOString(),
+    mode: NO_EOD ? `no-eod-${HORIZON_H}h` : 'live-eod',
+    window: {
+      from: new Date(Math.min(...all.map(r => r.ts))).toISOString().slice(0, 10),
+      to:   new Date(Math.max(...all.map(r => r.ts))).toISOString().slice(0, 10),
+    },
+    resolved: resolved.length,
+    unresolved: resolvedRows.length - resolved.length + (all.length - resolvedRows.length),
+    setups: resolved.map(r => ({
+      date: r.date, session: r.session, symbol: r.symbol, dir: r.dir,
+      score: r.score, trif: r.trif, r: Math.round(r.outcome * 1000) / 1000, exit: r.kind,
+    })),
+  }, null, 2));
+  console.log(`\n✓ Machine-readable results → ${outFile}`);
+
   console.log('\nDone.');
   process.exit(0);
 }
