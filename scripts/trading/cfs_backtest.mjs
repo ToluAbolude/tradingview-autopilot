@@ -24,7 +24,7 @@ import { writeFileSync } from 'fs';
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const a = argv.find(x => x.startsWith(`--${k}=`)); return a ? a.split('=')[1] : d; };
 const STRAT = arg('strat', '');
-const SYMS  = arg('sym', 'EURUSD,GBPUSD,USDJPY,GBPJPY,AUDJPY,XAUUSD,XAGUSD,XPTUSD,US30,USTEC,US500,BTCUSD,ETHUSD').split(',');
+const SYMS  = arg('sym', 'EURUSD,GBPUSD,USDJPY,GBPJPY,AUDJPY,XAUUSD,XAGUSD,XPTUSD,US30,NAS100,US500,BTCUSD,ETHUSD').split(',');
 const TF    = arg('tf', 'H1');
 const YEARS = parseFloat(arg('years', '3'));
 const OUT   = arg('out', `/home/ubuntu/trading-data/cfs_${STRAT}_${TF}.json`);
@@ -171,6 +171,18 @@ async function main() {
     if (!bars || bars.length < 300) { console.log(`\n${sym}: only ${bars ? bars.length : 0} bars — skipped`); continue; }
     const span = `${new Date(bars[0].t).toISOString().slice(0, 10)}→${new Date(bars[bars.length - 1].t).toISOString().slice(0, 10)}`;
     const atr = atr14(bars);
+    // Optional correlated aux series (e.g. SMT divergence pairs): meta.aux maps
+    // symbol → its pair; aux bars are aligned by timestamp (null where missing).
+    let ctx = null;
+    if (mod.meta?.aux?.[sym]) {
+      const auxSym = mod.meta.aux[sym];
+      try {
+        const auxBars = await bridge.getTrendbars(auxSym, { period: TF, fromMs, windowDays });
+        const m = new Map((auxBars || []).map(x => [x.t, x]));
+        ctx = { auxSym, aux: bars.map(x => m.get(x.t) || null) };
+        console.log(`  (aux pair: ${auxSym}, ${auxBars.length} bars)`);
+      } catch (e) { console.log(`  (aux ${mod.meta.aux[sym]} fetch failed: ${e.message} — skipping ${sym})`); continue; }
+    }
     const spread = SPREAD_OVR ? parseFloat(SPREAD_OVR) : (SPREADS[sym] ?? median(bars.map(b => b.c)) * 0.00008);
     const cost = { spread, slipFrac: SLIP_FRAC };
     const yearsSpan = (bars[bars.length - 1].t - bars[0].t) / (365 * 24 * 3600 * 1000);
@@ -180,7 +192,7 @@ async function main() {
       console.log('  config                        │  IN-SAMPLE (1st half)          │  OUT-OF-SAMPLE (2nd half)');
       console.log('                                │   n  WR%   PF    netR  n−t3   │   n  WR%   PF    netR  n−t3');
       for (const cfg of runConfigs) {
-        const r = simulate(bars, atr, mod.signals(bars, atr, cfg), cost);
+        const r = simulate(bars, atr, mod.signals(bars, atr, cfg, ctx), cost);
         const tsAll = r.trades.map(t => t.t).sort((a, b) => a - b);
         const split = tsAll[Math.floor(tsAll.length / 2)] || 0;
         const A = statsFrom(r.trades.filter(t => t.t < split));
@@ -194,7 +206,7 @@ async function main() {
     }
     console.log('  config                             n  /yr   WR%  netPF  netExpR    netR  maxDD  worst  net−top3');
     for (const cfg of runConfigs) {
-      const r = simulate(bars, atr, mod.signals(bars, atr, cfg), cost);
+      const r = simulate(bars, atr, mod.signals(bars, atr, cfg, ctx), cost);
       rows.push({ cfg: cfg.name, ...r, trades: undefined });
       const pf = r.pf === Infinity ? '  inf' : String(r.pf).padStart(5);
       const perYr = yearsSpan > 0 ? (r.n / yearsSpan).toFixed(1) : '  -';

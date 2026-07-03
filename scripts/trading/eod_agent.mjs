@@ -169,7 +169,7 @@ TUNABLE PARAMETERS (your job is to recommend changes to these):
 - riskPct (array): [first trade%, second trade%, 3rd+trade%]. Defaults [5.0, 3.5, 2.5].
 - blockedSymbols (string array): instruments paused for 30 days.
 - blockedSymbolExpiry (object): expiry dates for blocked symbols.
-- blockedSessions (string array): sessions paused (LONDON, NEWYORK, ASIAN, SYDNEY).
+- blockedSessions (string array): sessions paused. Valid names (must match exactly): ASIAN, LONDON, LONDON-NY-OVERLAP, NY.
 - stopRuleLosses (int, 1–5): consecutive losses before stopping today.
 
 RULES — follow these strictly when making recommendations:
@@ -227,7 +227,7 @@ async function runClaudeAgent(trades, params) {
   const summary = buildSummary(trades, params);
 
   const response = await client.messages.create({
-    model:       'claude-opus-4-7',
+    model:       'claude-opus-4-8',
     max_tokens:  2048,
     system:      SYSTEM_PROMPT,
     messages:    [{ role: 'user', content: `Analyze today's trading performance and recommend parameter adjustments:\n\n${JSON.stringify(summary, null, 2)}` }],
@@ -237,6 +237,16 @@ async function runClaudeAgent(trades, params) {
 
   const toolUse = response.content.find(b => b.type === 'tool_use');
   if (!toolUse) throw new Error('No tool_use block in Claude response');
+  // the schema leaves current/proposed untyped, so Claude sometimes JSON-stringifies
+  // arrays/numbers ('["NY"]' instead of ["NY"]) — parse those back to real values
+  const coerce = v => {
+    if (typeof v !== 'string') return v;
+    try { const p = JSON.parse(v); return typeof p === 'string' ? v : p; } catch { return v; }
+  };
+  for (const r of toolUse.input.recommendations || []) {
+    r.current = coerce(r.current);
+    r.proposed = coerce(r.proposed);
+  }
   return toolUse.input;
 }
 
@@ -308,7 +318,7 @@ async function main() {
   let result;
   if (process.env.ANTHROPIC_API_KEY) {
     try {
-      log('Calling Claude claude-opus-4-7 for analysis...');
+      log('Calling Claude claude-opus-4-8 for analysis...');
       result = await runClaudeAgent(trades, params);
       log(`Claude analysis: ${result.analysis}`);
       if (result.risk_flag) log(`⚠  Risk flag: ${result.risk_flag}`);

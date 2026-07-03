@@ -1,0 +1,14 @@
+{
+  "_note": "VALIDATED scanner config (edge_replay 2026-06-05 + params v21, lost in the VM migration). NOT currently live - operator chose on 2026-07-03 to keep running code defaults (scoreThreshold 6, all sessions). To restore: merge these keys into /home/ubuntu/trading-data/trading_params.json on the VM (keep the live blockedSymbols list), then let the scanner pick it up on its next session run. session_runner.mjs reads exactly these keys: scoreThreshold, slAtrMult, riskPct, maxConcurrent, stopRuleLosses, blockedSessions, blockedSymbols(+Expiry).",
+  "_evidence": "edge_replay.mjs on real cTrader ledger: score>=11 + with-trend + NY/overlap + crypto/NAS100 => +0.4R avg, PF 2.3. Longs/London/Asian/metals bleed. See memory project_edge_replay_2026-06-05 and TRADING_SYSTEM.md.",
+  "_lastValidated": "2026-06-11",
+  "scoreThreshold": 11,
+  "slAtrMult": 1.5,
+  "riskPct": [5.0, 3.5, 2.5],
+  "maxConcurrent": 4,
+  "stopRuleLosses": 4,
+  "blockedSessions": ["ASIAN", "LONDON"],
+  "_blockedSessions_note": "NY (16-20 UTC) + LONDON-NY-OVERLAP (12-16 UTC) only - the two sessions with proven positive expectancy. Session names must match session_runner.mjs: ASIAN, LONDON, LONDON-NY-OVERLAP, NY.",
+  "blockedSymbols": "KEEP-LIVE-LIST",
+  "_blockedSymbols_note": "Do not overwrite - preserve whatever is in the live trading_params.json on the VM (currently the post-2026-07-02 list: losers blocked, GBPJPY/US30 unblocked)."
+}

@@ -80,6 +80,22 @@ const COMBOS = [
   // an extra runner-level gate; recorded under their own `label` for attribution.
   { strategy: 'wor_break_retest', symbol: 'GBPJPY', tf: '60', label: 'wor_break_retest_ntz', filter: 'priorDayRange' },  // NTZ: only trade expansion OUTSIDE the prior-day range
   { strategy: 'amd_ote',          symbol: 'USDJPY', tf: '60', label: 'amd_ote_newsgated',    filter: 'newsRequire'   },  // only in the post-news window of a high-impact USD/JPY event
+  // ── Chart Fanatics batch-1 graduate (2026-07-03): JadeCap session-raid → FVG
+  // retrace → hold to opposite session liquidity. Only batch-1 strategy whose OOS
+  // basket held in both halves (cfs_jadecap_H1_oos). BTCUSD = the OOS-consistent
+  // symbol that's FREE of anti-stack collisions (XAUUSD/GBPUSD are taken) and
+  // trades 24/7 → fastest forward-test sample. Weak edge (~0.04R/trade net) —
+  // this slot exists to resolve exactly that. fetchDays 45: bias EMA(500) on H1.
+  { strategy: 'jadecap_fvg', symbol: 'BTCUSD', tf: '60', fetchDays: 45 },
+  // ── Chart Fanatics batch-2 graduate (2026-07-03): Ted Zhang Stage Analysis,
+  // Stage-2 daily breakout with FIXED 3R target — the only config in the whole
+  // CF project positive in BOTH OOS halves incl. the 2022 bear (IS +15.6R /
+  // OOS +37.9R, 12/13 syms, win capped at 3R so breadth not outliers carries
+  // it). US30 + ETHUSD = the both-halves-positive symbols that are collision-
+  // free AND tradable (XAUUSD/USDJPY taken; XAGUSD non-tradable per 2026-06
+  // broker blocks). ~1-2 trades/yr each — slot validates execution, not stats.
+  { strategy: 'stage_s2', symbol: 'US30',   tf: 'D', fetchDays: 420 },
+  { strategy: 'stage_s2', symbol: 'ETHUSD', tf: 'D', fetchDays: 420 },
 ];
 
 // Minimal instrument metadata (orb reads ctx.sessions+tf; confluence reads ctx.instrument;
@@ -92,10 +108,13 @@ const INSTRUMENTS = {
   NZDCAD: { symbol: 'NZDCAD', class: 'fx_cross' },
   GBPJPY: { symbol: 'GBPJPY', class: 'fx' },
   USDJPY: { symbol: 'USDJPY', class: 'fx' },
+  BTCUSD: { symbol: 'BTCUSD', class: 'crypto' },
+  ETHUSD: { symbol: 'ETHUSD', class: 'crypto' },
+  US30:   { symbol: 'US30',   class: 'index' },
 };
 const SESSIONS = { ASIA: '00:00', LONDON: '07:00', NY: '13:30' };
-const TF_PERIOD = { '5': 'M5', '15': 'M15', '30': 'M30', '60': 'H1', '240': 'H4' };
-const TF_MS     = { '5': 3e5, '15': 9e5, '30': 18e5, '60': 36e5, '240': 144e5 };
+const TF_PERIOD = { '5': 'M5', '15': 'M15', '30': 'M30', '60': 'H1', '240': 'H4', 'D': 'D1' };
+const TF_MS     = { '5': 3e5, '15': 9e5, '30': 18e5, '60': 36e5, '240': 144e5, 'D': 864e5 };
 
 function log(msg) { process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`); }
 function loadParams() { try { return JSON.parse(readFileSync(PARAMS_FILE, 'utf8')); } catch { return {}; } }
@@ -118,6 +137,7 @@ function calcLots(symbol, riskPct, equity, entry, sl) {
   const q = lots => Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
   if (/XAU|GOLD/.test(sym))                                   return q(riskAmt / (100 * slDist));
   if (/NAS100|NAS|NDX|NQ|US30|DOW|YM/.test(sym))              return q(riskAmt / slDist);
+  if (/BTC|ETH|XRP|SOL|LTC/.test(sym))                        return q(riskAmt / slDist);   // 1 lot = 1 coin → $1/pt
   if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) return q(riskAmt / slDist);
   if (/JPY/.test(sym))                                        return q(riskAmt / (6.50 * (slDist / 0.01)));
   return q(riskAmt / (10.0 * (slDist / 0.0001)));   // standard forex (incl. fx crosses)
@@ -225,7 +245,7 @@ async function main() {
 
     let bars;
     try {
-      bars = await bridge.getTrendbars(symbol, { period, fromMs: nowMs - 20 * 86400000, toMs: nowMs });
+      bars = await bridge.getTrendbars(symbol, { period, fromMs: nowMs - (combo.fetchDays || 20) * 86400000, toMs: nowMs });
     } catch (e) { log(`  ${tag}: bars error — ${e.message}`); continue; }
 
     // Only consider CLOSED bars (drop the still-forming final bar).
@@ -258,14 +278,17 @@ async function main() {
 
     const risk = Math.abs(sig.entry - sig.sl);
     if (risk <= 0) { log(`  ${tag}: zero-risk signal — skip`); continue; }
-    const tp   = sig.dir === 'long' ? sig.entry + TARGET_R * risk : sig.entry - TARGET_R * risk;
-    const lots = calcLots(symbol, CONFIRM_RISK_PCT, equity, sig.entry, sig.sl);
+    // A strategy may supply its own TP (e.g. jadecap targets opposite session
+    // liquidity, not a fixed R multiple); it must be on the profit side.
+    const ownTp = sig.tp != null && (sig.dir === 'long' ? sig.tp > sig.entry : sig.tp < sig.entry);
+    const tp    = ownTp ? sig.tp : (sig.dir === 'long' ? sig.entry + TARGET_R * risk : sig.entry - TARGET_R * risk);
+    const lots  = calcLots(symbol, CONFIRM_RISK_PCT, equity, sig.entry, sig.sl);
 
     const record = {
       ts: now.toISOString(), mode: LIVE ? 'live-demo' : 'dry-run',
       strategy: label, symbol, tf, dir: sig.dir,
       entry: +sig.entry.toFixed(5), sl: +sig.sl.toFixed(5), tp: +tp.toFixed(5),
-      riskR: TARGET_R, lots, riskPct: CONFIRM_RISK_PCT, equity: +equity.toFixed(2),
+      riskR: +(Math.abs(tp - sig.entry) / risk).toFixed(2), lots, riskPct: CONFIRM_RISK_PCT, equity: +equity.toFixed(2),
       reason: sig.reason || null, barT: lastClosed.t,
     };
 
@@ -276,8 +299,20 @@ async function main() {
         // the old entry:null open-then-amend path failed to attach on 45/46 trades
         // (silent no-op → naked → force-closed), which is why the experiment logged
         // almost no bracketed trades. placeOrder still runs assertOrderSafety.
+        const sentAt = Date.now();
         const res = await bridge.placeOrder({ symbol, direction: sig.dir, units: lots, entry: sig.entry, tpPrice: tp, slPrice: sig.sl });
         record.positionId = Number(res?.position?.positionId || res?.positionId) || null;
+        // ORDER_ACCEPTED can arrive without the position object (observed 2026-07-03,
+        // stage_s2/US30) — recover the id so bracket-verify + attribution still run.
+        if (!record.positionId) {
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            const cand = (await bridge.getPositions())
+              .filter(p => p.direction === sig.dir && (p.openTimestamp || 0) >= sentAt - 2000)
+              .sort((a, b) => (b.openTimestamp || 0) - (a.openTimestamp || 0))[0];
+            if (cand) { record.positionId = cand.positionId; record.positionIdRecovered = true; }
+          } catch (_) {}
+        }
         record.placed = !!record.positionId;   // a captured positionId means the order opened
         state[key].positionId = record.positionId;
         // Verify SL+TP attached, RETRYING up to ~8s — the two-step amend can take a

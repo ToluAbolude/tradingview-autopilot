@@ -235,4 +235,6 @@ async function main() {
   }) + '\n');
 }
 
-main().catch(e => { console.error('FATAL:', e.message); process.exit(1); });
+// explicit exit — the cTrader socket otherwise keeps the event loop alive and the
+// process hangs after finishing, which cron/timeout misreads as failure
+main().then(() => process.exit(0)).catch(e => { console.error('FATAL:', e.message); process.exit(1); });

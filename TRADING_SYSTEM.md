@@ -49,6 +49,8 @@ demo so we can see which one actually earns, then concentrate capital on the win
   | confluence_trifecta | EURUSD | H1 | |
   | **orb** | **NZDCAD** | **M15** | intraday opening-range; **self-gates to session-open breakout windows** |
   | wor_break_retest_ntz | GBPJPY | H1 | A/B variant — Chart Fanatics **NTZ** filter (only trade expansion *outside* the prior-day range) |
+  | **jadecap_fvg** | BTCUSD | H1 | Chart Fanatics batch-1 graduate (2026-07-03): NY session-raid → FVG retrace → opposite-liquidity TP (own TP, not 2R); only strategy of 7 whose OOS basket held in both halves |
+  | **stage_s2** | US30 + ETHUSD | D1 | Chart Fanatics batch-2 graduate (2026-07-03): Ted Zhang Stage-2 daily breakout, fixed 3R TP — best CF backtest (PF2.62 +53R, 12/13 syms) AND positive in both OOS halves incl. the 2022 bear; ~1-2 trades/yr/symbol |
   | amd_ote_newsgated | USDJPY | H1 | A/B variant — only fires in the **post-news window** (5–180 min) of a high-impact event (`news_checker.mjs`) |
 
   *A/B variants run the same base strategy on a **fresh symbol** (so anti-stacking never collides with the base combo) plus one extra runner-level gate, recorded under their own `label`. The news gate reuses `news_checker.mjs` — whose currency field was fixed 2026-06-28 (FF JSON uses `country`, not `currency`; the filter had been a silent no-op, which also means the **scanner's news-avoidance filter only starts working after its next restart**).*
@@ -121,7 +123,7 @@ re-run `nlm login` when it expires):
 | `eod_close` | cTrader-API-first close with **verify-flat + 3 retries + CRITICAL log**; new `eod_close_cron.sh` (sources creds); **Saturday 00:30 UTC `--weekend-check` backstop cron** |
 | `naked_guard_cron.sh` | `timeout -k 15 110` (777 hung guard processes were strangling the VM on Jun 11 — killed) |
 
-**Scanner** — LIVE, params v21: scoreThreshold 11, requireWithTrendBias, sessions **NY + LONDON-NY-OVERLAP only** (overlap re-enabled 2026-06-11; hermes had blocked it off stats poisoned by the USDCHF bug trades), riskPct [5, 3.5, 2.5] (operator), maxDailyTotal/PerSymbol 4/1, **maxDailyDrawdownPct 6 (kill-switch armed; was 20 ≈ off)**.
+**Scanner** — LIVE on the new VM, but **running code defaults since the migration**: the v21 params file never made it across, so `trading_params.json` holds only `blockedSymbols` and `session_runner` falls back to scoreThreshold 6, all sessions, riskPct [3.5, 2.5, 1.75]. Discovered 2026-07-03; **operator chose to keep the defaults for now**. The validated v21-equivalent config (scoreThreshold 11, blockedSessions [ASIAN, LONDON] → NY + overlap only, riskPct [5, 3.5, 2.5]) is preserved at [data/trading_params.validated.json](data/trading_params.validated.json) for restore/tuning. Note riskPct is now owned nightly by `scale_risk_to_goal` (below).
 
 **Edge (validated)** — `edge_replay.mjs` + cTrader ledger + FundedNext 17k-trader study all converge: **BTCUSD (+$5.5k lifetime, the only consistent winner) and indices, NY/overlap, with-trend, score ≥ 11, few trades**. Longs/London/Asian/metals/FX-majors bleed. 1-minute scalping rejected (spread cost ≈ 24% of a 5-pip target). Next evidence-backed upgrade: relative-volume ("in play") filter on the ORB runner, per Zarattini/Barbon/Aziz.
 
@@ -129,7 +131,7 @@ re-run `nlm login` when it expires):
 
 **Kill-switch fixed** — the daily-drawdown halt now reads REAL cTrader P&L (`getTodayRealizedPnl()`); it previously summed `trades.csv` (mostly VOID/0) and was blind through a −9.6% day.
 
-**`scale_risk_to_goal` DISABLED** (commented out in `/home/ubuntu/run_eod_hermes.sh`) — it was cranking risk toward the **$500k-in-55-days moonshot** even on a negative edge (a root cause of blow-up risk). Risk is now operator-set and fixed. The remaining Hermes steps (eod_agent + hermes_reflect --apply) still run nightly.
+**`scale_risk_to_goal` RE-ENABLED (2026-07-03, operator decision)** — it had been disabled 2026-06-01 after cranking risk toward the old moonshot on a negative edge, then silently dropped entirely in the VM migration. Now runs as the last step of `/home/ubuntu/run_eod_hermes.sh` (20:30 Mon–Fri) against a **refreshed moonshot goal.json: $10,682 → $500k by 2026-10-01** (~46.8x, ~4.4%/day compounded). Consequence: while the measured 30d edge is positive, riskPct rails to the script's **10/7/5 cap** (double the operator tiers); on a negative edge it halves current risk instead of scaling up. `eod_agent` now calls `claude-opus-4-8` and activates automatically once `ANTHROPIC_API_KEY` is placed in `~/.anthropic.env` on the VM; until then hermes_reflect uses static review_params rules.
 
 **ORB strategy** — dedicated time-gated runner `orb_runner.mjs` in **DRY-RUN** (logs would-be trades to `orb_signals.jsonl`, places nothing). Pairings from a 90-day isolated backtest (`orb_backtest.mjs`): **Gold@Asia, indices/AUD-NZD/JPY-cross cluster@London, AUDJPY@NY**, 2R target, SL = opposite OR boundary. Has its own allowlist — **not** gated by `blockedSymbols` (so it trades WTI@London despite the scanner block).
 
@@ -137,13 +139,14 @@ re-run `nlm login` when it expires):
 
 | When | Job | Action |
 |---|---|---|
-| 06:00 Mon–Fri | `morning_review_cron.sh` | emails edge read + tuning proposals; auto-blocks persistent bleeders (WR<30% & net<0 over 14d **and** 30d) |
 | 07:00–11:55 / 13:30–18:55 / 00:00–04:55 | `orb_runner_cron.sh` | ORB dry-run, every 5 min in session windows |
 | 20:00 & 21:45 Mon–Fri | `eod_close.mjs` | force-close all positions |
-| 20:30 Mon–Fri | `run_eod_hermes.sh` | eod_agent + hermes_reflect (scale_risk disabled) |
+| 20:30 Mon–Fri | `run_eod_hermes.sh` | eod_agent + hermes_reflect (scale_risk disabled); dropped in the VM migration, re-enabled 2026-07-03 (static rules only until ANTHROPIC_API_KEY is added to `~/.anthropic.env`) |
 | 20:35 Mon–Fri | `daily_report_cron.sh` | EOD email — **that day's trades only** (replaced the rolling-30d email) |
 | every 5 min | `scanner_freshness_check.sh` | respawns scanner if stale/dead |
 | every 5 min | `cdp_watchdog.sh` | restarts tv_browser after 3 consecutive CDP failures (heals dead chart tab) |
+
+_(Removed 2026-07-03: the 06:00 `morning_review_cron.sh` email — it had been sending empty tables since the migration because `morning_review.mjs` writes its HTML to `trading-data/morning_review.html` while the cron script looked in `trading-data/pf_reflection/`; operator chose to drop it rather than fix. Also removed the same day: the 5 pre-migration `TradingMCP_*` Windows Scheduled Tasks on the local PC; the hourly local `SyncTradeLogs` task was repointed from the terminated old VM to `145.241.220.213`.)_
 
 **Open issues** — (1) GER40 name mapping (→ unmapped id188); (2) the `goal.json` $500k/55-day target is mathematically incompatible with capital preservation — consider steady-state (targetReturn30d 0.05).
 
