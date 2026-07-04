@@ -40,7 +40,8 @@ const WEEK_DB_FILE  = join(DATA_ROOT, 'notion_week_dbs.json');
 const WEEK_DB_SCHEMA = {
   "Name": { title: {} }, "Instrument": { rich_text: {} }, "Strategy": { select: {} },
   "Direction": { select: {} }, "Account": { select: {} }, "Entry": { number: {} },
-  "SL": { number: {} }, "TP": { number: {} }, "Status": { select: {} },
+  "SL": { number: {} }, "TP": { number: {} },
+  "Status": { select: { options: [ { name: "open", color: "yellow" }, { name: "win", color: "green" }, { name: "loss", color: "red" } ] } },
   "Opened": { date: {} }, "Position ID": { rich_text: {} }, "Screenshot": { files: {} },
   "Result R": { number: {} },
 };
@@ -159,21 +160,48 @@ function minTickFor(symbol) {
 // WIN/LOSS with the R multiple. Price axis fits the ACTUAL price action (from the
 // chart's bars), not just the bracket — so nothing relevant is cropped out.
 const TF_SECONDS = { '1': 60, '5': 300, '15': 900, '30': 1800, '60': 3600, '240': 14400, 'D': 86400 };
-const PRE_BARS = 60, POST_BARS = 15, MAX_STORY_BARS = 140;
+const MIN_STORY_BARS = 8, MAX_STORY_BARS = 140;
 
-// Keep the signal's native timeframe unless the trade lasted so long the entry→exit
-// story wouldn't fit in ~MAX_STORY_BARS candles — then step up the ladder.
+// TV-feed aliases: some cTrader names don't resolve on the BlackBull TV feed
+// (GER40 is GER30 there — the known GER40→GER30 name gap). Tried in order.
+const TV_ALIASES = {
+  GER40: ['GER40', 'GER30', 'DE40', 'DAX40'],
+  NAS100: ['NAS100', 'USTEC', 'US100'],
+  US30: ['US30', 'DJ30'], SPX500: ['SPX500', 'US500'], AUS200: ['AUS200', 'AU200'],
+};
+
+// Switch the chart and VERIFY it actually landed on the requested instrument —
+// setSymbol fails silently on unknown names and the chart stays on the previous
+// symbol, which produced level-lines miles away from the candles (blank shots).
+async function switchToSymbol(setSymbol, getState, want) {
+  const candidates = TV_ALIASES[String(want).toUpperCase()] || [want];
+  const onIt = async cand => {
+    try { return String((await getState())?.symbol || '').toUpperCase().includes(String(cand).toUpperCase()); } catch { return false; }
+  };
+  // already showing one of the candidates? (re-switching to the same symbol fires
+  // no change event and made verification flake on back-to-back same-instrument shots)
+  for (const cand of candidates) if (await onIt(cand)) return cand;
+  for (const cand of candidates) {
+    try { await setSymbol({ symbol: cand }); } catch {}
+    await new Promise(r => setTimeout(r, 3500));
+    if (await onIt(cand)) return cand;
+  }
+  return null;
+}
+
+// Pick the timeframe that makes the TRADE itself readable: start from the signal's
+// native tf, then zoom IN if entry→exit spans fewer than MIN_STORY_BARS candles
+// (a 2-candle trade on 1h was an invisible sliver) or OUT if it exceeds MAX_STORY_BARS.
 function chooseTf(nativeTf, durationSec) {
   const ladder = ['5', '15', '30', '60', '240', 'D'];
-  let tf = ladder.includes(String(nativeTf)) ? String(nativeTf) : '60';
-  while (durationSec / TF_SECONDS[tf] > MAX_STORY_BARS && ladder.indexOf(tf) < ladder.length - 1) {
-    tf = ladder[ladder.indexOf(tf) + 1];
-  }
-  return tf;
+  let i = ladder.indexOf(String(nativeTf)); if (i < 0) i = ladder.indexOf('60');
+  while (durationSec / TF_SECONDS[ladder[i]] < MIN_STORY_BARS && i > 0) i--;
+  while (durationSec / TF_SECONDS[ladder[i]] > MAX_STORY_BARS && i < ladder.length - 1) i++;
+  return ladder[i];
 }
 
 async function screenshotTrade(t) {
-  const { setSymbol, setTimeframe, setVisibleRange } = await import(`file://${REPO}/src/core/chart.js`);
+  const { setSymbol, setTimeframe, setVisibleRange, getState } = await import(`file://${REPO}/src/core/chart.js`);
   const { drawShape } = await import(`file://${REPO}/src/core/drawing.js`);
   const { captureScreenshot } = await import(`file://${REPO}/src/core/capture.js`);
   const { getOhlcv } = await import(`file://${REPO}/src/core/data.js`);
@@ -182,18 +210,38 @@ async function screenshotTrade(t) {
   const endTime   = t.exitTime  || Math.floor(Date.now() / 1000);    // exit candle (or now if still open)
   const tf = chooseTf(t.tf, Math.max(endTime - entryTime, 1));
   const tfSec = TF_SECONDS[tf];
-  await setSymbol({ symbol: t.symbol });
+  const landed = await switchToSymbol(setSymbol, getState, t.symbol);
+  if (!landed) { log(`✗ ${t.symbol}: no TV symbol resolves (tried aliases) — skipping shot`); return null; }
   try { await setTimeframe({ timeframe: tf }); } catch {}
-  await new Promise(r => setTimeout(r, 4500));
+  await new Promise(r => setTimeout(r, 3500));
   const api = await getChartApi();
   const minTick = minTickFor(t.symbol);
   const stopLevel   = Math.max(1, Math.round(Math.abs(t.entry - t.sl) / minTick));
   const profitLevel = Math.max(1, Math.round(Math.abs(t.tp - t.entry) / minTick));
   const shape = (t.dir === 'long' || t.dir === 'buy') ? 'long_position' : 'short_position';
-  // WIDE frame: plenty of structure before the entry, breathing room after the exit
-  const winFrom = entryTime - PRE_BARS * tfSec;
-  const winTo   = endTime + POST_BARS * tfSec;
-  try { await setVisibleRange({ from: winFrom, to: winTo }); } catch {}
+  // Context scales with the trade: ~3× the trade's own span before entry (min 20,
+  // max 60 bars) and up to 20 bars after exit — so the trade never shrinks to a sliver
+  const durBars  = Math.max(1, Math.ceil((endTime - entryTime) / tfSec));
+  const preBars  = Math.min(60, Math.max(20, 3 * durBars));
+  const postBars = Math.min(20, Math.max(8, durBars));
+  const winFrom = entryTime - preBars * tfSec;
+  const winTo   = endTime + postBars * tfSec;
+  // setVisibleRange maps times onto the LOADED series — right after a tf switch the
+  // series can still be loading and the call silently no-ops, leaving the default
+  // zoom (a dense mess). Verify the achieved range and retry while data loads.
+  let framed = false;
+  const span = winTo - winFrom;
+  for (let attempt = 0; attempt < 3 && !framed; attempt++) {
+    try {
+      const r = await setVisibleRange({ from: winFrom, to: winTo });
+      const a = r?.actual || {};
+      framed = a.from > 0 && Math.abs(a.from - winFrom) < span && Math.abs(a.to - winTo) < span;
+    } catch {}
+    if (!framed) await new Promise(r2 => setTimeout(r2, 2000));
+  }
+  // most likely cause: confirm_runner's 5-min chart sweep fighting us for the chart —
+  // throw a retryable error so the caller defers to the next (quieter) cron tick
+  if (!framed) throw new Error('framing-not-applied (chart contention?) — will retry next tick');
   await new Promise(r => setTimeout(r, 900));
   const ids = [];
   try {
@@ -220,9 +268,31 @@ async function screenshotTrade(t) {
   let hi = Math.max(t.entry, t.sl, t.tp), lo = Math.min(t.entry, t.sl, t.tp);
   try {
     const o = await getOhlcv({ count: 300 });
-    const inWin = (o.bars || []).filter(b => b.time >= winFrom && b.time <= winTo);
-    for (const b of (inWin.length ? inWin : (o.bars || []))) { if (b.high > hi) hi = b.high; if (b.low < lo) lo = b.low; }
+    const win = (o.bars || []).filter(b => b.time >= winFrom && b.time <= winTo);
+    const bars = win.length ? win : (o.bars || []);
+    // sanity: if the loaded candles are nowhere near the trade's entry, the feed is
+    // showing something else — skip rather than upload a chartless shot
+    if (bars.length) {
+      const closes = bars.map(b => b.close).sort((a, b) => a - b);
+      const median = closes[Math.floor(closes.length / 2)];
+      if (Math.abs(median - t.entry) / t.entry > 0.2) { log(`✗ ${t.symbol}: chart prices (~${median}) don't match entry ${t.entry} — skipping shot`); return null; }
+      // fit to the 5th–95th percentile of wicks, not absolute extremes — one outlier
+      // spike in the context bars was stretching the range and leaving half the frame empty
+      const q = (arr, p) => arr[Math.min(arr.length - 1, Math.max(0, Math.round(p * (arr.length - 1))))];
+      const lowsSorted  = bars.map(b => b.low).sort((a, b) => a - b);
+      const highsSorted = bars.map(b => b.high).sort((a, b) => a - b);
+      hi = Math.max(hi, q(highsSorted, 0.95));
+      lo = Math.min(lo, q(lowsSorted, 0.05));
+    }
   } catch (e) { log(`ohlcv for framing failed ${t.symbol}: ${e.message}`); }
+  // cap the vertical span at 8× the bracket so a big unrelated swing in the window
+  // (crypto especially) can't squish the trade's entry/SL/TP into a sliver
+  const bspan = Math.abs(t.tp - t.sl) || (hi - lo) || 1;
+  if (hi - lo > 8 * bspan) {
+    const mid = (Math.max(t.entry, t.sl, t.tp) + Math.min(t.entry, t.sl, t.tp)) / 2;
+    hi = Math.min(hi, mid + 4 * bspan);
+    lo = Math.max(lo, mid - 4 * bspan);
+  }
   const pmarg = (hi - lo) * 0.14 || Math.abs(t.tp - t.sl) * 0.30;   // 14%: enough headroom that levels/candles at the extremes never clip
   const pLo = lo - pmarg, pHi = hi + pmarg;
   try { await evaluate(`(function(){var s=${api}.getPanes()[0].getMainSourcePriceScale();s.setAutoScale(false);s.setVisiblePriceRange({from:${pLo.toFixed(5)},to:${pHi.toFixed(5)}});return 1;})()`); } catch {}
@@ -280,13 +350,17 @@ async function main() {
     if (!netByPos.has(Number(posId))) continue;           // not closed yet / unknown
     const R = s.risk > 0 ? netByPos.get(Number(posId)) / s.risk : 0;
     const exitTime = exitTsByPos.has(Number(posId)) ? Math.floor(exitTsByPos.get(Number(posId)) / 1000) : null;
-    let uploadId = null;
-    if (!busy() && s.symbol && s.entry) {
+    // chart in use by another run -> defer the WHOLE close-processing to the next cron
+    // tick (previously it updated the row shot-less and marked it done forever)
+    if (busy() && s.symbol && s.entry) { log(`chart busy — defer outcome pos=${posId}`); continue; }
+    let uploadId = null, deferShot = false;
+    if (s.symbol && s.entry) {
       writeFileSync(LOCK_FILE, String(Date.now()));
       try { const png = await screenshotTrade({ ...s, positionId: posId, exitTime, outcome: R > 0 ? 'WIN' : 'LOSS', rMultiple: R }); if (png) uploadId = await uploadScreenshot(png); }
-      catch (e) { log(`outcome shot pos=${posId} failed: ${e.message}`); }
+      catch (e) { if (/framing-not-applied/.test(e.message)) deferShot = true; log(`outcome shot pos=${posId} failed: ${e.message}`); }
       finally { try { writeFileSync(LOCK_FILE, '0'); } catch {} }
     }
+    if (deferShot) continue;   // transient chart contention — leave un-done, retry next cron tick
     try { await updateResultAndShot(s.pageId, R, uploadId); s.done = true; log(`📊 outcome ${s.strategy}/${s.symbol} pos=${posId} R=${R.toFixed(2)} ${uploadId ? '+outcome-shot' : ''}`); saveState(state); }
     catch (e) { log(`result update pos=${posId} failed: ${e.message}`); }
   }

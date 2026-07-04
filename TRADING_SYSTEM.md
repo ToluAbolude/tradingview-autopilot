@@ -139,6 +139,8 @@ re-run `nlm login` when it expires):
 
 | When | Job | Action |
 |---|---|---|
+| Sun 19:00 | `run_weekly_outlook.sh` | **week-ahead analyst** (opus-4-8): committed per-instrument predictions + entry zones from D1/H4 + ForexFactory calendar → Notion outlook page + `weekly_outlook.json`; grades last week's calls |
+| 06:15 Mon–Fri | `run_daily_brief.sh` | **daily confirmation** of the weekly calls: on_track/against/invalidated per instrument; broken calls get root-caused (released data + headlines) and REVISED; writes `daily_context/<date>.json` which session_runner consumes (skip/threshold/avoid-list) |
 | 07:00–11:55 / 13:30–18:55 / 00:00–04:55 | `orb_runner_cron.sh` | ORB dry-run, every 5 min in session windows |
 | 20:00 & 21:45 Mon–Fri | `eod_close.mjs` | force-close all positions |
 | 20:30 Mon–Fri | `run_eod_hermes.sh` | eod_agent + hermes_reflect (scale_risk disabled); dropped in the VM migration, re-enabled 2026-07-03 (static rules only until ANTHROPIC_API_KEY is added to `~/.anthropic.env`) |
