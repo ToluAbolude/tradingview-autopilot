@@ -328,15 +328,24 @@ async function main() {
 
   const now     = new Date();
   const isSun   = now.getUTCDay() === 0;
+  const isSat   = now.getUTCDay() === 6;
   const isFri   = now.getUTCDay() === 5;
   const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
   const h       = now.getUTCHours();
 
-  // 0a. Sunday gate — Forex opens ~22:00 UTC Sunday; skip everything before that
-  if (isSun && h < 22) {
-    log('Sunday market not yet open (opens ~22:00 UTC). Skipping.');
+  // 0a. Weekend policy — FX/metals/indices are closed on Sat and Sun before
+  // ~22:00 UTC (the broker queues market orders to the illiquid Sunday open).
+  // CRYPTO trades 24/7 with a live feed, so instead of skipping the whole run we
+  // drop into CRYPTO-ONLY mode (non-crypto setups are filtered out in 3b below).
+  // Kill switch: WEEKEND_CRYPTO=off restores the old full weekend skip.
+  const WEEKEND_CRYPTO      = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off';
+  const marketClosed        = isSat || (isSun && h < 22);   // FX/metals/indices closed
+  const weekendCryptoOnly   = marketClosed && WEEKEND_CRYPTO;
+  if (marketClosed && !weekendCryptoOnly) {
+    log('Weekend — markets closed (opens ~22:00 UTC Sunday). Skipping.');
     return;
   }
+  if (weekendCryptoOnly) log('Weekend — CRYPTO-only mode (FX/metals/indices closed).');
 
   // 0b. EOD close — 20:00 UTC Mon-Fri: close any open positions and stop for the day
   // Exempt on Sunday — market just opened at 22:00, there are no positions to close.
@@ -487,6 +496,10 @@ async function main() {
   if (lossCooldowns.size > 0) log(`  60-min loss cooldowns active: ${[...lossCooldowns].join(', ')}`);
 
   const viableSetups = sessionFiltered.filter(s => {
+    if (weekendCryptoOnly && !CRYPTO_SYMBOLS.includes(s.label)) {
+      log(`  Skipping ${s.label}: weekend (crypto-only mode — FX/metals/indices closed)`);
+      return false;
+    }
     if (PARAMS.blockedSymbols?.includes(s.label)) {
       log(`  Skipping ${s.label}: temporarily blocked by performance review`);
       return false;

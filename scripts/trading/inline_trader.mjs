@@ -339,15 +339,23 @@ export async function attemptInlineTrade(setup) {
   const day     = now.getUTCDay();
   const utcMins = h * 60 + now.getUTCMinutes();
 
-  if (day === 0 && h < 22) { log('Sunday market not open. Skip.'); return; }
-  // Saturday hard block — FX/CFD markets are closed; cTrader QUEUES market
-  // orders placed on Saturday and fills them at the illiquid Sunday open.
-  // The 2026-06-06 (Saturday) USDCHF signals off a frozen chart filled this way
-  // and were swept for −$5,659 at the Sunday open.
-  if (day === 6) { log('Saturday — markets closed, orders would queue to Sunday open. Skip.'); return; }
-  if (h >= 20 && day !== 0) { log('Past 20:00 UTC EOD cutoff. Skip.'); return; }
-  if (day !== 0 && h === 19 && now.getUTCMinutes() >= 30) { log('Past 19:30 last-entry cutoff. Skip.'); return; }
-  if (day === 5 && utcMins >= 21 * 60) { log('Friday 21:00 UTC cutoff. Skip.'); return; }
+  // Weekend = Saturday all day + Sunday before ~22:00 UTC. FX/metals/indices are
+  // closed then and cTrader QUEUES market orders to the illiquid Sunday open (the
+  // 2026-06-06 USDCHF frozen-chart fills were swept for −$5,659 this way). CRYPTO
+  // trades 24/7 with a live feed, so it is exempt from the weekend block. The
+  // weekday EOD/last-entry/Friday cutoffs still apply to crypto (day-trade rule).
+  // Kill switch: WEEKEND_CRYPTO=off blocks crypto on weekends too.
+  const cryptoOK  = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off'
+    && /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(setup.label || setup.symbol || '');
+  const isWeekend = day === 6 || (day === 0 && h < 22);
+
+  if (isWeekend) {
+    if (!cryptoOK) { log('Weekend — markets closed (crypto-only). Skip.'); return; }
+  } else {
+    if (h >= 20 && day !== 0) { log('Past 20:00 UTC EOD cutoff. Skip.'); return; }
+    if (day !== 0 && h === 19 && now.getUTCMinutes() >= 30) { log('Past 19:30 last-entry cutoff. Skip.'); return; }
+    if (day === 5 && utcMins >= 21 * 60) { log('Friday 21:00 UTC cutoff. Skip.'); return; }
+  }
 
   // ── 2. Session block ───────────────────────────────────────────────────────
   const session = currentSession();

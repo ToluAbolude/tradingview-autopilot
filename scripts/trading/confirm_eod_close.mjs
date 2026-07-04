@@ -47,14 +47,21 @@ async function main() {
   const reason = shouldClose(new Date());
   if (!reason) { process.exit(0); }     // outside close window — silent no-op
 
+  // Weekend crypto carry: crypto trades 24/7, so there is no weekend gap to
+  // flatten against. Keep CRYPTO open through the weekend and the Friday cutoff
+  // (it rides its own SL/TP bracket); still flatten crypto on a weekday daily-eod.
+  // Kill switch: WEEKEND_CRYPTO=off restores the full flatten.
+  const WEEKEND_CRYPTO = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off';
+  const keepClasses = (WEEKEND_CRYPTO && (reason === 'weekend' || reason === 'friday-cutoff')) ? ['CRYPTO'] : [];
+
   const b = await import('./broker_ctrader.mjs');
   await b.connect();
   const open = await b.getPositions();
   if (!open.length) { log(`${reason}: no open positions`); process.exit(0); }
 
-  log(`${reason}: flattening ${open.length} open position(s)`);
-  const res = await b.closeAllPositions();
-  log(`closed ${res.closed}, remaining ${res.remaining}`);
+  log(`${reason}: ${open.length} open position(s)${keepClasses.length ? ` — keeping ${keepClasses.join(',')}` : ' — flattening'}`);
+  const res = await b.closeAllPositions({ keepClasses });
+  log(`closed ${res.closed}, kept ${res.skipped || 0}, remaining ${res.remaining}`);
   process.exit(0);
 }
 

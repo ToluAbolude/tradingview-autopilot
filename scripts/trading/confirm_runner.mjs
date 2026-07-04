@@ -190,9 +190,15 @@ async function loadStrategies() {
 async function main() {
   const now = new Date();
   const dow = now.getUTCDay();
-  if (dow === 0 || dow === 6) { log('Weekend — confirm runner idle.'); return; }
+  const isWeekend = (dow === 0 || dow === 6);
+  // Weekend policy: FX/metals/indices are closed (the broker queues orders to the
+  // illiquid Sunday open — the 2026-06-06 blowup), but CRYPTO trades 24/7 with a
+  // live feed. So on the weekend run CRYPTO combos ONLY; idle on everything else.
+  // Kill switch: WEEKEND_CRYPTO=off restores the old weekend-idle behaviour.
+  const WEEKEND_CRYPTO = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off';
+  if (isWeekend && !WEEKEND_CRYPTO) { log('Weekend — confirm runner idle.'); return; }
 
-  log(`═══ CONFIRM RUNNER (${LIVE ? 'LIVE/DEMO' : 'DRY-RUN'}) risk=${CONFIRM_RISK_PCT}% ═══`);
+  log(`═══ CONFIRM RUNNER (${LIVE ? 'LIVE/DEMO' : 'DRY-RUN'}) risk=${CONFIRM_RISK_PCT}%${isWeekend ? ' — WEEKEND crypto-only' : ''} ═══`);
 
   // HARD demo-only gate — this experiment must never touch a live account.
   const env = (process.env.CTRADER_ENV || 'demo').toLowerCase();
@@ -238,6 +244,8 @@ async function main() {
 
   for (const combo of COMBOS) {
     const { strategy, symbol, tf } = combo;
+    // Weekend: only CRYPTO combos (BTCUSD/ETHUSD) may fire — FX/metals/indices are closed.
+    if (isWeekend && !/BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(symbol)) continue;
     const label = combo.label || strategy;        // attribution name (variant or base)
     const period = TF_PERIOD[tf], tfMs = TF_MS[tf];
     const strat = strategies[strategy];            // generateSignals comes from the BASE module

@@ -636,8 +636,27 @@ export async function closePosition(positionId, volumeCents = null) {
   });
 }
 
-export async function closeAllPositions() {
-  const positions = await getPositions();
+export async function closeAllPositions({ keepClasses = [] } = {}) {
+  let positions = await getPositions();
+  let skipped = 0;
+  // Per-class exemption (e.g. keep CRYPTO open over the weekend — it trades 24/7,
+  // so there is no market-closed gap to flatten against). Resolve symbolId→name
+  // once via the symbols list, then drop the kept classes from the close set.
+  // Fail-safe: if the resolve fails, fall through and close everything.
+  if (keepClasses.length && positions.length) {
+    const keep = new Set(keepClasses.map(c => String(c).toUpperCase()));
+    try {
+      const res = await send('ProtoOASymbolsListReq', { ctidTraderAccountId: _accountId, includeArchivedSymbols: true });
+      const nameById = new Map((res.symbol || []).map(s => [Number(s.symbolId), s.symbolName]));
+      if (nameById.size) {
+        const before = positions.length;
+        positions = positions.filter(p => !keep.has(_instrumentClass(nameById.get(Number(p.symbolId)) || '')));
+        skipped = before - positions.length;
+      }
+    } catch (e) {
+      console.error(`[cTrader] closeAllPositions: class resolve failed (${e.message}) — closing all`);
+    }
+  }
   let closed = 0;
   for (const p of positions) {
     try {
@@ -649,7 +668,7 @@ export async function closeAllPositions() {
       closed++;
     } catch (e) { console.error(`[cTrader] close ${p.positionId} failed: ${e.message}`); }
   }
-  return { closed, remaining: positions.length - closed };
+  return { closed, remaining: positions.length - closed, skipped };
 }
 
 export async function modifyPosition(positionId, { stopLoss, takeProfit, trailingStopLoss }) {
