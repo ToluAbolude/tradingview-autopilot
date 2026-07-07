@@ -342,10 +342,8 @@ function buildHtml(label, trades, sum, equity, openPos = []) {
     </td></tr>`;
   }
 
-  const floating = (equity && Number.isFinite(equity.equity) && Number.isFinite(equity.balance))
-    ? ` · floating <b style="color:${equity.equity - equity.balance >= 0 ? '#2e7d32' : '#c62828'}">${money(equity.equity - equity.balance)}</b>` : '';
   const acct = equity
-    ? `<tr><td style="padding:8px 24px 0;text-align:center;font-size:13px;color:#555">Account balance <b>${money(equity.balance)}</b> · equity <b>${money(equity.equity)}</b>${floating}</td></tr>`
+    ? `<tr><td style="padding:8px 24px 0;text-align:center;font-size:13px;color:#555">Account balance <b>${money(equity.balance)}</b> · equity <b>${money(equity.equity)}</b></td></tr>`
     : '';
 
   return `<!doctype html><html><body style="margin:0;background:#f0f2f5;font-family:Arial,Helvetica,sans-serif;color:#222">
