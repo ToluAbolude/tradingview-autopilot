@@ -360,12 +360,12 @@ async function main() {
   }
   if (weekendCryptoOnly) log('Weekend — CRYPTO-only mode (FX/metals/indices closed).');
 
-  // 0b. EOD close — 20:00 UTC Mon-Fri: close any open positions and stop for the day
-  // Exempt on Sunday — market just opened at 22:00, there are no positions to close.
+  // 0b. Past 20:00 UTC Mon-Fri: no new trades from this run. Do NOT flatten here —
+  // confirm_eod_close (30-min cron) owns EOD and carries bracketed winners /
+  // fresh late entries overnight; a blanket closeAllPositions() would bypass it.
+  // (No session_runner cron currently fires this late; kept as a guard.)
   if (h >= 20 && !isSun) {
-    log('20:00 UTC EOD close — closing any open positions.');
-    try { await closeAllPositions(); log('  All positions closed.'); }
-    catch(e) { log(`  closeAllPositions: ${e.message}`); }
+    log('Past 20:00 UTC — no new trades; EOD handled by confirm_eod_close.');
     return;
   }
 

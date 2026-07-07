@@ -359,16 +359,23 @@ export async function attemptInlineTrade(setup) {
   // Weekend = Saturday all day + Sunday before ~22:00 UTC. FX/metals/indices are
   // closed then and cTrader QUEUES market orders to the illiquid Sunday open (the
   // 2026-06-06 USDCHF frozen-chart fills were swept for −$5,659 this way). CRYPTO
-  // trades 24/7 with a live feed, so it is exempt from the weekend block. The
-  // weekday EOD/last-entry/Friday cutoffs still apply to crypto (day-trade rule).
+  // trades 24/7 with a live feed, so it is exempt from the weekend block.
   // Kill switch: WEEKEND_CRYPTO=off blocks crypto on weekends too.
-  const cryptoOK  = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off'
-    && /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(setup.label || setup.symbol || '');
+  const isCrypto  = /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(setup.label || setup.symbol || '');
+  const cryptoOK  = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off' && isCrypto;
   const isWeekend = day === 6 || (day === 0 && h < 22);
+
+  // Crypto late entries (2026-07-07): the 19:30/20:00/Friday cutoffs existed for
+  // the daily forced flatten + FX rollover spread spike — neither applies to
+  // crypto (24/7 feed, no rollover; EOD carry now judges a fresh late entry at
+  // the NEXT day's EOD, not 30 min after birth). Non-crypto keeps all cutoffs:
+  // post-NY thinning + edge_replay says late/Asian entries bleed.
+  // Kill switch: CRYPTO_LATE=off restores the cutoffs for crypto.
+  const cryptoLate = (process.env.CRYPTO_LATE ?? 'on') !== 'off' && isCrypto;
 
   if (isWeekend) {
     if (!cryptoOK) { log('Weekend — markets closed (crypto-only). Skip.'); return; }
-  } else {
+  } else if (!cryptoLate) {
     if (h >= 20 && day !== 0) { log('Past 20:00 UTC EOD cutoff. Skip.'); return; }
     if (day !== 0 && h === 19 && now.getUTCMinutes() >= 30) { log('Past 19:30 last-entry cutoff. Skip.'); return; }
     if (day === 5 && utcMins >= 21 * 60) { log('Friday 21:00 UTC cutoff. Skip.'); return; }

@@ -72,6 +72,11 @@ async function main() {
   // is closed on a later tick — "in profit" must hold through the evening.
   const CARRY_WINNERS = (process.env.EOD_CARRY_WINNERS ?? 'on') !== 'off';
   if (reason === 'daily-eod' && CARRY_WINNERS) {
+    // A position born AFTER today's EOD window opened (late crypto entries —
+    // CRYPTO_LATE in inline_trader) hasn't had a day to work; culling it on the
+    // next 30-min tick would be churn. It gets judged at the NEXT day's EOD.
+    const _t = new Date();
+    const eodStartMs = Date.UTC(_t.getUTCFullYear(), _t.getUTCMonth(), _t.getUTCDate(), DAILY_EOD_UTC ?? 20);
     let closed = 0, carried = 0, failed = 0;
     for (const p of open) {
       let carry = false, why = '';
@@ -82,9 +87,12 @@ async function main() {
         const cur  = bars.length ? bars[bars.length - 1].c : null;
         const inProfit  = cur != null && (p.direction === 'long' ? cur > p.entryPrice : cur < p.entryPrice);
         const bracketed = p.stopLoss > 0 && p.takeProfit > 0;   // never carry a naked position
-        carry = inProfit && bracketed;
+        const bornInWindow = (p.openTimestamp || 0) >= eodStartMs;
+        carry = bracketed && (inProfit || bornInWindow);
         why = `${name} ${p.direction} entry=${p.entryPrice} cur=${cur ?? 'unpriceable'} — ` +
-              (carry ? 'in profit + bracketed' : !inProfit ? 'not in profit' : 'NAKED (no SL/TP)');
+              (!bracketed ? 'NAKED (no SL/TP)'
+               : bornInWindow ? 'fresh late entry — judged at next EOD'
+               : inProfit ? 'in profit + bracketed' : 'not in profit');
       } catch (e) { why = `pos ${p.positionId}: price check failed (${e.message})`; }
       if (carry) { carried++; log(`daily-eod CARRY: ${why}`); continue; }
       try {
