@@ -193,15 +193,19 @@ const ALL_TFS = ['1', '5', '15', '30', '60', '240', 'D', 'W'];
 //   4H:  300 → ~50 days  (~2 months — current macro position)
 //   D:   300 → ~14 mo    (full annual cycle + seasonality)
 //   W:   260 → ~5 yrs    (multi-year regime)
+// Operator rule (2026-07-07): every indicator/strategy SCAN reads the LATEST
+// 250 candles on every timeframe — one uniform recent-focused window. getBars
+// reads from the newest bar backwards, so req:250 = the latest 250 candles.
+// (Backtests — orb_backtest, backtest*.mjs — keep their own deeper fetches.)
 const PER_TF_BARS = {
-  '1':   { req: 200, min: 150 },
-  '5':   { req: 240, min: 200 },
+  '1':   { req: 250, min: 150 },
+  '5':   { req: 250, min: 200 },
   '15':  { req: 250, min: 200 },
   '30':  { req: 250, min: 200 },
-  '60':  { req: 280, min: 240 },
-  '240': { req: 300, min: 250 },
-  'D':   { req: 300, min: 250 },
-  'W':   { req: 260, min: 200 },
+  '60':  { req: 250, min: 200 },
+  '240': { req: 250, min: 200 },
+  'D':   { req: 250, min: 200 },
+  'W':   { req: 250, min: 200 },
 };
 
 // TF display labels and confluence weights (higher TF = more signal weight, less noise)
@@ -454,7 +458,7 @@ function detectFVGZones(bars, atr, lookback = 30) {
 // Support:    zone top = closest body bottom above it, zone bottom = pivot wick low
 // Retest dedup: new pivot inside existing zone increments retests instead of new zone
 // Break: body close beyond wick tip; Flip: retest + hold from other side
-function buildSRZones(bars, atr, {
+export function buildSRZones(bars, atr, {
   pivotLen = 5,
   maxSR    = 5,
 } = {}) {
@@ -479,52 +483,42 @@ function buildSRZones(bars, atr, {
     if (lo) pivotLows.push({ wickTip: pl, idx: i });
   }
 
-  // Build zones from oldest to newest; most-recent zones end up first after reversal
+  // Build zones oldest→newest with ROLLING eviction (Pine parity: array.unshift
+  // + array.pop keeps the NEWEST maxSR zones per side). The old first-come cap
+  // kept the OLDEST pivots in the window and dropped everything newer — the bot
+  // honored stale levels while blind to fresh structure (2026-07-07: on GBPNZD
+  // 5M it saw 1 stale zone 261 candles old vs the chart's 4 current ones).
   function buildZones(pivots, type, cap) {
-    const zones = [];
+    const zones = [];   // newest first (index 0 = most recent), like the Pine arrays
     for (let p = 0; p < pivots.length; p++) {
       const { wickTip, idx } = pivots[p];
 
-      if (type === 'resistance') {
-        // Check retest: pivot high falls inside existing resistance zone
-        const hit = zones.find(z => !z.broken && wickTip >= z.bodyLevel && wickTip <= z.wickTip);
-        if (hit) { hit.retests++; continue; }
+      // Retest dedup: pivot falls inside an existing zone → count it, no new zone
+      const hit = type === 'resistance'
+        ? zones.find(z => wickTip >= z.bodyLevel && wickTip <= z.wickTip)
+        : zones.find(z => wickTip >= z.wickTip && wickTip <= z.bodyLevel);
+      if (hit) { hit.retests++; continue; }
 
-        // Find closest body top below wick tip among bars from pivot to n
-        let bodyLevel = null, minDist = Infinity;
-        for (let k = idx; k <= n; k++) {
-          const bt = Math.max(bars[k].o, bars[k].c);
-          const d  = wickTip - bt;
-          if (d >= 0 && d < minDist) { minDist = d; bodyLevel = bt; }
-        }
-        if (bodyLevel === null) bodyLevel = Math.max(bars[idx].o, bars[idx].c);
-        if (zones.filter(z => !z.broken).length < cap)
-          zones.push({ wickTip, bodyLevel, type, bar: idx, retests: 0, broken: false, flipped: false });
-
-      } else {
-        // Support: check retest — pivot low falls inside existing support zone
-        const hit = zones.find(z => !z.broken && wickTip >= z.wickTip && wickTip <= z.bodyLevel);
-        if (hit) { hit.retests++; continue; }
-
-        // Find closest body bottom above wick tip among bars from pivot to n
-        let bodyLevel = null, minDist = Infinity;
-        for (let k = idx; k <= n; k++) {
-          const bb = Math.min(bars[k].o, bars[k].c);
-          const d  = bb - wickTip;
-          if (d >= 0 && d < minDist) { minDist = d; bodyLevel = bb; }
-        }
-        if (bodyLevel === null) bodyLevel = Math.min(bars[idx].o, bars[idx].c);
-        if (zones.filter(z => !z.broken).length < cap)
-          zones.push({ wickTip, bodyLevel, type, bar: idx, retests: 0, broken: false, flipped: false });
+      // Body level from the pivot's own confirmation window only (Pine scans
+      // bars pivot..pivot+pivotLen) — searching the whole remaining window let
+      // any later candle body thin the zone into a sliver.
+      let bodyLevel = null, minDist = Infinity;
+      for (let k = idx; k <= Math.min(idx + pivotLen, n); k++) {
+        const v = type === 'resistance' ? Math.max(bars[k].o, bars[k].c) : Math.min(bars[k].o, bars[k].c);
+        const d = type === 'resistance' ? wickTip - v : v - wickTip;
+        if (d >= 0 && d < minDist) { minDist = d; bodyLevel = v; }
       }
+      if (bodyLevel === null) bodyLevel = type === 'resistance' ? Math.max(bars[idx].o, bars[idx].c) : Math.min(bars[idx].o, bars[idx].c);
+
+      if (zones.length >= cap) zones.pop();   // evict the oldest (Pine array.pop)
+      zones.unshift({ wickTip, bodyLevel, type, bar: idx, retests: 0, broken: false, flipped: false });
     }
     return zones;
   }
 
-  const capR = Math.ceil(maxSR / 2);
-  const capS = maxSR - capR;
-  const resZones  = buildZones(pivotHighs, 'resistance', capR);
-  const suppZones = buildZones(pivotLows,  'support',    capS);
+  // Pine tracks up to maxSR zones per side (its 3+2 split is only the DRAW cap)
+  const resZones  = buildZones(pivotHighs, 'resistance', maxSR);
+  const suppZones = buildZones(pivotLows,  'support',    maxSR);
 
   // Break detection: body close beyond wick tip
   for (const z of resZones) {
@@ -804,9 +798,15 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const strats  = [];
   let activeFVG = null;
 
-  // EMA flatness gate — dead-ranging market, no edge (8-14% WR in backtests)
+  // EMA flatness gate — dead-ranging market, no edge (8-14% WR in backtests).
+  // ATR-relative (2026-07-07): the old fixed 0.4%-of-price bar structurally
+  // disabled low-vol symbols — EURGBP/GBPNZD cleared it on 0 of ~420 M15 bars in
+  // a week (max spread 0.23%) so the bot could only ever fire crypto/gold intraday.
+  // Flat now means the EMA fan is narrower than 1×ATR (one typical bar's range,
+  // scaled to each instrument). k=1.0 calibrated on 14d M15 data: crypto pass
+  // rates unchanged (XRPUSD 55% vs 57% old, LTCUSD 65% vs 65%), FX crosses 0%→~50%.
   const emaSpread = Math.max(ema8[n], ema21[n], ema50[n]) - Math.min(ema8[n], ema21[n], ema50[n]);
-  const emaFlat   = emaSpread / ema50[n] < (TC.ema_flat_pct ?? 0.004);
+  const emaFlat   = emaSpread < (atr[n] || 0) * (TC.ema_flat_atr ?? 1.0);
   if (emaFlat) {
     return { score: 2, reasons: ['EMA flat (ranging — no edge)'], strategies: [], rsi: rsi[n], atrVal: atr[n], activeFVG: null };
   }
@@ -1412,10 +1412,9 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       let bars = null;
       try {
         await setChart(inst.sym, tf);
-        // Per-TF bar count — recent-focused, EMA200 still valid (≥250 floor).
-        // Rationale: too much history dilutes current trend, lower TFs especially
-        // (500 × 1M = price from 8h ago). See PER_TF_BARS map below.
-        const { req, min } = PER_TF_BARS[tf] || { req: 280, min: 240 };
+        // Uniform latest-250 window per operator rule — too much history dilutes
+        // the current trend; too little starves the EMAs. See PER_TF_BARS map.
+        const { req, min } = PER_TF_BARS[tf] || { req: 250, min: 200 };
         bars = await waitForBars(req, min);
       } catch (e) {
         process.stdout.write(`!${(e.message || 'err').slice(0, 12)} `);

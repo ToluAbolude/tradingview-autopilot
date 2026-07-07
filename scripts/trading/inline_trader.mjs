@@ -651,9 +651,30 @@ export async function attemptInlineTrade(setup) {
     /NAS100|US30|SPX500|UK100|GER40|JP225|AUS200|HK50|DAX|FTSE/.test(sym) ? 0.0015 :
     /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX/.test(sym) ? 0.003 : 0.0008;
   const _slFrac = Math.abs(setup.entry - setup.sl) / setup.entry;
-  if (!Number.isFinite(_slFrac) || _slFrac < _minSlFrac) {
-    log(`REJECT: SL distance ${(_slFrac * 100).toFixed(3)}% of price < min ${(_minSlFrac * 100).toFixed(2)}% — collapsed/stale SL, sizing would explode. Skip.`);
+  if (!Number.isFinite(_slFrac)) {
+    log(`REJECT: SL distance is not finite (entry=${setup.entry} sl=${setup.sl}). Skip.`);
     return;
+  }
+  // Below the class floor: WIDEN the stop to the floor instead of skipping
+  // (2026-07-07: 15M ATR stops + fresh S/R snapping sit under the floors on
+  // most signals — 5/7 rejected in one executor run). Wider SL + risk-based
+  // sizing = fewer lots, same $ risk, more survivable stop (the WTI lesson).
+  // Keep the trade only if the structural TP2 still pays ≥2R vs the wider stop.
+  if (_slFrac < _minSlFrac) {
+    const minDist = setup.entry * _minSlFrac;
+    const rr2 = Math.abs(setup.tp2 - setup.entry) / minDist;
+    if (!Number.isFinite(rr2) || rr2 < 2.0) {
+      log(`REJECT: SL ${(_slFrac * 100).toFixed(3)}% < floor ${(_minSlFrac * 100).toFixed(2)}% and widening drops TP2 to ${rr2.toFixed(2)}R (<2.0). Skip.`);
+      return;
+    }
+    const newSl = setup.dir === 'long' ? setup.entry - minDist : setup.entry + minDist;
+    log(`SL widened to class floor: ${setup.sl} → ${newSl.toFixed(6)} (${(_minSlFrac * 100).toFixed(2)}% of price; TP2 = ${rr2.toFixed(2)}R vs wider stop)`);
+    setup.sl = Number(newSl.toFixed(6));
+    // Keep TP1 a true ~1R scalp against the widened stop, or leg O1 is noise
+    if (setup.tp1 && Math.abs(setup.tp1 - setup.entry) / minDist < 1.0) {
+      setup.tp1 = Number((setup.dir === 'long' ? setup.entry + minDist : setup.entry - minDist).toFixed(6));
+      log(`TP1 re-anchored to 1R vs widened SL: ${setup.tp1}`);
+    }
   }
 
   // Record this exact signal so an identical re-fire is refused for 24h (6d).

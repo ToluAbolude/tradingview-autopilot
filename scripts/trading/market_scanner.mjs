@@ -116,6 +116,7 @@ async function runScan(state) {
       rr:         s.rr,
       rsi:        Math.round(s.rsi),
       tier:       s.tier,
+      mtfTFs:     s.mtfTFs || [],   // signal_executor feeds records to attemptInlineTrade, whose MTF depth gate needs this
       reasons:    (s.reasons || []).slice(0, 5),
     };
 

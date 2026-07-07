@@ -176,7 +176,7 @@ async function main() {
     try {
       // Switch to this instrument's chart and get ATR from 15M bars
       await setChart(`BLACKBULL:${pos.sym}`, '15');
-      const bars = await waitForBars(300, 50, 3, 700);
+      const bars = await waitForBars(250, 50, 3, 700);   // latest 250 (operator rule)
       if (!bars || bars.length < 20) throw new Error('Not enough bars for ATR');
 
       const atr     = calcATR(bars);

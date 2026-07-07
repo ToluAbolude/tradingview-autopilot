@@ -121,7 +121,8 @@ async function main() {
   for (const inst of INSTRUMENT_UNIVERSE) {
     try {
       await setChart(inst.sym, SCAN_TF);
-      const bars = await waitForBars(300, MIN_BARS, 3, 700);
+      // Latest 250 candles — uniform scan window (operator rule 2026-07-07)
+      const bars = await waitForBars(250, MIN_BARS, 3, 700);
 
       if (!bars || bars.length < MIN_BARS) {
         unavailable.push(inst.label);
