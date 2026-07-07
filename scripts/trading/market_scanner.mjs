@@ -19,7 +19,6 @@
 
 import { scanForSetups } from './setup_finder.mjs';
 import { attemptInlineTrade, resetCycleState } from './inline_trader.mjs';
-import { captureOrderHistory } from './broker_history.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
@@ -163,22 +162,9 @@ async function runScan(state) {
   console.log(`  Active: ${live.length} | New: ${added.length} | History: ${newHistory.length}`);
   console.log(`  Saved → ${SIGNALS_FILE}`);
 
-  // ── Mirror BlackBull's actual Order History to CSV ─────────────────────────
-  // The broker panel is settled now (no chart navigation happens after this
-  // point in the cycle), so the Order history tab can be safely opened.
-  // Captures any new orders since the previous scan — including ones the bot
-  // didn't place (manual trades, scheduled, etc.) — and serves as ground-truth
-  // for reconciling against trades.csv to detect silent submit failures.
-  try {
-    const r = await captureOrderHistory();
-    if (r && !r.skipped && !r.error) {
-      console.log(`  [broker_history] scraped=${r.scraped} added=${r.added}`);
-    } else if (r && r.error) {
-      console.log(`  [broker_history] error: ${r.error}`);
-    }
-  } catch (e) {
-    console.log(`  [broker_history] capture error: ${e.message}`);
-  }
+  // BlackBull Order-history DOM scrape removed 2026-07-07: order truth is the
+  // cTrader ledger now (reconcile_trades_from_ctrader.mjs); the TV broker panel
+  // no longer exists on this VM, so the scrape failed on every scan.
 
   console.log(`  Next scan: ${nextDue}`);
 
