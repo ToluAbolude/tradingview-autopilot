@@ -229,9 +229,7 @@ function printReport(label, trades, sum, equity, openPos = []) {
   }
   if (equity) {
     console.log('');
-    const floating = (Number.isFinite(equity.equity) && Number.isFinite(equity.balance))
-      ? `  floating=${money(equity.equity - equity.balance)}` : '';
-    console.log(`Account: balance=${money(equity.balance)}  equity=${money(equity.equity)}${floating}`);
+    console.log(`Account: balance=${money(equity.balance)}  equity=${money(equity.equity)}`);
   }
 }
 
