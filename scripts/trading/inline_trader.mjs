@@ -50,12 +50,15 @@ const CORRELATED_GROUPS = [
 const CRYPTO_SYMBOLS       = ['BTCUSD', 'ETHUSD', 'SOLUSD', 'ADAUSD', 'XRPUSD', 'BNBUSD', 'LTCUSD'];
 const CRYPTO_ASIAN_MIN_SCORE = 10;
 
+// Order-of-magnitude corruption guards (e.g. NAS prices written into WTI) —
+// keep them WIDE; they rot as markets trend (2026-07-07: gold 4126 > old 4000
+// cap, SPX 7535 > 7000, NAS 30316 > 30000 — all silently "corrupt"-rejected).
 const PRICE_RANGES = {
   WTI: [40, 200], USOIL: [40, 200],
-  XAUUSD: [1000, 4000], XAGUSD: [10, 100],
-  GER40: [10000, 30000], UK100: [6000, 13000],
-  NAS100: [10000, 30000], US30: [25000, 55000], SPX500: [3000, 7000],
-  BTCUSD: [10000, 200000], ETHUSD: [500, 15000], SOLUSD: [10, 1000],
+  XAUUSD: [1000, 8000], XAGUSD: [10, 150],
+  GER40: [10000, 40000], UK100: [6000, 16000],
+  NAS100: [10000, 50000], US30: [25000, 80000], SPX500: [3000, 12000],
+  BTCUSD: [10000, 250000], ETHUSD: [500, 15000], SOLUSD: [10, 1000],
   XRPUSD: [0.1, 20], BNBUSD: [100, 2000], LTCUSD: [20, 500],
 };
 
@@ -69,6 +72,20 @@ async function getNews() {
   _newsCache   = await fetchHighImpactNews();
   _newsCacheAt = Date.now();
   return _newsCache;
+}
+
+// Equity from the BROKER (source of truth). The TV-DOM getEquity() scrape can
+// return garbage on a broker-less panel — 2026-07-07 it read £99,021 on a
+// £10,690 account, inflating risk sizing 9.3× (calcLots' hard cap contained it)
+// and understating the daily-drawdown kill-switch denominator ~9×.
+async function getEquityTruth() {
+  if (process.env.BROKER_PROVIDER === 'ctrader') {
+    try {
+      const eq = await (await import('./broker_ctrader.mjs')).getEquity();
+      if (eq && (eq.equity > 0 || eq.balance > 0)) return eq;
+    } catch (_) {}
+  }
+  return getEquity().catch(() => ({}));
 }
 
 // ── Param loader — reads trading_params.json each call (hot-reload) ────────────
@@ -452,7 +469,7 @@ export async function attemptInlineTrade(setup) {
   // and left this kill-switch blind through a -9% day on 2026-06-01).
   try {
     const todayPnl   = await getTodayRealizedPnl();
-    const equityData = await getEquity().catch(() => ({}));
+    const equityData = await getEquityTruth();
     const equity     = equityData.equity || equityData.balance || 10000;
     const drawdownPct = (todayPnl / equity) * 100;
     const MAX_DAILY_DRAWDOWN_PCT = PARAMS.maxDailyDrawdownPct || 3;
@@ -625,7 +642,7 @@ export async function attemptInlineTrade(setup) {
   // ── ALL GUARDS PASSED — place trade ───────────────────────────────────────
   log(`✅ All guards passed. Placing trade (score=${setup.score} dir=${setup.dir.toUpperCase()} Trifecta=${trif}/3 ${conf})`);
 
-  const equityData = await getEquity().catch(() => ({}));
+  const equityData = await getEquityTruth();
   const equity     = equityData.equity || equityData.balance || 10000;
 
   const [r1, r2, r3] = PARAMS.riskPct || [6.0, 4.2, 3.0];

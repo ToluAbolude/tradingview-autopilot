@@ -72,6 +72,19 @@ const DAILY_CONTEXT_FILE = join(DATA_ROOT, 'daily_context', `${new Date().toISOS
 
 function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
 
+// Equity from the BROKER (source of truth). The TV-DOM getEquity() scrape can
+// return garbage on a broker-less panel — 2026-07-07 it read £99,021 on a
+// £10,690 account and sized ADAUSD at 4.95M lots (caps contained it to 3).
+async function getEquityTruth() {
+  if (process.env.BROKER_PROVIDER === 'ctrader') {
+    try {
+      const eq = await (await import('./broker_ctrader.mjs')).getEquity();
+      if (eq && (eq.equity > 0 || eq.balance > 0)) return eq;
+    } catch (_) {}
+  }
+  return getEquity().catch(() => ({}));
+}
+
 function logTrade(entry) {
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
   if (!existsSync(LOG_FILE)) {
@@ -377,8 +390,7 @@ async function main() {
 
   // 0f. Equity check — informational only (multi-instrument: positions are expected to be open)
   try {
-    const { getEquity } = await import('./execute_trade.mjs');
-    const eq = await getEquity();
+    const eq = await getEquityTruth();
     if (eq?.equity != null) log(`  Equity: £${eq.equity} | Balance: £${eq.balance} | Float P&L: £${eq.unrealisedPnl ?? 0}`);
   } catch(e) { log(`Equity check skipped: ${e.message}`); }
 
@@ -577,7 +589,7 @@ async function main() {
 
   // 6. Risk scaling — reduce per-trade risk as more instruments trade simultaneously
   // 1 trade=3.5% | 2 trades=2.5% each | 3+=1.75% each
-  const equityData = await getEquity().catch(() => ({}));
+  const equityData = await getEquityTruth();
   const equity = equityData.equity || equityData.balance || 10000;
   log(`  Account equity: £${equity}`);
 
@@ -589,12 +601,14 @@ async function main() {
   //    O1: 1/2 risk at 1.0R main target
   //    O2: 1/2 risk at 2.0R runner (closed at EOD if not hit — never overnight)
   // Sanity check: expected price ranges per instrument — rejects corrupt scanner signals
+  // Order-of-magnitude corruption guards — keep WIDE; they rot as markets trend
+  // (2026-07-07: gold 4126 > old 4000 cap, SPX 7535 > 7000, NAS 30316 > 30000).
   const PRICE_RANGES = {
     WTI: [40, 200], USOIL: [40, 200],
-    XAUUSD: [1000, 4000], XAGUSD: [10, 100],
-    GER40: [10000, 30000], UK100: [6000, 13000],
-    NAS100: [10000, 30000], US30: [25000, 55000], SPX500: [3000, 7000],
-    BTCUSD: [10000, 200000], ETHUSD: [500, 15000], SOLUSD: [10, 1000],
+    XAUUSD: [1000, 8000], XAGUSD: [10, 150],
+    GER40: [10000, 40000], UK100: [6000, 16000],
+    NAS100: [10000, 50000], US30: [25000, 80000], SPX500: [3000, 12000],
+    BTCUSD: [10000, 250000], ETHUSD: [500, 15000], SOLUSD: [10, 1000],
     XRPUSD: [0.1, 20], BNBUSD: [100, 2000], LTCUSD: [20, 500],
   };
 
@@ -609,6 +623,29 @@ async function main() {
       continue;
     }
 
+    // Pre-submit SL floor — mirror inline_trader (2026-07-07): 15M ATR stops sit
+    // under the class minSlFrac floors, and assertOrderSafety now sees them
+    // (entry is passed below). WIDEN to the floor (fewer lots, same $ risk)
+    // instead of rejecting; keep only if the 2R runner target still clears 2R.
+    const _minSlFrac =
+      /XAU|GOLD|XAG|SILVER|COPPER/.test(sym.toUpperCase()) ? 0.0012 :
+      /WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym.toUpperCase()) ? 0.004 :
+      /NAS100|US30|SPX500|UK100|GER40|JP225|AUS200|HK50|DAX|FTSE/.test(sym.toUpperCase()) ? 0.0015 :
+      /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX/.test(sym.toUpperCase()) ? 0.003 : 0.0008;
+    const _slFrac = Math.abs(best.entry - best.sl) / best.entry;
+    if (!Number.isFinite(_slFrac)) { log(`  ⚠ ${sym}: non-finite SL distance — skipping`); continue; }
+    if (_slFrac < _minSlFrac) {
+      const minDist   = best.entry * _minSlFrac;
+      const rrRunner  = Math.abs(best.tp3 - best.entry) / minDist;
+      if (!Number.isFinite(rrRunner) || rrRunner < 2.0) {
+        log(`  ⚠ ${sym}: SL ${(_slFrac * 100).toFixed(3)}% < floor ${(_minSlFrac * 100).toFixed(2)}% and widening drops runner to ${rrRunner.toFixed(2)}R — skipping`);
+        continue;
+      }
+      const newSl = best.dir === 'long' ? best.entry - minDist : best.entry + minDist;
+      log(`  SL widened to class floor: ${best.sl} → ${newSl.toFixed(6)} (${(_minSlFrac * 100).toFixed(2)}% of price)`);
+      best.sl = Number(newSl.toFixed(6));
+    }
+
     const riskPct  = best.score >= 8 ? baseRisk + 0.5 : baseRisk;
     const totalLots = calcLots(best.label, riskPct, equity, best.entry, best.sl);
     const halfLots  = Math.max(0.01, Math.floor((totalLots / 2) / LOT_STEP) * LOT_STEP);
@@ -617,15 +654,19 @@ async function main() {
     log(`   O1(1.0R):${best.tp2} | O2(2.0R):${best.tp3} | SL:${best.sl}`);
 
     let placed = 0;
+    // entry is REQUIRED here (2026-07-07): without it assertOrderSafety silently
+    // skips the min-SL-distance floor AND the frozen-chart price check, and the
+    // cTrader path falls back to two-step place-then-amend (the bracket-attach
+    // bug class) instead of atomic relative SL/TP.
     try {
       await placeOrder({ symbol: sym, direction: best.dir, units: halfLots,
-        tpPrice: best.tp2, slPrice: best.sl, screenshot: false });
+        entry: best.entry, tpPrice: best.tp2, slPrice: best.sl, screenshot: false });
       log(`  ✓ O1 (1.0R main target, SL=${best.sl})`); placed++;
     } catch(e) { log(`  ✗ O1 error: ${e.message}`); }
 
     try {
       await placeOrder({ symbol: sym, direction: best.dir, units: halfLots,
-        tpPrice: best.tp3, slPrice: best.sl,
+        entry: best.entry, tpPrice: best.tp3, slPrice: best.sl,
         screenshot: dedupedSelected.indexOf(best) === dedupedSelected.length - 1 });
       log(`  ✓ O2 (2.0R runner, EOD close backstop, SL=${best.sl})`); placed++;
     } catch(e) { log(`  ✗ O2 error: ${e.message}`); }
