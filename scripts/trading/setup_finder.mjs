@@ -1461,6 +1461,16 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
     const { req: bars15Req, min: bars15Min } = PER_TF_BARS['15'];
     const bars15 = await waitForBars(bars15Req, bars15Min);
 
+    // H1 bars for RISK GEOMETRY (2026-07-07): entry timing stays on the 15M
+    // trigger, but SL/TP are built from H1 structure. 15M ATR stops sat inside
+    // spread/noise (under the broker minSlFrac floors — 5/7 signals rejected in
+    // one executor run) and 15M targets couldn't pay 2R against a floored stop.
+    // H1 ATR ≈ 2× 15M ATR, so stops clear the floors on merit and sit behind
+    // zones that have a reason to hold.
+    await setChart(inst.sym, '60');
+    const { req: bars60Req, min: bars60Min } = PER_TF_BARS['60'];
+    const bars60 = await waitForBars(bars60Req, bars60Min);
+
     for (const [dir, cands] of Object.entries(byDir)) {
       if (!bars15) {
         process.stdout.write(`\n  → 15M fetch failed for ${inst.label}\n`);
@@ -1494,18 +1504,46 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       const allReasons = [`MTF(${tfList}) + 15M aligned`, ...[...new Set(cands.flatMap(c => c.reasons))]].slice(0, 8);
       const avgRsi     = Math.round(cands.reduce((s, c) => s + c.rsi, 0) / cands.length);
 
-      const atr15  = calcATR(bars15);
-      const n15    = bars15.length - 1;
-      const entry  = bars15[n15].c;
-      const atrVal = atr15[n15];
+      if (!bars60) {
+        process.stdout.write(`\n  → 1H fetch failed for ${inst.label} (needed for SL/TP geometry)\n`);
+        continue;
+      }
 
-      // Build 15M S/R zones so SL and TP can snap to real structure
-      const sr15 = buildSRZones(bars15, atr15);
-      const slBuf = atrVal * 0.10;   // 10% ATR buffer outside the zone
+      const n15    = bars15.length - 1;
+      const entry  = bars15[n15].c;          // entry precision from the 15M trigger
+
+      // Risk geometry from H1: ATR + S/R zones drive every SL/TP multiple below.
+      const atr60  = calcATR(bars60);
+      const atrVal = atr60[bars60.length - 1];
+      const srGeom = buildSRZones(bars60, atr60);
+      const slBuf  = atrVal * 0.10;   // 10% ATR buffer outside the zone
+
+      // EOD-aware TP cap: H1-scale targets need hours to play out, but the
+      // day-trade rule flattens at 20:00 UTC. Cap TP distance by the move the
+      // market can plausibly make in the time remaining. Morning entries keep
+      // full H1 targets; late entries get tighter ones — and if 2R no longer
+      // fits in the time left, the R:R gate below skips the trade entirely.
+      // 2.0 = trend-drift factor: bare √N (random-walk typical move) capped max
+      // R:R at √N/1.5 → NOTHING could pass 2R after 11:00 UTC (every setup
+      // rejected at exactly R:R 1.7 on the first live scan). With 2√N, a 2R
+      // target on a 1.5×ATR stop fits while ≥2.25h remain (~17:45 UTC cutoff).
+      const _nowH   = new Date();
+      const hoursLeft = 20 - (_nowH.getUTCHours() + _nowH.getUTCMinutes() / 60);
+      const eodCapDist = (hoursLeft > 0 && hoursLeft < 12) ? atrVal * 2.0 * Math.sqrt(hoursLeft) : Infinity;
 
       // ── Per-instrument SL/TP strategy ────────────────────────────────────────────
       const prof = INST_CFG[inst.label] || INST_PROFILE[inst.label] || DEFAULT_PROFILE;
-      const { slMode, maxSlAtr, minSlAtr, tpCap, tp3Cap } = prof;
+      // Profiles were tuned when atrVal was 15M ATR; it is now H1 ATR (≈2× the
+      // unit) and the old sub-ATR multiples (DEFAULT maxSlAtr 0.30!) were the
+      // true source of the collapsed sub-floor stops (0.3×ATR ≈ 3 pips on
+      // GBPNZD, SL==entry on EURGBP). Enforce H1-sane floors; explicitly wider
+      // profiles (metals 2.0×) keep their tuning. Side effect: the 15M-FVG SL
+      // branches below can no longer produce a stop tighter than 0.5×ATR_H1.
+      const slMode   = prof.slMode;
+      const minSlAtr = Math.max(prof.minSlAtr ?? 0.5, 0.5);
+      const maxSlAtr = Math.max(prof.maxSlAtr ?? 1.5, 1.5);
+      const tpCap    = Math.max(prof.tpCap    ?? 3.0, 3.0);
+      const tp3Cap   = Math.max(prof.tp3Cap   ?? 5.0, 5.0);
       const minSlAbs = prof.minSlAbs ?? 0;   // absolute $ floor on SL distance (WTI = 0.50)
 
       // ── SL placement ─────────────────────────────────────────────────────────────
@@ -1522,12 +1560,12 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
         // 2. Nearest S&R zone (if FVG not available or out of range)
         if (sl === undefined) {
           if (dir === 'long') {
-            const z = sr15.active.filter(z => z.type === 'support' && z.wickTip < entry
+            const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
               && (entry - z.wickTip) >= atrVal * minSlAtr
               && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
             sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
           } else {
-            const z = sr15.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+            const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
               && (z.wickTip - entry) >= atrVal * minSlAtr
               && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
             sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
@@ -1541,12 +1579,12 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       } else {
         // 'sr' — S&R zone primary, FVG secondary, ATR fallback (forex + JPY pairs)
         if (dir === 'long') {
-          const z = sr15.active.filter(z => z.type === 'support' && z.wickTip < entry
+          const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
             && (entry - z.wickTip) >= atrVal * minSlAtr
             && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
           sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
         } else {
-          const z = sr15.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+          const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
             && (z.wickTip - entry) >= atrVal * minSlAtr
             && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
           sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
@@ -1573,36 +1611,40 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
         sl = dir === 'long' ? entry - minSlAbs : entry + minSlAbs;
       }
 
+      // TP ceilings: per-instrument ATR cap, tightened by the EOD time budget.
+      const tpMaxDist  = Math.min(atrVal * tpCap,  eodCapDist);
+      const tp3MaxDist = Math.min(atrVal * tp3Cap, eodCapDist);
+
       const slDist = Math.abs(entry - sl);
 
       // ── TP1 (tp2): nearest opposing S/R zone within tpCap × ATR ─────────────────
       let tp2;
       if (dir === 'long') {
-        const z = sr15.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+        const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
           && (z.wickTip - entry) >= slDist * 0.5
-          && (z.wickTip - entry) <= atrVal * tpCap).sort((a, b) => a.wickTip - b.wickTip);
+          && (z.wickTip - entry) <= tpMaxDist).sort((a, b) => a.wickTip - b.wickTip);
         tp2 = z.length > 0 ? z[0].wickTip : entry + slDist;
       } else {
-        const z = sr15.active.filter(z => z.type === 'support' && z.wickTip < entry
+        const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
           && (entry - z.wickTip) >= slDist * 0.5
-          && (entry - z.wickTip) <= atrVal * tpCap).sort((a, b) => b.wickTip - a.wickTip);
+          && (entry - z.wickTip) <= tpMaxDist).sort((a, b) => b.wickTip - a.wickTip);
         tp2 = z.length > 0 ? z[0].wickTip : entry - slDist;
       }
-      if (dir === 'long'  && tp2 - entry  > atrVal * tpCap) tp2 = entry + atrVal * tpCap;
-      if (dir === 'short' && entry  - tp2  > atrVal * tpCap) tp2 = entry - atrVal * tpCap;
+      if (dir === 'long'  && tp2 - entry  > tpMaxDist) tp2 = entry + tpMaxDist;
+      if (dir === 'short' && entry  - tp2  > tpMaxDist) tp2 = entry - tpMaxDist;
 
       // ── TP2 (tp3): runner beyond tp2, capped at tp3Cap × ATR ────────────────────
       let tp3;
       if (dir === 'long') {
-        const z = sr15.active.filter(z => z.type === 'resistance'
+        const z = srGeom.active.filter(z => z.type === 'resistance'
           && z.wickTip > tp2 + slDist * 0.3
-          && z.wickTip - entry <= atrVal * tp3Cap).sort((a, b) => a.wickTip - b.wickTip);
-        tp3 = z.length > 0 ? z[0].wickTip : Math.min(entry + slDist * 3.0, entry + atrVal * tp3Cap);
+          && z.wickTip - entry <= tp3MaxDist).sort((a, b) => a.wickTip - b.wickTip);
+        tp3 = z.length > 0 ? z[0].wickTip : Math.min(entry + slDist * 3.0, entry + tp3MaxDist);
       } else {
-        const z = sr15.active.filter(z => z.type === 'support'
+        const z = srGeom.active.filter(z => z.type === 'support'
           && z.wickTip < tp2 - slDist * 0.3
-          && entry - z.wickTip <= atrVal * tp3Cap).sort((a, b) => b.wickTip - a.wickTip);
-        tp3 = z.length > 0 ? z[0].wickTip : Math.max(entry - slDist * 3.0, entry - atrVal * tp3Cap);
+          && entry - z.wickTip <= tp3MaxDist).sort((a, b) => b.wickTip - a.wickTip);
+        tp3 = z.length > 0 ? z[0].wickTip : Math.max(entry - slDist * 3.0, entry - tp3MaxDist);
       }
 
       // ── 2:1 R:R enforcement ──────────────────────────────────────────────────────
@@ -1610,9 +1652,9 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       if (actualRR < 2.0) {
         const minTP    = dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0;
         const minTPDist = Math.abs(minTP - entry);
-        tp2 = minTPDist <= atrVal * tpCap
+        tp2 = minTPDist <= tpMaxDist
           ? minTP
-          : (dir === 'long' ? entry + atrVal * tpCap : entry - atrVal * tpCap);
+          : (dir === 'long' ? entry + tpMaxDist : entry - tpMaxDist);
         actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
         if (actualRR < 2.0) {
           process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — R:R ${actualRR.toFixed(1)} < 2.0, no viable TP, skipping\n`);
@@ -1642,7 +1684,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
           // Snap to nearest opposing zone in the window [floor, floor+1R] — never
           // closer than the floor.
           const winMax = slDist * (floorR + 1.0);
-          const nearby = sr15.active.filter(z =>
+          const nearby = srGeom.active.filter(z =>
             (dir === 'long'  && z.type === 'resistance' && z.wickTip - entry >= slDist * floorR && z.wickTip - entry <= winMax) ||
             (dir === 'short' && z.type === 'support'    && entry - z.wickTip >= slDist * floorR && entry - z.wickTip <= winMax)
           );
