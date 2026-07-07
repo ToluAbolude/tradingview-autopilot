@@ -237,19 +237,23 @@ async function main() {
     ticks++;
     await sleep(ticks === 1 ? FIRST_DELAY_MS : POLL_MS);
 
-    // EOD hard close
+    // EOD hour: hand off, do NOT close. confirm_eod_close (30-min cron) owns
+    // EOD since 2026-07-07 — it culls losers and carries bracketed winners and
+    // fresh late entries overnight to their natural TP/SL. The old hard-close
+    // here called closeAllPositions() — flattening the WHOLE account, not just
+    // SYMBOL — and killed the first carried winners 38s after the carry
+    // verdict spared them (GBPCAD 2026-07-07 20:00:41).
     const now = new Date();
     if (now.getUTCHours() >= EOD_CLOSE_HOUR) {
-      log(`⏰ EOD CLOSE (${now.getUTCHours()}:${String(now.getUTCMinutes()).padStart(2,'0')} UTC)`);
       const { found } = await symbolHasOpenPosition();
-      if (found) {
-        try { await closeAllPositions(); log('EOD close executed.'); }
-        catch(e) { log(`EOD close error: ${e.message}`); }
-        await sleep(3000);
+      if (!found) {   // closed just before the EOD tick (natural end or cron cull)
+        const pnl = await resolvePnl('eod_close');
+        updateLastTrade(pnl != null ? (pnl >= 0 ? 'W' : 'L') : '?', pnl, 'eod_close');
+        log('Position already closed at EOD window. Exiting.');
+        return;
       }
-      const pnl = await resolvePnl('eod_close');
-      updateLastTrade(pnl != null ? (pnl >= 0 ? 'W' : 'L') : '?', pnl, 'eod_close');
-      log('EOD done. Exiting.');
+      log(`⏰ EOD (${now.getUTCHours()}:${String(now.getUTCMinutes()).padStart(2,'0')} UTC) — carry policy: not closing; confirm_eod_close owns the verdict. Brackets stay live. Exiting monitor.`);
+      updateLastTrade('?', null, 'eod_handoff');
       return;
     }
 
