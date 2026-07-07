@@ -1,11 +1,15 @@
 /**
  * confirm_eod_close.mjs — cTrader-only weekend/EOD flatten for the confirm daemon.
  *
- * Closes ALL open positions to avoid weekend gap risk on the demo account:
+ * Closes open positions to avoid weekend gap risk on the demo account:
  *   - Any time on Sat/Sun.
  *   - Friday at/after CONFIRM_FRIDAY_CLOSE_UTC (default 20:00 UTC).
  *   - Optionally daily at/after CONFIRM_DAILY_EOD_UTC (unset = disabled; the 2R
- *     brackets otherwise run until TP/SL across days).
+ *     brackets otherwise run until TP/SL across days). Since 2026-07-07 the
+ *     daily close spares WINNERS: a position in unrealized profit with a full
+ *     SL+TP bracket carries overnight to its natural end (H1-scale geometry
+ *     needs more than a day). Losers, naked, and unpriceable positions still
+ *     close. Kill switch: EOD_CARRY_WINNERS=off restores the full flatten.
  * Pure cTrader Open API — NO Chrome/CDP. Demo-only by env. Safe to run often
  * (it no-ops outside the close windows).
  *
@@ -58,6 +62,39 @@ async function main() {
   await b.connect();
   const open = await b.getPositions();
   if (!open.length) { log(`${reason}: no open positions`); process.exit(0); }
+
+  // Daily EOD only: close LOSERS, carry bracketed winners overnight so H1-scale
+  // trades reach their natural TP/SL. Weekend + friday-cutoff paths below are
+  // deliberately untouched — they flatten regardless of profit because cTrader
+  // queues closes for shut markets to Monday (a carried FX/index winner would
+  // be unmanageable over the weekend). Note the cron re-fires every 30 min
+  // until midnight UTC, so a carried winner that turns negative before 24:00
+  // is closed on a later tick — "in profit" must hold through the evening.
+  const CARRY_WINNERS = (process.env.EOD_CARRY_WINNERS ?? 'on') !== 'off';
+  if (reason === 'daily-eod' && CARRY_WINNERS) {
+    let closed = 0, carried = 0, failed = 0;
+    for (const p of open) {
+      let carry = false, why = '';
+      try {
+        const sym  = await b.getSymbolNameById(p.symbolId);
+        const name = sym?.name || String(p.symbolId);
+        const bars = await b.getTrendbars(name, { period: 'M1', fromMs: Date.now() - 2 * 3600 * 1000 });
+        const cur  = bars.length ? bars[bars.length - 1].c : null;
+        const inProfit  = cur != null && (p.direction === 'long' ? cur > p.entryPrice : cur < p.entryPrice);
+        const bracketed = p.stopLoss > 0 && p.takeProfit > 0;   // never carry a naked position
+        carry = inProfit && bracketed;
+        why = `${name} ${p.direction} entry=${p.entryPrice} cur=${cur ?? 'unpriceable'} — ` +
+              (carry ? 'in profit + bracketed' : !inProfit ? 'not in profit' : 'NAKED (no SL/TP)');
+      } catch (e) { why = `pos ${p.positionId}: price check failed (${e.message})`; }
+      if (carry) { carried++; log(`daily-eod CARRY: ${why}`); continue; }
+      try {
+        await b.closePosition(p.positionId, p.volumeCents);
+        closed++; log(`daily-eod close: ${why}`);
+      } catch (e) { failed++; log(`daily-eod close ${p.positionId} FAILED: ${e.message}`); }
+    }
+    log(`daily-eod: closed ${closed}, carried ${carried}, failed ${failed}`);
+    process.exit(0);
+  }
 
   log(`${reason}: ${open.length} open position(s)${keepClasses.length ? ` — keeping ${keepClasses.join(',')}` : ' — flattening'}`);
   const res = await b.closeAllPositions({ keepClasses });

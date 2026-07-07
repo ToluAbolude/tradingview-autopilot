@@ -986,9 +986,13 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   }
 
   // ── K. Candlestick pattern — pin bar, doji, engulfing ──
+  // Read from the last CLOSED bar (operator directive 2026-07-07: "execute on
+  // the 15m close" — the close IS the confirmation). bars[n] is the forming
+  // candle and scans drift mid-candle, so a pattern seen at minute 7 can
+  // evaporate by the close; bars[n-1] is always fully formed.
   {
-    if (n >= 1) {
-      const cur = last, prev = bars[n - 1];
+    if (n >= 2) {
+      const cur = bars[n - 1], prev = bars[n - 2];
       const body       = Math.abs(cur.c - cur.o);
       const range      = cur.h - cur.l;
       const upperWick  = cur.h - Math.max(cur.c, cur.o);
@@ -1010,6 +1014,59 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       if (pattern) {
         score += (SC.K_candle_pattern ?? 1);
         reasons.push(pattern); strats.push('K');
+      }
+    }
+  }
+
+  // ── Z. Pattern×Zone interaction — how the market FEELS about the level ──
+  // A pattern in a vacuum is ~coin-flip (Bulkowski stats); printed AT an active
+  // S/R zone it is the market's live verdict on that level (operator insight
+  // 2026-07-07). Unlike K (pattern anywhere) this scores the CONJUNCTION:
+  //   +3  sweep-and-reclaim — wick pierced beyond the zone's far edge (took the
+  //       stops) and the body closed back on the trade side; strongest tell
+  //   +2  aligned rejection (pin/engulfing in trade direction) AT the zone the
+  //       trade leans on — level tested and defended
+  //   -2  OPPOSING pattern printing ON that zone — the level is failing; this
+  //       fades a C vote that location alone would have awarded
+  //    0  doji at the zone — indecision is a question, not an answer
+  // Also reads the last CLOSED bar — see K above ("execute on the 15m close").
+  {
+    if (n >= 2) {
+      const cur = bars[n - 1], prev = bars[n - 2];
+      const zoneTol = (atr[n] || 0) * (SC.Z_zone_atr ?? 0.4);
+      // The zone this trade leans on (same sense as vote C): support under a
+      // long / resistance over a short, touched by the closed bar's extreme.
+      const leanZone = srZones.active.find(z =>
+        dir === 'long'
+          ? z.type === 'support'    && cur.l <= z.bodyLevel + zoneTol && cur.l >= z.wickTip - zoneTol
+          : z.type === 'resistance' && cur.h >= z.bodyLevel - zoneTol && cur.h <= z.wickTip + zoneTol);
+      if (leanZone) {
+        const body = Math.abs(cur.c - cur.o), range = cur.h - cur.l;
+        const upW  = cur.h - Math.max(cur.c, cur.o), loW = Math.min(cur.c, cur.o) - cur.l;
+        if (range > 0 && body / range >= 0.1) {   // doji (body <10% of range) stays neutral
+          const bullPin = loW > 2 * body && loW > upW;
+          const bearPin = upW > 2 * body && upW > loW;
+          // True engulfing: current body swallows an OPPOSITE-colour prior body
+          const bullEng = cur.c > cur.o && prev.c < prev.o && cur.o <= prev.c && cur.c >= prev.o;
+          const bearEng = cur.c < cur.o && prev.c > prev.o && cur.o >= prev.c && cur.c <= prev.o;
+          const alignedRej  = dir === 'long' ? (bullPin || bullEng) : (bearPin || bearEng);
+          const opposingRej = dir === 'long' ? (bearPin || bearEng) : (bullPin || bullEng);
+          if (alignedRej) {
+            const swept = dir === 'long'
+              ? cur.l < leanZone.wickTip && cur.c > leanZone.bodyLevel
+              : cur.h > leanZone.wickTip && cur.c < leanZone.bodyLevel;
+            const pts = swept ? (SC.Z_sweep_reclaim ?? 3) : (SC.Z_zone_reject ?? 2);
+            const kind = swept ? 'Sweep-and-reclaim' : (bullPin || bearPin ? 'Pin rejection' : 'Engulfing');
+            score += pts;
+            reasons.push(`${kind} AT ${leanZone.type} zone (${leanZone.retests > 0 ? `${leanZone.retests}-retest` : 'fresh'})`);
+            strats.push('Z');
+          } else if (opposingRej) {
+            const pts = SC.Z_zone_fail ?? -2;
+            score += pts;
+            reasons.push(`⚠ Opposing ${bullPin || bearPin ? 'pin' : 'engulf'} ON ${leanZone.type} zone — level failing (${pts})`);
+            strats.push('Z-fail');
+          }
+        }
       }
     }
   }
@@ -1518,18 +1575,21 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       const srGeom = buildSRZones(bars60, atr60);
       const slBuf  = atrVal * 0.10;   // 10% ATR buffer outside the zone
 
-      // EOD-aware TP cap: H1-scale targets need hours to play out, but the
-      // day-trade rule flattens at 20:00 UTC. Cap TP distance by the move the
-      // market can plausibly make in the time remaining. Morning entries keep
-      // full H1 targets; late entries get tighter ones — and if 2R no longer
-      // fits in the time left, the R:R gate below skips the trade entirely.
-      // 2.0 = trend-drift factor: bare √N (random-walk typical move) capped max
-      // R:R at √N/1.5 → NOTHING could pass 2R after 11:00 UTC (every setup
-      // rejected at exactly R:R 1.7 on the first live scan). With 2√N, a 2R
-      // target on a 1.5×ATR stop fits while ≥2.25h remain (~17:45 UTC cutoff).
+      // EOD-aware TP cap — FRIDAY-ONLY since 2026-07-07. On Mon–Thu the daily
+      // 20:00 UTC EOD now closes only LOSERS (confirm_eod_close carries
+      // bracketed winners overnight), so H1 targets get days to play out and a
+      // time-budget cap would just amputate them. Friday keeps the cap: the
+      // friday-cutoff still flattens everything non-crypto regardless of
+      // profit (cTrader queues closes for shut markets to Monday — a carried
+      // FX/index winner would be unmanageable over the weekend). Crypto is
+      // exempt from the Friday flatten, so it is never capped.
+      // 2.0 = trend-drift factor over bare √N (random-walk typical move):
+      // with 2√N, a 2R target on a 1.5×ATR stop fits while ≥2.25h remain.
       const _nowH   = new Date();
       const hoursLeft = 20 - (_nowH.getUTCHours() + _nowH.getUTCMinutes() / 60);
-      const eodCapDist = (hoursLeft > 0 && hoursLeft < 12) ? atrVal * 2.0 * Math.sqrt(hoursLeft) : Infinity;
+      const _isCrypto = /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(inst.label);
+      const eodCapDist = (_nowH.getUTCDay() === 5 && !_isCrypto && hoursLeft > 0 && hoursLeft < 12)
+        ? atrVal * 2.0 * Math.sqrt(hoursLeft) : Infinity;
 
       // ── Per-instrument SL/TP strategy ────────────────────────────────────────────
       const prof = INST_CFG[inst.label] || INST_PROFILE[inst.label] || DEFAULT_PROFILE;

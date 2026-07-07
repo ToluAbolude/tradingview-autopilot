@@ -9,11 +9,13 @@
  *
  * Pulls today's closing deals from cTrader (the authoritative source), groups
  * them into round-trip positions, and reports each trade's net P&L + the day's
- * totals. cTrader closing deals are net of commission + swap.
+ * totals. cTrader closing deals are net of commission + swap. Also lists
+ * ONGOING positions (since 2026-07-07 the daily EOD carries bracketed winners
+ * overnight, so open positions at report time are normal, not leftovers).
  *
- * Window: from 00:00 UTC today (the system closes all positions at 20:00 UTC, so
- * a 20:30 UTC run captures the full day). Override with --date=YYYY-MM-DD to
- * re-run a past day, or --hours=N for a rolling N-hour window.
+ * Window: from 00:00 UTC today (the 20:00 UTC daily EOD closes losers, so a
+ * 20:30 UTC run captures the full day's closes). Override with --date=YYYY-MM-DD
+ * to re-run a past day, or --hours=N for a rolling N-hour window.
  *
  * Output:
  *   - Console plain-text report (email text/plain fallback)
@@ -106,6 +108,40 @@ async function pullTrades(fromMs, toMs) {
     .sort((a, b) => a.closeTs - b.closeTs);
 }
 
+// ── Ongoing (open) positions ─────────────────────────────────────────────────
+// Since 2026-07-07 the 20:00 UTC daily EOD closes only losers — bracketed
+// winners carry overnight, so open positions at report time are riding to
+// their natural TP/SL. Current price = last M1 trendbar close (same source
+// confirm_eod_close uses for its carry verdicts). Best-effort per field.
+async function pullOpenPositions() {
+  const bridge = await import('./broker_ctrader.mjs');
+  await bridge.connect();
+  const open = await bridge.getPositions();
+  const out = [];
+  for (const p of open) {
+    let symbol = String(p.symbolId), current = null;
+    try {
+      const sym = await bridge.getSymbolNameById(p.symbolId);
+      if (sym?.name) symbol = sym.name;
+      const bars = await bridge.getTrendbars(symbol, { period: 'M1', fromMs: Date.now() - 2 * 3600 * 1000 });
+      if (bars.length) current = bars[bars.length - 1].c;
+    } catch (_) { /* name/price best-effort — still list the position */ }
+    const tpProgressPct = (current != null && p.takeProfit && p.takeProfit !== p.entryPrice)
+      ? Math.round(((current - p.entryPrice) / (p.takeProfit - p.entryPrice)) * 100)
+      : null;
+    out.push({
+      positionId: p.positionId, symbol, dir: p.direction,
+      entry: p.entryPrice, current,
+      sl: p.stopLoss ?? null, tp: p.takeProfit ?? null,
+      inProfit: current != null
+        ? (p.direction === 'long' ? current > p.entryPrice : current < p.entryPrice)
+        : null,
+      tpProgressPct, openedTs: p.openTimestamp || null,
+    });
+  }
+  return out;
+}
+
 // ── Totals ───────────────────────────────────────────────────────────────────
 function summarize(trades) {
   const wins   = trades.filter(t => t.net > 0);
@@ -143,10 +179,12 @@ function summarize(trades) {
 function money(n) { const r = Math.round(n * 100) / 100; return (r < 0 ? '-$' : '$') + Math.abs(r).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function pfTxt(pf) { return pf === Infinity ? '∞' : pf.toFixed(2); }
 function hhmm(ts) { return new Date(ts).toISOString().slice(11, 16) + 'Z'; }
+function px(n)   { return n == null ? '—' : String(Number(n.toFixed(5))); }  // price, digits vary per symbol
+function dmy(ts) { return ts ? new Date(ts).toISOString().slice(5, 16).replace('T', ' ') + 'Z' : '—'; }
 function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 // ── Plain-text report ────────────────────────────────────────────────────────
-function printReport(label, trades, sum, equity) {
+function printReport(label, trades, sum, equity, openPos = []) {
   console.log(`=== EOD TRADE REPORT — ${label} — ${new Date().toISOString()} ===`);
   console.log('');
   if (sum.count === 0) {
@@ -176,14 +214,29 @@ function printReport(label, trades, sum, equity) {
       for (const s of sum.bySymbol) console.log(`  ${s.sym.padEnd(8)} ${money(s.net).padStart(11)}  (${s.n} trades, ${s.w}W/${s.l}L)`);
     }
   }
+  console.log('');
+  if (openPos.length) {
+    console.log(`Ongoing positions (${openPos.length}) — riding to natural TP/SL:`);
+    for (const p of openPos) {
+      const prog = p.tpProgressPct != null ? `${p.tpProgressPct}% to TP` : 'TP —';
+      console.log(
+        `  ${p.symbol.padEnd(8)} ${p.dir.padEnd(5)} entry ${px(p.entry)}  now ${px(p.current)}` +
+        `  (${prog})  SL ${px(p.sl)}  TP ${px(p.tp)}  opened ${dmy(p.openedTs)}`,
+      );
+    }
+  } else {
+    console.log('Ongoing positions: none — flat into tomorrow.');
+  }
   if (equity) {
     console.log('');
-    console.log(`Account: balance=${money(equity.balance)}  equity=${money(equity.equity)}`);
+    const floating = (Number.isFinite(equity.equity) && Number.isFinite(equity.balance))
+      ? `  floating=${money(equity.equity - equity.balance)}` : '';
+    console.log(`Account: balance=${money(equity.balance)}  equity=${money(equity.equity)}${floating}`);
   }
 }
 
 // ── HTML report (Gmail-safe: tables + inline styles, no images/SVG) ──────────
-function buildHtml(label, trades, sum, equity) {
+function buildHtml(label, trades, sum, equity, openPos = []) {
   const when = new Date().toUTCString();
   const netColor = sum.net > 0 ? '#2e7d32' : sum.net < 0 ? '#c62828' : '#607d8b';
 
@@ -258,8 +311,43 @@ function buildHtml(label, trades, sum, equity) {
     </td></tr>
     ${symBlock}`;
 
+  // Ongoing positions — carried winners riding to their natural TP/SL
+  let openBlock = `<tr><td style="padding:16px 24px 4px;font-size:15px;font-weight:700;color:#1e2a38">Ongoing positions</td></tr>
+    <tr><td style="padding:0 24px 8px;font-size:13px;color:#90a4ae">None — flat into tomorrow.</td></tr>`;
+  if (openPos.length) {
+    const openRows = openPos.map(p => {
+      const st = p.inProfit === true  ? { l: p.tpProgressPct != null ? `${p.tpProgressPct}% to TP` : 'in profit', bg: '#e8f5e9', fg: '#2e7d32' }
+               : p.inProfit === false ? { l: p.tpProgressPct != null ? `${p.tpProgressPct}% to TP` : 'in drawdown', bg: '#ffebee', fg: '#c62828' }
+               :                        { l: 'price n/a', bg: '#eceff1', fg: '#607d8b' };
+      return `<tr style="border-bottom:1px solid #eee">
+        <td style="padding:7px 12px;font-weight:600">${esc(p.symbol)}</td>
+        <td style="padding:7px 12px;text-transform:uppercase;color:#555;font-size:12px">${esc(p.dir)}</td>
+        <td style="padding:7px 12px;text-align:right">${esc(px(p.entry))}</td>
+        <td style="padding:7px 12px;text-align:right;font-weight:700">${esc(px(p.current))}</td>
+        <td style="padding:7px 12px;text-align:right;color:#c62828">${esc(px(p.sl))}</td>
+        <td style="padding:7px 12px;text-align:right;color:#2e7d32">${esc(px(p.tp))}</td>
+        <td style="padding:7px 12px;text-align:center"><span style="background:${st.bg};color:${st.fg};padding:3px 10px;border-radius:11px;font-size:12px;font-weight:700;white-space:nowrap">${st.l}</span></td>
+        <td style="padding:7px 12px;color:#555;font-size:12px;white-space:nowrap">${esc(dmy(p.openedTs))}</td>
+      </tr>`;
+    }).join('');
+    openBlock = `<tr><td style="padding:16px 24px 4px;font-size:15px;font-weight:700;color:#1e2a38">Ongoing positions <span style="font-weight:400;color:#90a4ae;font-size:13px">— riding to natural TP/SL</span></td></tr>
+    <tr><td style="padding:0 18px">
+      <table cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;font-size:14px">
+        <tr style="background:#f6f8fa;color:#555;font-size:12px;text-transform:uppercase">
+          <td style="padding:7px 12px">Symbol</td><td style="padding:7px 12px">Dir</td>
+          <td style="padding:7px 12px;text-align:right">Entry</td><td style="padding:7px 12px;text-align:right">Now</td>
+          <td style="padding:7px 12px;text-align:right">SL</td><td style="padding:7px 12px;text-align:right">TP</td>
+          <td style="padding:7px 12px;text-align:center">Status</td><td style="padding:7px 12px">Opened</td>
+        </tr>
+        ${openRows}
+      </table>
+    </td></tr>`;
+  }
+
+  const floating = (equity && Number.isFinite(equity.equity) && Number.isFinite(equity.balance))
+    ? ` · floating <b style="color:${equity.equity - equity.balance >= 0 ? '#2e7d32' : '#c62828'}">${money(equity.equity - equity.balance)}</b>` : '';
   const acct = equity
-    ? `<tr><td style="padding:8px 24px 0;text-align:center;font-size:13px;color:#555">Account balance <b>${money(equity.balance)}</b> · equity <b>${money(equity.equity)}</b></td></tr>`
+    ? `<tr><td style="padding:8px 24px 0;text-align:center;font-size:13px;color:#555">Account balance <b>${money(equity.balance)}</b> · equity <b>${money(equity.equity)}</b>${floating}</td></tr>`
     : '';
 
   return `<!doctype html><html><body style="margin:0;background:#f0f2f5;font-family:Arial,Helvetica,sans-serif;color:#222">
@@ -270,8 +358,9 @@ function buildHtml(label, trades, sum, equity) {
       <div style="color:#9fb3c8;font-size:13px;margin-top:4px">${esc(label)} &nbsp;·&nbsp; cTrader closed deals (net of commission + swap) &nbsp;·&nbsp; ${esc(when)}</div>
     </td></tr>
     ${body}
+    ${openBlock}
     ${acct}
-    <tr><td style="background:#f6f8fa;padding:12px 24px;font-size:11px;color:#999">Generated by daily_trade_report.mjs · single-day view · today's round-trip trades only.</td></tr>
+    <tr><td style="background:#f6f8fa;padding:12px 24px;font-size:11px;color:#999">Generated by daily_trade_report.mjs · single-day view · closed round-trips + ongoing positions.</td></tr>
   </table></td></tr></table></body></html>`;
 }
 
@@ -279,20 +368,23 @@ function buildHtml(label, trades, sum, equity) {
 async function main() {
   const { fromMs, toMs, label } = resolveWindow();
 
-  let trades, equity = null;
+  let trades, equity = null, openPos = [];
   try {
     trades = await pullTrades(fromMs, toMs);
     try {
       const bridge = await import('./broker_ctrader.mjs');
       equity = await bridge.getEquity();
     } catch (_) { /* equity is best-effort */ }
+    try {
+      openPos = await pullOpenPositions();
+    } catch (_) { /* ongoing positions are best-effort */ }
   } catch (e) {
     console.error('cTrader connectivity failed:', e.message);
     process.exit(2);
   }
 
   const sum = summarize(trades);
-  printReport(label, trades, sum, equity);
+  printReport(label, trades, sum, equity, openPos);
 
   // Persist
   if (!existsSync(OUT_DIR))  mkdirSync(OUT_DIR,  { recursive: true });
@@ -301,9 +393,9 @@ async function main() {
   writeFileSync(join(OUT_DIR, `${snapDate}.json`), JSON.stringify({
     date: label, generatedAt: new Date().toISOString(),
     summary: { ...sum, profitFactor: sum.profitFactor === Infinity ? null : sum.profitFactor },
-    trades, equity,
+    trades, equity, openPositions: openPos,
   }, null, 2));
-  writeFileSync(HTML_FILE, buildHtml(label, trades, sum, equity));
+  writeFileSync(HTML_FILE, buildHtml(label, trades, sum, equity, openPos));
   console.log('\nHTML → ' + HTML_FILE);
 
   process.exit(0);
