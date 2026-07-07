@@ -27,9 +27,14 @@ const HOST = 'localhost', PORT = 9222, TIMEOUT = 12000;
 const WL_ID   = 144014562;          // "Today's Interest"
 const DRY_RUN = process.argv.includes('--dry-run');
 
-// Category grouping/order to match the existing "Today's Interest" layout.
-const CAT_ORDER = ['forex', 'index', 'commodity', 'crypto'];
-const CAT_LABEL = { forex: 'FOREX', index: 'INDEX', commodity: 'COMMODITY', crypto: 'CRYPTO' };
+// Direction grouping (operator request 2026-07-07): each section header states
+// which trades are being hunted for the symbols under it, straight from the
+// daily_selector's biasDir. Replaces the old asset-category grouping — tickers
+// make the asset class obvious; the bias is the information that isn't visible.
+const DIR_SECTIONS = [
+  ['long',  '🟢 BULLISH — BUY TRADES ONLY'],
+  ['short', '🔴 BEARISH — SELL TRADES ONLY'],
+];
 
 const withTimeout = (p, label) => Promise.race([
   p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout: ${label}`)), TIMEOUT)),
@@ -58,15 +63,22 @@ function buildSymbolList() {
   const eff = instruments.filter(i => !blocked.has(i.label));
   const dropped = instruments.filter(i => blocked.has(i.label)).map(i => i.label);
 
-  // Group by category, header only when the group is non-empty, score-sorted.
+  // Group by bias direction, header only when the group is non-empty,
+  // score-sorted within each so the strongest conviction sits on top.
   const symbols = [`###${wl.date || new Date().toISOString().slice(0, 10)} SCAN (${eff.length})`];
-  for (const cat of CAT_ORDER) {
+  for (const [dir, label] of DIR_SECTIONS) {
     const members = eff
-      .filter(i => i.category === cat)
+      .filter(i => i.biasDir === dir)
       .sort((a, b) => (b.biasScore || 0) - (a.biasScore || 0));
     if (!members.length) continue;
-    symbols.push(`###${CAT_LABEL[cat]}`);
+    symbols.push(`###${label} (${members.length})`);
     members.forEach(m => symbols.push(m.sym));
+  }
+  // Anything without a long/short bias shouldn't silently vanish from the mirror.
+  const unbiased = eff.filter(i => i.biasDir !== 'long' && i.biasDir !== 'short');
+  if (unbiased.length) {
+    symbols.push('###⚪ NO CLEAR BIAS');
+    unbiased.forEach(m => symbols.push(m.sym));
   }
   // Never wipe to empty — leave a marker so the panel still reads cleanly.
   if (eff.length === 0) return { symbols: [`###${wl.date || ''} NO LIVE SETUPS`.trim()], eff, dropped, date: wl.date };
