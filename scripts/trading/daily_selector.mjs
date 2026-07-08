@@ -1,11 +1,17 @@
 /**
  * daily_selector.mjs
- * Runs at 06:30 UTC Mon-Fri — before London open (07:00 UTC = 08:00 BST).
+ * Runs each weekday morning before London open.
  *
- * Phase 1: Scan ALL ~50 BlackBull instruments on H4 for directional bias.
- *          Uses the same scoring engine as setup_finder (SmartTrail, EMA, FVG, S/R).
- *          Marks instruments with no data as unavailable on BlackBull → removed.
- * Phase 2: Pick top 10-15 by score (min score 4, both directions evaluated).
+ * Phase 1 (trend — operator directive 2026-07-08): AutoTL trendlines are the
+ *          PRIMARY AND ONLY trend indicator. Each instrument is read on
+ *          4H×180 candles via autoTrendlineTrend (same geometry as the
+ *          "Auto Trendlines — Zone & Break" Pine indicator on the chart).
+ *          Contraction / no validated 3-touch line = no day trend = skipped.
+ *          (1H leg dropped same day: 3-touch+containment on 1H noise starved
+ *          the list — live test found 1H lines on 1/6 symbols vs 4/6 on 4H.)
+ * Phase 2 (ranking): instruments WITH an AutoTL trend are scored by
+ *          runAllStrategies in that direction only (H4×180) — the score ranks
+ *          conviction and sets tiers, it can no longer flip the direction.
  * Phase 3: Write data/daily_watchlist.json — consumed by setup_finder + session_runner.
  *
  * The full 7-TF deep scan (market_scanner) runs only on these instruments throughout the day,
@@ -15,7 +21,7 @@ import { writeFileSync, appendFileSync, readFileSync, existsSync, mkdirSync } fr
 import { join } from 'path';
 import os from 'os';
 import {
-  setChart, getBars, waitForBars, runAllStrategies,
+  setChart, getBars, waitForBars, runAllStrategies, autoTrendlineTrend,
 } from './setup_finder.mjs';
 
 const IS_LINUX   = os.platform() === 'linux';
@@ -26,9 +32,10 @@ const DATA_ROOT  = IS_LINUX
 const WATCHLIST_FILE = join(DATA_ROOT, 'daily_watchlist.json');
 const LOG_FILE       = join(DATA_ROOT, 'daily_selector.log');
 
-const SCAN_TF  = '240';  // H4 — strong trend signal, fast to load, updated every 4h
+const SCAN_TF   = '240'; // H4 — AutoTL trend read AND ranking score (operator: 4H only)
+const SCAN_BARS = 180;   // operator rule 2026-07-08: trend analysis on latest 180 candles
 const TOP_N    = 15;     // max instruments selected for the day
-const MIN_SCORE = 4;     // minimum H4 bias score to be considered (out of 8)
+const MIN_SCORE = 4;     // minimum ranking score to be considered
 const MIN_BARS  = 100;   // fewer than this = symbol not available on BlackBull
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -112,48 +119,54 @@ const CATEGORY_MAX = { forex: 8, index: 5, commodity: 4, crypto: 5 };
 
 async function main() {
   log('=== DAILY SELECTOR START ===');
-  log(`Scanning ${INSTRUMENT_UNIVERSE.length} instruments on H4 to select today's watchlist`);
+  log(`Scanning ${INSTRUMENT_UNIVERSE.length} instruments — trend from AutoTL on 4H×${SCAN_BARS}`);
 
   const utcHour = new Date().getUTCHours();
   const scored  = [];
   const unavailable = [];
+  let noTrend = 0;
 
   for (const inst of INSTRUMENT_UNIVERSE) {
     try {
+      // ── Trend: AutoTL on 4H only (operator directive) ──────────────────────
       await setChart(inst.sym, SCAN_TF);
-      // Latest 250 candles — uniform scan window (operator rule 2026-07-07)
-      const bars = await waitForBars(250, MIN_BARS, 3, 700);
-
+      const bars = await waitForBars(SCAN_BARS, MIN_BARS, 3, 700);
       if (!bars || bars.length < MIN_BARS) {
         unavailable.push(inst.label);
         process.stdout.write(`  ✗ ${inst.label}: no data\n`);
         continue;
       }
 
-      const longR  = runAllStrategies(bars, 'long',  utcHour, inst.label, SCAN_TF);
-      const shortR = runAllStrategies(bars, 'short', utcHour, inst.label, SCAN_TF);
+      const trend = autoTrendlineTrend(bars);
+      if (!trend.dir) {
+        noTrend++;
+        process.stdout.write(`  ~ ${inst.label}: no day trend — ${trend.detail}\n`);
+        continue;   // no validated AutoTL trend = no bias today, by design
+      }
 
-      const bestDir   = longR.score >= shortR.score ? 'long' : 'short';
-      const bestScore = Math.max(longR.score, shortR.score);
-      const bestR     = bestDir === 'long' ? longR : shortR;
+      // ── Ranking: confluence score IN the AutoTL direction only ────────────
+      const bestDir = trend.dir;
+      const bestR   = runAllStrategies(bars, bestDir, utcHour, inst.label, SCAN_TF);
+      const bestScore = bestR.score;
 
       scored.push({
         ...inst,
         biasDir:    bestDir,
         biasScore:  bestScore,
-        longScore:  longR.score,
-        shortScore: shortR.score,
-        reasons:    bestR.reasons.slice(0, 4).join('; '),
+        longScore:  bestDir === 'long'  ? bestScore : null,
+        shortScore: bestDir === 'short' ? bestScore : null,
+        reasons:    `AutoTL 4H: ${trend.detail}; ` + bestR.reasons.slice(0, 3).join('; '),
         atr:        bestR.atrVal || null,
       });
 
       const tag = bestScore >= MIN_SCORE ? '✓' : '~';
-      process.stdout.write(`  ${tag} ${inst.label}: ${bestDir.toUpperCase()} ${bestScore} — ${bestR.reasons.slice(0,3).join(', ')}\n`);
+      process.stdout.write(`  ${tag} ${inst.label}: ${bestDir.toUpperCase()} ${bestScore} — AutoTL 4H ${trend.detail}\n`);
 
     } catch (e) {
       log(`  ✗ ${inst.label}: ${e.message}`);
     }
   }
+  log(`AutoTL 4H trend found on ${scored.length} instruments; ${noTrend} with no validated trend; ${unavailable.length} unavailable.`);
 
   // Sort by score descending
   scored.sort((a, b) => b.biasScore - a.biasScore);
@@ -197,7 +210,7 @@ async function main() {
   const watchlist = {
     date:          new Date().toISOString().slice(0, 10),
     generatedAt:   new Date().toISOString(),
-    scanTF:        'H4',
+    scanTF:        `AutoTL 4H ×${SCAN_BARS}`,
     totalScanned:  INSTRUMENT_UNIVERSE.length,
     eligible:      scored.filter(s => s.biasScore >= MIN_SCORE).length,
     unavailable:   unavailable.length,

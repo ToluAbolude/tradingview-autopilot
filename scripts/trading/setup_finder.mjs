@@ -670,6 +670,85 @@ function detectORB(bars, label, tf, dir) {
   return null;
 }
 
+// ── AutoTL trend read — standalone trend direction from trendlines only ─────
+// Same geometry as the L vote / "Auto Trendlines — Zone & Break" Pine indicator
+// (pivLen 5, ≤8 recent pivots, 3+ touches, ≥10-bar span, 0.5×ATR touch tol,
+// 0.25×ATR zone half-width) but instead of scoring a break/bounce EVENT it
+// answers "which way is this market trending right now" — the daily_selector's
+// bias source (operator directive 2026-07-08: AutoTL is the primary and only
+// trend indicator; run on 1H×180 and 4H×180):
+//   • rising support intact (no body close below its zone) → long  (higher lows)
+//   • falling resistance intact (no body close above zone) → short (lower highs)
+//   • a line BROKEN by a body close beyond its zone flips trend to the break side
+//   • both lines intact (contraction/channel), conflicting breaks, or no
+//     validated line → null (no clear trend — a valid answer, not an error)
+export function autoTrendlineTrend(bars) {
+  const n = bars.length - 1;
+  if (!bars || n < 30) return { dir: null, detail: 'insufficient bars', touches: 0 };
+  const atr = calcATR(bars);
+  const pivLen = 5, maxPiv = 8, minTouch = 3, minSpan = 10;
+  const tol      = (atr[n] || 0) * 0.5;
+  const zoneHalf = (atr[n] || 0) * 0.25;
+
+  const pivotsOf = (type) => {
+    const out = [];
+    for (let i = pivLen; i <= n - pivLen; i++) {
+      let ok = true;
+      for (let j = i - pivLen; j <= i + pivLen; j++) {
+        if (j !== i && (type === 'high' ? bars[j].h >= bars[i].h : bars[j].l <= bars[i].l)) { ok = false; break; }
+      }
+      if (ok) out.push({ idx: i, price: type === 'high' ? bars[i].h : bars[i].l });
+    }
+    return out.slice(-maxPiv);
+  };
+
+  const fit = (type) => {
+    const pv = pivotsOf(type);
+    if (pv.length < 2) return null;
+    let best = null;
+    for (let a = 0; a < pv.length - 1; a++) {
+      for (let b = a + 1; b < pv.length; b++) {
+        const span = pv[b].idx - pv[a].idx;
+        if (span < minSpan) continue;
+        const slope = (pv[b].price - pv[a].price) / span;
+        if (type === 'high' && slope > 0) continue;   // resistance must slope down
+        if (type === 'low'  && slope < 0) continue;   // support must slope up
+        let touches = 0, contained = true;
+        for (const p of pv) {
+          const diff = p.price - (pv[a].price + slope * (p.idx - pv[a].idx));
+          if (type === 'high' ? diff > tol : diff < -tol) { contained = false; break; }
+          if (Math.abs(diff) <= tol) touches++;
+        }
+        if (!contained || touches < minTouch) continue;
+        if (!best || touches > best.touches || (touches === best.touches && span > best.span)) {
+          best = { x1: pv[a].idx, y1: pv[a].price, slope, touches, span };
+        }
+      }
+    }
+    if (!best) return null;
+    best.at = (i) => best.y1 + best.slope * (i - best.x1);
+    return best;
+  };
+
+  const sup = fit('low'), res = fit('high');
+  const last = bars[n];
+  const supBroken = sup != null && last.c < sup.at(n) - zoneHalf;  // body close below support zone
+  const resBroken = res != null && last.c > res.at(n) + zoneHalf;  // body close above resistance zone
+
+  if (sup && res) {
+    if (supBroken && !resBroken) return { dir: 'short', detail: `rising support ×${sup.touches} BROKEN`, touches: sup.touches };
+    if (resBroken && !supBroken) return { dir: 'long',  detail: `falling resistance ×${res.touches} BROKEN`, touches: res.touches };
+    return { dir: null, detail: `contraction (support ×${sup.touches} + resistance ×${res.touches} both intact)`, touches: 0 };
+  }
+  if (sup) return supBroken
+    ? { dir: 'short', detail: `rising support ×${sup.touches} BROKEN`,               touches: sup.touches }
+    : { dir: 'long',  detail: `rising support ×${sup.touches} intact (higher lows)`, touches: sup.touches };
+  if (res) return resBroken
+    ? { dir: 'long',  detail: `falling resistance ×${res.touches} BROKEN`,                touches: res.touches }
+    : { dir: 'short', detail: `falling resistance ×${res.touches} intact (lower highs)`,  touches: res.touches };
+  return { dir: null, detail: 'no validated trendline (3+ touches required)', touches: 0 };
+}
+
 // ── Opportunity-type classifier ────────────────────────────────────────────
 // Looks at the current bars + indicators and decides which kind of setup is
 // in front of us. Returns null when none of the four types match cleanly,

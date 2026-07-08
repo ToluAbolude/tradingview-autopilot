@@ -195,7 +195,8 @@
       "Bash(nlm doctor *)",
       "Bash(python -c ' *)",
       "Bash(graphify update *)",
-      "Bash(graphify query *)"
+      "Bash(graphify query *)",
+      "Bash(node --check scripts/trading/daily_selector.mjs)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Tda-d\\job-scanner",
