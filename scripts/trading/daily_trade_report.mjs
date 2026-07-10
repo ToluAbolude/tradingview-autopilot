@@ -361,6 +361,58 @@ function buildHtml(label, trades, sum, equity, openPos = []) {
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
+// ── Tradeify/Tradovate prop account section (additive; only when live) ───────
+async function pullTvoSection(fromMs) {
+  if (!existsSync('/home/ubuntu/.tvo_live') && process.env.TVO_LIVE !== 'on') return null;
+  try {
+    const tvo = await import('./broker_tradovate.mjs');
+    const eq = await tvo.getEquity();
+    const rs = await tvo.getRiskStatus();
+    const floorEst = Math.min((rs.peakNetLiq ?? eq.equity) - (rs.trailingMaxDrawdown ?? 1000), rs.floorLocksAt ?? Infinity);
+    const positions = (await tvo.getPositions()).map(p => ({ contract: p.contractName, netPos: p.netPos }));
+    let trades = [];
+    try {
+      trades = readFileSync(join(DATA_ROOT, 'orb_signals.jsonl'), 'utf8').trim().split('\n')
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(s => s && s.tvo && new Date(s.ts).getTime() >= fromMs);
+    } catch { /* no signals log yet */ }
+    return { equity: eq.equity, floorEst, headroom: +(eq.equity - floorEst).toFixed(2), positions, trades };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+function tvoText(t) {
+  if (!t) return '';
+  if (t.error) return `\n── TRADEIFY FUTURES (Tradovate) ──\n  ⚠ status unavailable: ${t.error}\n`;
+  const lines = [`\n── TRADEIFY FUTURES (Tradovate) ──`,
+    `  Equity $${t.equity}   DD floor≈$${t.floorEst}   headroom $${t.headroom}`];
+  if (t.positions.length) lines.push('  Open: ' + t.positions.map(p => `${p.contract} ${p.netPos > 0 ? '+' : ''}${p.netPos}`).join(', '));
+  for (const s of t.trades) {
+    lines.push(s.tvo.placed
+      ? `  ${s.ts.slice(11, 16)} ${s.session} ${s.symbol} ${s.dir} ${s.tvo.units}x fill ${s.tvo.fill} SL ${s.tvo.sl} TP ${s.tvo.tp} (risk $${Math.round(s.tvo.riskUsd)})`
+      : `  ${s.ts.slice(11, 16)} ${s.session} ${s.symbol} ${s.dir} SKIPPED: ${s.tvo.error}`);
+  }
+  if (!t.trades.length) lines.push('  No futures signals routed today.');
+  return lines.join('\n') + '\n';
+}
+
+function tvoHtml(t) {
+  if (!t) return '';
+  const esc = x => String(x).replace(/[<>&]/g, ch => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[ch]));
+  let rows;
+  if (t.error) rows = `<p>⚠ status unavailable: ${esc(t.error)}</p>`;
+  else {
+    const trades = t.trades.map(s => s.tvo.placed
+      ? `<tr><td>${s.ts.slice(11, 16)}</td><td>${s.session}</td><td>${s.symbol} ${s.dir}</td><td>${s.tvo.units}x @ ${s.tvo.fill}</td><td>SL ${s.tvo.sl} / TP ${s.tvo.tp}</td><td>$${Math.round(s.tvo.riskUsd)}</td></tr>`
+      : `<tr><td>${s.ts.slice(11, 16)}</td><td>${s.session}</td><td>${s.symbol} ${s.dir}</td><td colspan="3">skipped: ${esc(s.tvo.error)}</td></tr>`).join('');
+    rows = `<p>Equity <b>$${t.equity}</b> · DD floor ≈ $${t.floorEst} · headroom <b>$${t.headroom}</b>` +
+      (t.positions.length ? ' · open: ' + esc(t.positions.map(p => `${p.contract} ${p.netPos}`).join(', ')) : '') + '</p>' +
+      (t.trades.length ? `<table border="1" cellpadding="4" cellspacing="0"><tr><th>UTC</th><th>Session</th><th>Signal</th><th>Fill</th><th>Bracket</th><th>Risk</th></tr>${trades}</table>` : '<p>No futures signals routed today.</p>');
+  }
+  return `<h3>Tradeify Futures (Tradovate)</h3>${rows}`;
+}
+
 async function main() {
   const { fromMs, toMs, label } = resolveWindow();
 
@@ -382,6 +434,9 @@ async function main() {
   const sum = summarize(trades);
   printReport(label, trades, sum, equity, openPos);
 
+  const tvoSec = await pullTvoSection(fromMs);
+  if (tvoSec) console.log(tvoText(tvoSec));
+
   // Persist
   if (!existsSync(OUT_DIR))  mkdirSync(OUT_DIR,  { recursive: true });
   if (!existsSync(HTML_DIR)) mkdirSync(HTML_DIR, { recursive: true });
@@ -389,9 +444,12 @@ async function main() {
   writeFileSync(join(OUT_DIR, `${snapDate}.json`), JSON.stringify({
     date: label, generatedAt: new Date().toISOString(),
     summary: { ...sum, profitFactor: sum.profitFactor === Infinity ? null : sum.profitFactor },
-    trades, equity, openPositions: openPos,
+    trades, equity, openPositions: openPos, tradovate: tvoSec,
   }, null, 2));
-  writeFileSync(HTML_FILE, buildHtml(label, trades, sum, equity, openPos));
+  const html = buildHtml(label, trades, sum, equity, openPos);
+  writeFileSync(HTML_FILE, tvoSec
+    ? (html.includes('</body>') ? html.replace('</body>', tvoHtml(tvoSec) + '</body>') : html + tvoHtml(tvoSec))
+    : html);
   console.log('\nHTML → ' + HTML_FILE);
 
   process.exit(0);

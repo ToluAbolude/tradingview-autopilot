@@ -220,6 +220,19 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   const existing = (await api('/position/list')).find(p => p.accountId === a.id && p.contractId === cid && p.netPos !== 0);
   if (existing) throw new Error(`Anti-stack: already ${existing.netPos} in ${c.name}`);
 
+  // Drawdown-headroom guard: estimate the trailing floor from the intraday
+  // peak (conservative — the real floor ratchets on EOD balances only, so the
+  // estimate is never BELOW the true floor) and refuse entries that could put
+  // the account within reach of it. Default $300 ≈ two max-loss trades spare.
+  const MIN_HEADROOM = +(process.env.TVO_MIN_HEADROOM || 300);
+  const eq = await getEquity();
+  const rs = await getRiskStatus();
+  const floorEst = Math.min((rs.peakNetLiq ?? eq.equity) - (rs.trailingMaxDrawdown ?? 1000), rs.floorLocksAt ?? Infinity);
+  const headroom = eq.equity - floorEst;
+  if (headroom - riskUsd < MIN_HEADROOM) {
+    throw new Error(`DD headroom too low: equity ${eq.equity} vs floor≈${floorEst} leaves $${headroom.toFixed(0)}; trade risks $${riskUsd.toFixed(0)}, need $${MIN_HEADROOM} spare`);
+  }
+
   console.log(`[tvo] entry ${action} ${units}x ${c.name} (slDist=${slDist.toFixed(2)} tpDist=${tpDist.toFixed(2)} risk=$${riskUsd.toFixed(0)})`);
   const res = await api('/order/placeorder', {
     accountSpec: a.name, accountId: a.id, action, symbol: c.name,
