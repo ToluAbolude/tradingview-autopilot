@@ -27,6 +27,14 @@
  *                         live edge before risking money.
  *   --live              — places real cTrader bracket orders (market entry + SL + TP).
  *
+ * Tradovate routing (independent of --live): when the kill switch is ON
+ * (env TVO_LIVE=on, or flag file /home/ubuntu/.tvo_live on the VM), every
+ * breakout signal is ALSO routed to the Tradeify prop account via
+ * broker_tradovate.mjs — whole-contract micro sizing from a $ risk budget
+ * (params.tvoRiskUsd / env TVO_RISK_USD, default $100), distance-based
+ * brackets (CFD→futures basis safe). Signals whose 1-contract risk exceeds
+ * the bridge cap are skipped by the bridge's safety gate. Default OFF.
+ *
  * Requires cTrader env (BROKER_PROVIDER=ctrader + CTRADER_* creds).
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
@@ -43,6 +51,7 @@ const STATE_FILE  = join(DATA_ROOT, 'orb_state.json');
 const SIGNALS_LOG = join(DATA_ROOT, 'orb_signals.jsonl');
 
 const LIVE = process.argv.includes('--live');   // default: dry-run
+const TVO_LIVE = process.env.TVO_LIVE === 'on' || existsSync('/home/ubuntu/.tvo_live');   // Tradeify prop routing kill switch
 
 // ── Strategy config (from the 90d backtest) ──────────────────────────────────
 const OR_DURATION_MIN  = 30;
@@ -143,7 +152,7 @@ async function main() {
   const dow = now.getUTCDay();
   if (dow === 0 || dow === 6) { log('Weekend — ORB idle.'); return; }
 
-  log(`═══ ORB RUNNER (${LIVE ? 'LIVE' : 'DRY-RUN'}) ═══`);
+  log(`═══ ORB RUNNER (${LIVE ? 'LIVE' : 'DRY-RUN'}${TVO_LIVE ? ' + TVO-LIVE' : ''}) ═══`);
 
   const bridge = await import('./broker_ctrader.mjs');
   await bridge.connect();
@@ -241,6 +250,20 @@ async function main() {
         }
       } else {
         log(`  📝 DRY-RUN ${pairing.session} ${symbol} ${r.dir} ${lots}lots entry~${signal.entry} SL ${signal.sl} TP ${signal.tp} (risk ${riskPct}% = $${(equity*riskPct/100).toFixed(0)})`);
+      }
+
+      // ── Tradeify prop routing (independent kill switch, default OFF) ────────
+      if (TVO_LIVE) {
+        try {
+          const tvo = await import('./broker_tradovate.mjs');
+          const sz = tvo.sizeContracts({ symbol, entry: r.entry, slPrice: r.sl, riskUsd: params.tvoRiskUsd ?? +(process.env.TVO_RISK_USD || 100) });
+          const res = await tvo.placeOrder({ symbol, direction: r.dir, units: sz.units, entry: r.entry, tpPrice: tp, slPrice: r.sl });
+          signal.tvo = { placed: true, units: sz.units, riskUsd: res.riskUsd, fill: res.fillPrice, sl: res.sl, tp: res.tp };
+          log(`  ✅ TVO ${pairing.session} ${symbol} ${r.dir} ${sz.units}x fill ${res.fillPrice} SL ${res.sl} TP ${res.tp} (risk $${res.riskUsd.toFixed(0)})`);
+        } catch (e) {
+          signal.tvo = { placed: false, error: e.message };
+          log(`  ✗ TVO ${symbol}: ${e.message}`);
+        }
       }
 
       appendFileSync(SIGNALS_LOG, JSON.stringify(signal) + '\n');

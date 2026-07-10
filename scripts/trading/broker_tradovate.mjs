@@ -13,12 +13,15 @@
  * getPositions(), closeAllPositions().
  *
  * Hard rules baked in (prop account survival):
- *   • Every entry is an OSO bracket (SL+TP attached at entry) — never naked.
- *   • isAutomated:true on all orders (CME requirement for bots).
- *   • Poll-and-verify after placement: entry + BOTH brackets confirmed working,
- *     else emergency liquidate (bracket-attach-bug lesson from cTrader).
- *   • Per-trade dollar-risk cap, contract cap, weekend block, entry cutoff
- *     before the 4:59pm ET forced flat.
+ *   • Brackets are DISTANCE-based: signals come from cTrader CFD prices, which
+ *     sit on a basis offset from the futures (ES ~+60 over SPX500 CFD). We place
+ *     the market entry, read the futures FILL price, then place an OCO bracket
+ *     at fill ± the signal's SL/TP distances. Absolute CFD levels are never sent.
+ *   • Naked window between fill and OCO is seconds; OCO failure → immediate
+ *     liquidate (bracket-attach-bug lesson from cTrader). isAutomated:true on
+ *     all orders (CME requirement for bots).
+ *   • Per-trade dollar-risk cap, contract cap, anti-stack, weekend block, entry
+ *     cutoff before the 4:59pm ET forced flat.
  *
  * CLI:  node broker_tradovate.mjs --status        read-only account summary
  *       node broker_tradovate.mjs --flatten       liquidate all + cancel orders
@@ -158,8 +161,29 @@ export async function validateContracts() {
   return out;
 }
 
+// ── Sizing: whole contracts from a dollar risk budget ────────────────────────
+export function sizeContracts({ symbol, entry, slPrice, riskUsd = +(process.env.TVO_RISK_USD || 100) }) {
+  const c = CONTRACTS[symbol];
+  if (!c) throw new Error(`No contract mapping for ${symbol}`);
+  const perContract = Math.abs(entry - slPrice) * c.pointValue;
+  if (perContract <= 0) throw new Error('Zero SL distance');
+  const units = Math.min(Math.max(1, Math.floor(riskUsd / perContract)), MAX_CONTRACTS);
+  return { units, perContract: +perContract.toFixed(2), riskUsd: +(units * perContract).toFixed(2) };
+}
+
 // ── Safety gate ───────────────────────────────────────────────────────────────
 function roundToTick(price, tick) { return Math.round(price / tick) * tick; }
+
+const contractIdCache = {};
+async function contractIdFor(symbol) {
+  const c = CONTRACTS[symbol];
+  if (!contractIdCache[c.name]) {
+    const found = await api(`/contract/find?name=${c.name}`);
+    if (!found?.id) throw new Error(`Contract ${c.name} not found — roll needed`);
+    contractIdCache[c.name] = found.id;
+  }
+  return contractIdCache[c.name];
+}
 
 export function assertOrderSafety({ symbol, direction, units, entry, slPrice, tpPrice }) {
   const c = CONTRACTS[symbol];
@@ -179,50 +203,74 @@ export function assertOrderSafety({ symbol, direction, units, entry, slPrice, tp
   return { riskUsd };
 }
 
-// ── Order placement: market entry + OSO bracket, then poll-and-verify ────────
+// ── Order placement ───────────────────────────────────────────────────────────
+// Market entry → poll for the futures fill price → OCO bracket at fill ± the
+// signal's distances → verify both bracket legs are working.
 export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice }) {
   const { riskUsd } = assertOrderSafety({ symbol, direction, units, entry, slPrice, tpPrice });
   const a = await getAccount();
   const c = CONTRACTS[symbol];
+  const cid = await contractIdFor(symbol);
+  const slDist = Math.abs(entry - slPrice);
+  const tpDist = Math.abs(entry - tpPrice);
   const action = direction === 'long' ? 'Buy' : 'Sell';
   const opp = direction === 'long' ? 'Sell' : 'Buy';
-  const body = {
-    accountSpec: a.name,
-    accountId: a.id,
-    action,
-    symbol: c.name,
-    orderQty: units,
-    orderType: 'Market',
-    isAutomated: true,
-    bracket1: { action: opp, orderType: 'Limit', price: roundToTick(tpPrice, c.tick) },
-    bracket2: { action: opp, orderType: 'Stop', stopPrice: roundToTick(slPrice, c.tick) },
-  };
-  console.log(`[tvo] placeoso ${action} ${units}x ${c.name} SL=${body.bracket2.stopPrice} TP=${body.bracket1.price} risk=$${riskUsd.toFixed(0)}`);
-  const res = await api('/order/placeoso', body);
+
+  // Anti-stack: never add to an existing position in this contract
+  const existing = (await api('/position/list')).find(p => p.accountId === a.id && p.contractId === cid && p.netPos !== 0);
+  if (existing) throw new Error(`Anti-stack: already ${existing.netPos} in ${c.name}`);
+
+  console.log(`[tvo] entry ${action} ${units}x ${c.name} (slDist=${slDist.toFixed(2)} tpDist=${tpDist.toFixed(2)} risk=$${riskUsd.toFixed(0)})`);
+  const res = await api('/order/placeorder', {
+    accountSpec: a.name, accountId: a.id, action, symbol: c.name,
+    orderQty: units, orderType: 'Market', isAutomated: true,
+  });
   if (res.failureReason || res.failureText) {
-    throw new Error(`placeoso rejected: ${res.failureReason || ''} ${res.failureText || ''}`);
+    throw new Error(`placeorder rejected: ${res.failureReason || ''} ${res.failureText || ''}`);
   }
 
-  // Verify: position open AND both bracket orders working (up to ~15s)
-  for (let i = 0; i < 6; i++) {
+  // Poll for the fill (fast — the naked window must stay short)
+  let fillPrice = null;
+  for (let i = 0; i < 20 && fillPrice == null; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    const pos = (await api('/position/list')).find(p => p.accountId === a.id && p.contractId === cid && p.netPos !== 0);
+    if (pos) fillPrice = pos.netPrice;
+  }
+  if (fillPrice == null) {
+    try { await api('/order/cancelorder', { orderId: res.orderId, isAutomated: true }); } catch {}
+    throw new Error('Market entry not filled within 10s — order cancelled');
+  }
+
+  // OCO bracket at futures fill ± distances (basis-free)
+  const sl = roundToTick(direction === 'long' ? fillPrice - slDist : fillPrice + slDist, c.tick);
+  const tp = roundToTick(direction === 'long' ? fillPrice + tpDist : fillPrice - tpDist, c.tick);
+  let oco;
+  try {
+    oco = await api('/order/placeoco', {
+      accountSpec: a.name, accountId: a.id, action: opp, symbol: c.name,
+      orderQty: units, orderType: 'Limit', price: tp, isAutomated: true,
+      other: { action: opp, orderType: 'Stop', stopPrice: sl },
+    });
+    if (oco.failureReason || oco.failureText) throw new Error(`${oco.failureReason || ''} ${oco.failureText || ''}`);
+  } catch (e) {
+    console.error(`[tvo] EMERGENCY: filled @${fillPrice} but OCO bracket failed (${e.message}) — liquidating`);
+    await liquidateContract(cid);
+    throw new Error(`Bracket placement failed — position liquidated (never-naked): ${e.message}`);
+  }
+
+  // Verify both legs are actually working (up to ~10s)
+  for (let i = 0; i < 4; i++) {
     await new Promise(r => setTimeout(r, 2500));
-    const pos = (await api('/position/list')).find(p => p.accountId === a.id && p.netPos !== 0);
-    const working = await getWorkingOrders();
-    const brackets = working.filter(o => o.action === opp);
-    if (pos && brackets.length >= 2) {
-      console.log(`[tvo] VERIFIED: position ${pos.netPos > 0 ? 'long' : 'short'} ${Math.abs(pos.netPos)} + ${brackets.length} working brackets`);
-      return { ok: true, orderId: res.orderId, positionId: pos.id, riskUsd };
-    }
-    if (pos && i === 5) {
-      console.error('[tvo] EMERGENCY: filled but brackets missing — liquidating');
-      await liquidateContract(pos.contractId);
-      throw new Error('Bracket verification failed — position liquidated (never-naked)');
+    const working = (await getWorkingOrders()).filter(o => o.action === opp && o.contractId === cid);
+    if (working.length >= 2) {
+      console.log(`[tvo] VERIFIED: ${action} ${units}x ${c.name} @${fillPrice}, SL ${sl} / TP ${tp} both working`);
+      return { ok: true, orderId: res.orderId, fillPrice, sl, tp, riskUsd };
     }
   }
-  // No fill detected: cancel whatever is resting so nothing fires unattended
-  console.error('[tvo] no fill detected after 15s — cancelling working orders for safety');
+  console.error('[tvo] EMERGENCY: bracket legs not verified working — liquidating');
+  await liquidateContract(cid);
   await cancelAllWorking();
-  throw new Error('placeoso: fill not confirmed within 15s; working orders cancelled');
+  throw new Error('Bracket verification failed — position liquidated (never-naked)');
 }
 
 async function liquidateContract(contractId) {
