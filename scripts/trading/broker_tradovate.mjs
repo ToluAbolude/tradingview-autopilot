@@ -35,15 +35,19 @@ const MAX_CONTRACTS = +(process.env.TVO_MAX_CONTRACTS || 2);
 const MAX_RISK_USD = +(process.env.TVO_MAX_RISK || 150);        // per trade, incl. all contracts
 const ENTRY_CUTOFF_UTC = +(process.env.TVO_ENTRY_CUTOFF || 19); // no new entries at/after this UTC hour (flat is forced 20:59 UTC in DST)
 
-// Scanner symbol → front-month MICRO contract. Quarterly roll: update codes
-// (U6=Sep26 equities; MGC uses even months, Q6=Aug26). validateContracts()
-// confirms these resolve at startup — a failed lookup means we must roll.
+// Scanner symbol → MICRO contract root. The tradable front month is resolved
+// DYNAMICALLY (resolveContract): walk candidate month codes from the current
+// month, take the first listed contract expiring more than ROLL_BUFFER days
+// out — so rolls happen automatically and we never trade a dying contract.
+// Pin manually with env TVO_CONTRACT_<SYMBOL>=MGCZ6 if ever needed.
 const CONTRACTS = {
-  XAUUSD: { name: 'MGCQ6', pointValue: 10, tick: 0.1 },
-  NAS100: { name: 'MNQU6', pointValue: 2, tick: 0.25 },
-  SPX500: { name: 'MESU6', pointValue: 5, tick: 0.25 },
-  US30:   { name: 'MYMU6', pointValue: 0.5, tick: 1 },
+  XAUUSD: { root: 'MGC', months: 'GJMQVZ', pointValue: 10, tick: 0.1 },
+  NAS100: { root: 'MNQ', months: 'HMUZ', pointValue: 2, tick: 0.25 },
+  SPX500: { root: 'MES', months: 'HMUZ', pointValue: 5, tick: 0.25 },
+  US30:   { root: 'MYM', months: 'HMUZ', pointValue: 0.5, tick: 1 },
 };
+const MONTH_OF_CODE = { F: 1, G: 2, H: 3, J: 4, K: 5, M: 6, N: 7, Q: 8, U: 9, V: 10, X: 11, Z: 12 };
+const ROLL_BUFFER_DAYS = +(process.env.TVO_ROLL_BUFFER_DAYS || 7);
 
 // ── Token via CDP ─────────────────────────────────────────────────────────────
 let tokenState = null; // { token, expiration, userId }
@@ -151,13 +155,46 @@ export async function getWorkingOrders() {
   return orders.filter(o => o.accountId === a.id && ['Working', 'Suspended'].includes(o.ordStatus));
 }
 
+// ── Dynamic front-month resolution ───────────────────────────────────────────
+const resolveCache = {};   // symbol → { name, id, expiration } (per process run)
+
+export async function resolveContract(symbol) {
+  if (resolveCache[symbol]) return resolveCache[symbol];
+  const c = CONTRACTS[symbol];
+  if (!c) throw new Error(`No contract mapping for ${symbol}`);
+
+  const pinned = process.env[`TVO_CONTRACT_${symbol}`];
+  if (pinned) {
+    const found = await api(`/contract/find?name=${pinned}`);
+    if (!found?.id) throw new Error(`Pinned contract ${pinned} (${symbol}) does not resolve`);
+    return (resolveCache[symbol] = { name: pinned, id: found.id, expiration: null, pinned: true });
+  }
+
+  const now = new Date();
+  const minExpiry = now.getTime() + ROLL_BUFFER_DAYS * 86400000;
+  // Walk months from the current one, up to 14 ahead
+  for (let off = 0; off <= 14; off++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + off, 1));
+    const code = Object.keys(MONTH_OF_CODE).find(k => MONTH_OF_CODE[k] === d.getUTCMonth() + 1);
+    if (!c.months.includes(code)) continue;
+    const name = `${c.root}${code}${String(d.getUTCFullYear()).slice(-1)}`;
+    let found;
+    try { found = await api(`/contract/find?name=${name}`); } catch { continue; }
+    if (!found?.id) continue;
+    let expiration = null;
+    try {
+      const mat = await api(`/contractMaturity/item?id=${found.contractMaturityId}`);
+      expiration = mat?.expirationDate || null;
+    } catch { /* maturity read is best-effort */ }
+    if (expiration && new Date(expiration).getTime() < minExpiry) continue;   // too close to expiry — roll forward
+    return (resolveCache[symbol] = { name, id: found.id, expiration });
+  }
+  throw new Error(`No tradable front month found for ${symbol} (${c.root})`);
+}
+
 export async function validateContracts() {
   const out = {};
-  for (const [sym, c] of Object.entries(CONTRACTS)) {
-    const found = await api(`/contract/find?name=${c.name}`);
-    if (!found?.id) throw new Error(`Contract ${c.name} (${sym}) does not resolve — front-month roll needed in CONTRACTS map`);
-    out[sym] = { ...c, contractId: found.id };
-  }
+  for (const sym of Object.keys(CONTRACTS)) out[sym] = await resolveContract(sym);
   return out;
 }
 
@@ -174,16 +211,6 @@ export function sizeContracts({ symbol, entry, slPrice, riskUsd = +(process.env.
 // ── Safety gate ───────────────────────────────────────────────────────────────
 function roundToTick(price, tick) { return Math.round(price / tick) * tick; }
 
-const contractIdCache = {};
-async function contractIdFor(symbol) {
-  const c = CONTRACTS[symbol];
-  if (!contractIdCache[c.name]) {
-    const found = await api(`/contract/find?name=${c.name}`);
-    if (!found?.id) throw new Error(`Contract ${c.name} not found — roll needed`);
-    contractIdCache[c.name] = found.id;
-  }
-  return contractIdCache[c.name];
-}
 
 export function assertOrderSafety({ symbol, direction, units, entry, slPrice, tpPrice }) {
   const c = CONTRACTS[symbol];
@@ -210,7 +237,8 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   const { riskUsd } = assertOrderSafety({ symbol, direction, units, entry, slPrice, tpPrice });
   const a = await getAccount();
   const c = CONTRACTS[symbol];
-  const cid = await contractIdFor(symbol);
+  const rc = await resolveContract(symbol);   // dynamic front month
+  const cid = rc.id;
   const slDist = Math.abs(entry - slPrice);
   const tpDist = Math.abs(entry - tpPrice);
   const action = direction === 'long' ? 'Buy' : 'Sell';
@@ -218,7 +246,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
 
   // Anti-stack: never add to an existing position in this contract
   const existing = (await api('/position/list')).find(p => p.accountId === a.id && p.contractId === cid && p.netPos !== 0);
-  if (existing) throw new Error(`Anti-stack: already ${existing.netPos} in ${c.name}`);
+  if (existing) throw new Error(`Anti-stack: already ${existing.netPos} in ${rc.name}`);
 
   // Drawdown-headroom guard: estimate the trailing floor from the intraday
   // peak (conservative — the real floor ratchets on EOD balances only, so the
@@ -233,9 +261,9 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
     throw new Error(`DD headroom too low: equity ${eq.equity} vs floor≈${floorEst} leaves $${headroom.toFixed(0)}; trade risks $${riskUsd.toFixed(0)}, need $${MIN_HEADROOM} spare`);
   }
 
-  console.log(`[tvo] entry ${action} ${units}x ${c.name} (slDist=${slDist.toFixed(2)} tpDist=${tpDist.toFixed(2)} risk=$${riskUsd.toFixed(0)})`);
+  console.log(`[tvo] entry ${action} ${units}x ${rc.name} (slDist=${slDist.toFixed(2)} tpDist=${tpDist.toFixed(2)} risk=$${riskUsd.toFixed(0)})`);
   const res = await api('/order/placeorder', {
-    accountSpec: a.name, accountId: a.id, action, symbol: c.name,
+    accountSpec: a.name, accountId: a.id, action, symbol: rc.name,
     orderQty: units, orderType: 'Market', isAutomated: true,
   });
   if (res.failureReason || res.failureText) {
@@ -260,7 +288,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   let oco;
   try {
     oco = await api('/order/placeoco', {
-      accountSpec: a.name, accountId: a.id, action: opp, symbol: c.name,
+      accountSpec: a.name, accountId: a.id, action: opp, symbol: rc.name,
       orderQty: units, orderType: 'Limit', price: tp, isAutomated: true,
       other: { action: opp, orderType: 'Stop', stopPrice: sl },
     });
@@ -276,7 +304,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
     await new Promise(r => setTimeout(r, 2500));
     const working = (await getWorkingOrders()).filter(o => o.action === opp && o.contractId === cid);
     if (working.length >= 2) {
-      console.log(`[tvo] VERIFIED: ${action} ${units}x ${c.name} @${fillPrice}, SL ${sl} / TP ${tp} both working`);
+      console.log(`[tvo] VERIFIED: ${action} ${units}x ${rc.name} @${fillPrice}, SL ${sl} / TP ${tp} both working`);
       return { ok: true, orderId: res.orderId, fillPrice, sl, tp, riskUsd };
     }
   }
@@ -329,7 +357,7 @@ if (argv.includes('--status')) {
     risk,
     positions: pos.map(p => ({ c: p.contractName, netPos: p.netPos, price: p.netPrice })),
     workingOrders: working.map(o => ({ id: o.id, action: o.action, status: o.ordStatus })),
-    contracts: Object.fromEntries(Object.entries(contracts).map(([k, v]) => [k, v.name + '#' + v.contractId])),
+    contracts: Object.fromEntries(Object.entries(contracts).map(([k, v]) => [k, v.name + '#' + v.id + (v.expiration ? ' exp ' + String(v.expiration).slice(0, 10) : '')])),
   }, null, 1));
   process.exit(0);
 }
