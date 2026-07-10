@@ -33,19 +33,31 @@ const arg = (k, d) => { const a = argv.find(x => x.startsWith(`--${k}=`)); retur
 // loss, effectively 1 phase. Numbers are typical for a $25k futures eval
 // (Apex/Tradeify-class: ~$1,500 target, ~$1,500 trailing) — CONFIRM your firm's.
 const PRESET = (argv.find(x => x.startsWith('--preset=')) || '').split('=')[1] || '';
-const isFut25 = PRESET === 'tradovate25k' || PRESET === 'fut25';
+const isL25 = PRESET === 'tradeify25kL';   // CONFIRMED rules 2026-07-10: Tradeify Lightning 25k
+const isFut25 = PRESET === 'tradovate25k' || PRESET === 'fut25' || isL25;
 
 // ── Firm rules (FTMO-style % defaults, or futures $ preset) ──────────────────
 const ACCOUNT   = arg('account', isFut25 ? 25000 : 100000);
-const FEE       = arg('fee', isFut25 ? 150 : 500);
+const FEE       = arg('fee', isL25 ? 300 : isFut25 ? 150 : 500);
 const STEPS     = arg('steps', isFut25 ? 1 : 2);
 const TARGET_USD = arg('targetUSD', isFut25 ? 1500 : 0);
-const MAXDD_USD  = arg('maxddUSD', isFut25 ? 1500 : 0);
+const MAXDD_USD  = arg('maxddUSD', isL25 ? 1000 : isFut25 ? 1500 : 0);
 const TARGET1   = TARGET_USD ? TARGET_USD / ACCOUNT * 100 : arg('target', 10);
 const TARGET2   = arg('target2', STEPS === 2 ? 5 : 0);
 const DAILY     = arg('daily', isFut25 ? 0 : 5);        // 0 = no daily loss limit
 const MAXDD     = MAXDD_USD ? MAXDD_USD / ACCOUNT * 100 : arg('maxdd', 10);
 const TRAILING  = isFut25 || argv.includes('--trailing'); // futures DD trails the peak
+// EOD trailing: the DD floor is (best END-OF-DAY balance − maxDD$); it only
+// ratchets up at day close, but a breach still triggers INTRADAY if equity
+// touches the current floor. Gentler than intraday-high-water trailing.
+const EOD_TRAIL = isL25 || argv.includes('--eodtrail');
+// Consistency rule: best single day's profit must be ≤ CONSIST × total profit
+// at the moment you claim the target/payout — forces small, steady days.
+const CONSIST   = arg('consist', isL25 ? 0.20 : 0);
+// Trail lock: the DD floor stops rising once it reaches start + TRAILCAP$.
+// Tradeify Lightning 25k: broker autoLiq shows trailingMaxDrawdownLimit=25100
+// → floor caps at start+$100 (confirmed via API 2026-07-10).
+const TRAILCAP  = arg('trailcap', isL25 ? 100 : Infinity);
 const TPD       = arg('tpd', 3);
 const MAXDAYS   = arg('maxdays', isFut25 ? 0 : 60);     // futures evals: no time cap
 const SIMS      = arg('sims', 30000);
@@ -66,7 +78,8 @@ function runPhase(targetPct, wr, winR, lossR, riskPct) {
   const targetEq = start * (1 + targetPct / 100);
   const ddFloorStatic = start * (1 - MAXDD / 100);
   const dailyLoss = DAILY / 100 * start;
-  let bal = start, peak = start;
+  let bal = start, peak = start, eodPeak = start;
+  let bestDay = 0;
   let day = 0;
   while (MAXDAYS === 0 ? day < 400 : day < MAXDAYS) {
     day++;
@@ -74,11 +87,21 @@ function runPhase(targetPct, wr, winR, lossR, riskPct) {
     for (let t = 0; t < TPD; t++) {
       bal += (rnd() < wr ? winR : -lossR) * riskDollars;
       if (bal > peak) peak = bal;
-      const ddFloor = TRAILING ? peak - MAXDD / 100 * start : ddFloorStatic;   // trailing = peak − maxDD$ (intraday high-water, strict)
+      const refPeak = EOD_TRAIL ? eodPeak : peak;                              // EOD trail ratchets only at day close
+      const ddFloor = TRAILING
+        ? Math.min(refPeak - MAXDD / 100 * start, start + TRAILCAP)            // floor locks at start+cap
+        : ddFloorStatic;                                                       // breach still checked intraday
       if (bal <= ddFloor) return { pass: false, reason: 'maxdd', days: day };
       if (DAILY > 0 && bal <= dayStart - dailyLoss) return { pass: false, reason: 'daily', days: day };
-      if (bal >= targetEq) return { pass: true, reason: 'target', days: day };
+      if (bal >= targetEq) {
+        if (!CONSIST) return { pass: true, reason: 'target', days: day };
+        const bd = Math.max(bestDay, bal - dayStart);
+        if (bd <= CONSIST * (bal - start)) return { pass: true, reason: 'target', days: day };
+        // consistency not yet satisfied → keep trading (target effectively 5× best day)
+      }
     }
+    if (bal - dayStart > bestDay) bestDay = bal - dayStart;
+    if (bal > eodPeak) eodPeak = bal;
   }
   return { pass: false, reason: 'timeout', days: day };
 }
@@ -113,7 +136,7 @@ function pct(x) { return x.toFixed(1).padStart(5); }
 
 const tgtStr = TARGET_USD ? `$${TARGET_USD}` : `${TARGET1}%${STEPS === 2 ? `+${TARGET2}%` : ''}`;
 const ddStr = MAXDD_USD ? `$${MAXDD_USD}` : `${MAXDD}%`;
-console.log(`\n═══ PROP CHALLENGE SIM ═══  $${(ACCOUNT / 1000)}k  ${STEPS}-step  target=${tgtStr}  daily=${DAILY > 0 ? DAILY + '%' : 'none'}  maxDD=${ddStr}${TRAILING ? ' TRAILING' : ' static'}  ${TPD} trades/day  ${MAXDAYS ? MAXDAYS + 'd cap' : 'no time cap'}  fee=$${FEE}  n=${SIMS}`);
+console.log(`\n═══ PROP CHALLENGE SIM ═══  $${(ACCOUNT / 1000)}k  ${STEPS}-step  target=${tgtStr}  daily=${DAILY > 0 ? DAILY + '%' : 'none'}  maxDD=${ddStr}${TRAILING ? (EOD_TRAIL ? ' EOD-TRAILING' : ' TRAILING') : ' static'}${CONSIST ? `  consistency≤${CONSIST * 100}%/day` : ''}  ${TPD} trades/day  ${MAXDAYS ? MAXDAYS + 'd cap' : 'no time cap'}  fee=$${FEE}  n=${SIMS}`);
 console.log(`(risk% is of the $${(ACCOUNT / 1000)}k account → 1% = $${(ACCOUNT / 100).toFixed(0)}/trade of risk)`);
 
 // Edge profiles to compare (same expectancy where noted → shows variance effect)
