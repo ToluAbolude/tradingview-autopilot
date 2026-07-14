@@ -316,7 +316,7 @@ export async function getBars(count = 200) {
 }
 
 // ── Indicators ──
-function calcATR(bars, len = 14) {
+export function calcATR(bars, len = 14) {
   const atr = [];
   for (let i = 0; i < bars.length; i++) {
     const tr = i === 0 ? bars[i].h - bars[i].l
@@ -1479,25 +1479,40 @@ const DEFAULT_PROFILE = { slMode: 'sr', maxSlAtr: 0.30, minSlAtr: 0.05, tpCap: 0
 //
 // One setup is emitted per instrument+direction, not per TF.
 // MTF bonus: +1 if 2 TFs agree, +2 if 3+ TFs agree.
+// ── Daily watchlist loader — tolerates a stale file up to maxAgeDays old ──────
+// daily_selector keeps the previous file when CDP is wedged (exit 1, no write),
+// but a strict date===today check then rejected it and the scanner ran the full
+// list blind all day (2026-07-14 incident). A 1-3 day old 4H AutoTL bias is
+// still far better scan guidance than no bias; Monday legitimately reads
+// Friday's file (3 days), which sets the default cap.
+export function loadDailyWatchlist(maxAgeDays = +(process.env.WATCHLIST_MAX_AGE_DAYS || 3)) {
+  try {
+    const file = join(DATA_ROOT, 'daily_watchlist.json');
+    if (!existsSync(file)) return null;
+    const wl = JSON.parse(readFileSync(file, 'utf8'));
+    if (!wl.date || !Array.isArray(wl.instruments) || wl.instruments.length === 0) return null;
+    const ageDays = Math.floor((Date.now() - Date.parse(wl.date)) / 86400000);
+    if (!(ageDays >= 0 && ageDays <= maxAgeDays)) return null; // also rejects NaN from a malformed date
+    return { ...wl, ageDays, stale: ageDays > 0 };
+  } catch (_) { return null; }
+}
+
 export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = null) {
   const utcHour  = new Date().getUTCHours();
   const priority = sessionSymbols(utcHour);
   const results  = [];
   const skipped  = [];
 
-  // ── Load today's daily watchlist if available (written by daily_selector.mjs at 06:30 UTC) ──
-  const WATCHLIST_FILE = join(DATA_ROOT, 'daily_watchlist.json');
+  // ── Load the daily watchlist (written by daily_selector.mjs each morning) ──
+  // Stale-tolerant: if today's selector run failed, the last good bias list
+  // still beats falling back to the full scan list (see loadDailyWatchlist).
   let scanList = FULL_SCAN_LIST;
-  try {
-    if (existsSync(WATCHLIST_FILE)) {
-      const wl = JSON.parse(readFileSync(WATCHLIST_FILE, 'utf8'));
-      const today = new Date().toISOString().slice(0, 10);
-      if (wl.date === today && Array.isArray(wl.instruments) && wl.instruments.length > 0) {
-        scanList = wl.instruments;
-        console.log(`  [daily_selector] Using today's watchlist: ${scanList.map(i => i.label).join(', ')}`);
-      }
-    }
-  } catch (_) {}
+  const wl = loadDailyWatchlist();
+  if (wl) {
+    scanList = wl.instruments;
+    const staleNote = wl.stale ? ` [STALE — from ${wl.date}, ${wl.ageDays}d old; selector likely failed]` : '';
+    console.log(`  [daily_selector] Using watchlist${staleNote}: ${scanList.map(i => i.label).join(', ')}`);
+  }
 
   // ── Drop scan list down by blockedSymbols + broker_rejects ───────────────────
   // No point scanning symbols we can't trade — wastes ~8 chart switches per inst.

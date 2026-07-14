@@ -666,6 +666,13 @@ export async function closeAllPositions({ keepClasses = [] } = {}) {
         volume:     p.volumeCents,
       });
       closed++;
+      // Multi-TP positions carry partial-close LIMIT children that cTrader does
+      // NOT auto-cancel on a full flatten (2026-07-14: EOD close left 3 AUDUSD
+      // + 3 AUDNZD sell limits resting — each a naked short if filled).
+      try {
+        const { cancelled } = await cancelOrphanLimits(p.positionId);
+        if (cancelled) console.log(`[cTrader] cancelled ${cancelled} orphan TP limit(s) for ${p.positionId}`);
+      } catch (e) { console.error(`[cTrader] orphan sweep ${p.positionId} failed: ${e.message}`); }
     } catch (e) { console.error(`[cTrader] close ${p.positionId} failed: ${e.message}`); }
   }
   return { closed, remaining: positions.length - closed, skipped };

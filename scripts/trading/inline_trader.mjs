@@ -37,6 +37,22 @@ const LOG_DIR   = join(DATA_ROOT, 'trade_log');
 const LOG_FILE  = join(LOG_DIR, 'trades.csv');
 const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
 
+// Age-tolerant daily-watchlist loader (mirrors setup_finder.loadDailyWatchlist,
+// kept local to avoid a new import edge). If the morning selector failed and
+// kept yesterday's file, a 1-3 day old 4H bias still beats no bias for the
+// sibling/with-trend gates; hard-expire after 3 days (Mon reads Fri's file).
+function loadWatchlistTolerant(maxAgeDays = +(process.env.WATCHLIST_MAX_AGE_DAYS || 3)) {
+  try {
+    const f = join(DATA_ROOT, 'daily_watchlist.json');
+    if (!existsSync(f)) return null;
+    const wl = JSON.parse(readFileSync(f, 'utf8'));
+    if (!wl.date || !Array.isArray(wl.instruments)) return null;
+    const ageDays = Math.floor((Date.now() - Date.parse(wl.date)) / 86400000);
+    if (!(ageDays >= 0 && ageDays <= maxAgeDays)) return null; // also rejects NaN from a malformed date
+    return wl;
+  } catch (_) { return null; }
+}
+
 const CORRELATED_GROUPS = [
   ['NAS100', 'US30', 'SPX500'],
   ['BTCUSD', 'ETHUSD', 'SOLUSD', 'ADAUSD', 'XRPUSD', 'BNBUSD', 'LTCUSD'],
@@ -501,16 +517,12 @@ export async function attemptInlineTrade(setup) {
   const parentSym = SIBLING_BIAS[setup.label];
   if (parentSym) {
     try {
-      const WATCHLIST_FILE = join(DATA_ROOT, 'daily_watchlist.json');
-      if (existsSync(WATCHLIST_FILE)) {
-        const wl = JSON.parse(readFileSync(WATCHLIST_FILE, 'utf8'));
-        const today = new Date().toISOString().slice(0, 10);
-        if (wl.date === today && Array.isArray(wl.instruments)) {
-          const parent = wl.instruments.find(i => i.label === parentSym);
-          if (parent && parent.biasDir && parent.biasDir !== setup.dir) {
-            log(`${setup.label} ${setup.dir} rejected — ${parentSym} daily bias is ${parent.biasDir} (sibling-bias gate). Skip.`);
-            return;
-          }
+      const wl = loadWatchlistTolerant();
+      if (wl) {
+        const parent = wl.instruments.find(i => i.label === parentSym);
+        if (parent && parent.biasDir && parent.biasDir !== setup.dir) {
+          log(`${setup.label} ${setup.dir} rejected — ${parentSym} daily bias is ${parent.biasDir} (sibling-bias gate). Skip.`);
+          return;
         }
       }
     } catch (e) { log(`${parentSym} bias check error: ${e.message} (continuing — fail-open)`); }
@@ -524,17 +536,13 @@ export async function attemptInlineTrade(setup) {
   // can be disabled; fail-open if the watchlist is missing/stale.
   if (PARAMS.requireWithTrendBias) {
     try {
-      const WL_FILE = join(DATA_ROOT, 'daily_watchlist.json');
-      if (existsSync(WL_FILE)) {
-        const wl = JSON.parse(readFileSync(WL_FILE, 'utf8'));
-        const today = new Date().toISOString().slice(0, 10);
-        if (wl.date === today && Array.isArray(wl.instruments)) {
-          const inst = wl.instruments.find(i => i.label === setup.label);
-          const minBias = PARAMS.minBiasScore ?? 4;
-          if (inst && inst.biasDir && (inst.biasScore ?? 0) >= minBias && inst.biasDir !== setup.dir) {
-            log(`Counter-trend: ${setup.label} ${setup.dir} fights daily bias ${inst.biasDir} (score ${inst.biasScore} ≥ ${minBias}). Skip.`);
-            return;
-          }
+      const wl = loadWatchlistTolerant();
+      if (wl) {
+        const inst = wl.instruments.find(i => i.label === setup.label);
+        const minBias = PARAMS.minBiasScore ?? 4;
+        if (inst && inst.biasDir && (inst.biasScore ?? 0) >= minBias && inst.biasDir !== setup.dir) {
+          log(`Counter-trend: ${setup.label} ${setup.dir} fights daily bias ${inst.biasDir} (score ${inst.biasScore} ≥ ${minBias}). Skip.`);
+          return;
         }
       }
     } catch (e) { log(`with-trend bias gate error: ${e.message} (fail-open)`); }

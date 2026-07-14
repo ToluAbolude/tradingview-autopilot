@@ -12,6 +12,10 @@
  * Phase 2 (ranking): instruments WITH an AutoTL trend are scored by
  *          runAllStrategies in that direction only (H4×180) — the score ranks
  *          conviction and sets tiers, it can no longer flip the direction.
+ *          Plus zone proximity (2026-07-14): distance from price to the nearest
+ *          S/R zone on the entry side of the bias, in ATRs — ≤1.0 ATR = +2,
+ *          ≤1.75 ATR = +1 on rankScore. "Close to an area of interest" outranks
+ *          "trending but mid-air"; biasScore itself stays pure confluence.
  * Phase 3: Write data/daily_watchlist.json — consumed by setup_finder + session_runner.
  *
  * The full 7-TF deep scan (market_scanner) runs only on these instruments throughout the day,
@@ -22,6 +26,7 @@ import { join } from 'path';
 import os from 'os';
 import {
   setChart, getBars, waitForBars, runAllStrategies, autoTrendlineTrend,
+  buildSRZones, calcATR,
 } from './setup_finder.mjs';
 
 const IS_LINUX   = os.platform() === 'linux';
@@ -150,18 +155,54 @@ async function main() {
       const bestR   = runAllStrategies(bars, bestDir, utcHour, inst.label, SCAN_TF);
       const bestScore = bestR.score;
 
+      // ── Area of interest: distance to the nearest S/R zone on the entry side ──
+      // A strong trend far from any level = chasing; price within ~1-1.75 ATR of
+      // a zone in the bias direction is where Trend+Level+Signal can actually
+      // fire. Long → support below/at price (incl. flipped resistance); short →
+      // mirror image. The bonus feeds rankScore only — biasScore keeps its raw
+      // confluence meaning for downstream gates (inline_trader minBiasScore).
+      const atrArr = calcATR(bars);
+      const atrVal = atrArr[bars.length - 1] || 0;
+      const price  = bars[bars.length - 1].c;
+      let zoneDistATR = null, zoneLevel = null;
+      if (atrVal > 0) {
+        const geom = buildSRZones(bars, atrArr);
+        const wantType = bestDir === 'long' ? 'support' : 'resistance';
+        const candidates = [
+          ...geom.active.filter(z => z.type === wantType),
+          ...geom.flipped.filter(z => z.type !== wantType), // broken + flipped = acts as the other side now
+        ];
+        for (const z of candidates) {
+          const lo = Math.min(z.wickTip, z.bodyLevel), hi = Math.max(z.wickTip, z.bodyLevel);
+          let d;
+          if (price >= lo && price <= hi) d = 0;
+          else if (bestDir === 'long'  && price > hi) d = (price - hi) / atrVal;
+          else if (bestDir === 'short' && price < lo) d = (lo - price) / atrVal;
+          else continue; // zone on the wrong side of price for this bias
+          if (zoneDistATR === null || d < zoneDistATR) { zoneDistATR = d; zoneLevel = bestDir === 'long' ? hi : lo; }
+        }
+      }
+      const zoneBonus = zoneDistATR === null ? 0 : zoneDistATR <= 1.0 ? 2 : zoneDistATR <= 1.75 ? 1 : 0;
+      const zoneNote  = zoneDistATR === null
+        ? 'no active zone on entry side'
+        : `nearest ${bestDir === 'long' ? 'support' : 'resistance'} ${zoneLevel} @ ${zoneDistATR.toFixed(1)} ATR${zoneBonus ? ` (+${zoneBonus})` : ''}`;
+
       scored.push({
         ...inst,
         biasDir:    bestDir,
         biasScore:  bestScore,
+        rankScore:  bestScore + zoneBonus,
+        zoneDistATR: zoneDistATR === null ? null : +zoneDistATR.toFixed(2),
+        zoneLevel,
+        zoneBonus,
         longScore:  bestDir === 'long'  ? bestScore : null,
         shortScore: bestDir === 'short' ? bestScore : null,
-        reasons:    `AutoTL 4H: ${trend.detail}; ` + bestR.reasons.slice(0, 3).join('; '),
+        reasons:    `AutoTL 4H: ${trend.detail}; ${zoneNote}; ` + bestR.reasons.slice(0, 3).join('; '),
         atr:        bestR.atrVal || null,
       });
 
-      const tag = bestScore >= MIN_SCORE ? '✓' : '~';
-      process.stdout.write(`  ${tag} ${inst.label}: ${bestDir.toUpperCase()} ${bestScore} — AutoTL 4H ${trend.detail}\n`);
+      const tag = bestScore + zoneBonus >= MIN_SCORE ? '✓' : '~';
+      process.stdout.write(`  ${tag} ${inst.label}: ${bestDir.toUpperCase()} ${bestScore}${zoneBonus ? `+${zoneBonus}z` : ''} — AutoTL 4H ${trend.detail}; ${zoneNote}\n`);
 
     } catch (e) {
       errored.push(inst.label);
@@ -174,20 +215,22 @@ async function main() {
   // empty-but-today-dated watchlist then looks "valid" downstream: setup_finder
   // falls back to the full scan list AND requireWithTrendBias fail-opens for the
   // whole day (2026-07-10 incident). If nothing was readable, keep the previous
-  // watchlist file and fail the cron loudly instead.
+  // watchlist file and fail the cron loudly instead — downstream consumers now
+  // accept that file up to 3 days old (loadDailyWatchlist), so a failed morning
+  // run degrades to "yesterday's bias" rather than "scan everything blind".
   if (scored.length + noTrend + unavailable.length === 0) {
     throw new Error(`0/${INSTRUMENT_UNIVERSE.length} instruments readable (${errored.length} errored) — CDP likely wedged; keeping previous watchlist`);
   }
 
-  // Sort by score descending
-  scored.sort((a, b) => b.biasScore - a.biasScore);
+  // Sort by rank score (confluence + zone-proximity bonus) descending
+  scored.sort((a, b) => b.rankScore - a.rankScore);
 
   // Pick top N respecting category diversification limits
   const catCounts  = { forex: 0, index: 0, commodity: 0, crypto: 0 };
   const shortlisted = [];
 
   for (const inst of scored) {
-    if (inst.biasScore < MIN_SCORE) break;
+    if (inst.rankScore < MIN_SCORE) break;
     if (shortlisted.length >= TOP_N) break;
     const cat = inst.category;
     if ((catCounts[cat] || 0) >= (CATEGORY_MAX[cat] || 99)) continue;
@@ -197,7 +240,7 @@ async function main() {
 
   log(`\n── Selected ${shortlisted.length} instruments for today ──`);
   shortlisted.forEach((inst, i) => {
-    log(`  ${String(i+1).padStart(2)}. [${inst.category.toUpperCase().slice(0,3)}] ${inst.label.padEnd(8)} ${inst.biasDir.toUpperCase().padEnd(5)} score=${inst.biasScore}  ${inst.reasons}`);
+    log(`  ${String(i+1).padStart(2)}. [${inst.category.toUpperCase().slice(0,3)}] ${inst.label.padEnd(8)} ${inst.biasDir.toUpperCase().padEnd(5)} score=${inst.biasScore}${inst.zoneBonus ? `+${inst.zoneBonus}z` : ''}  ${inst.reasons}`);
   });
 
   if (unavailable.length) {
@@ -212,10 +255,13 @@ async function main() {
     category:  inst.category,
     biasDir:   inst.biasDir,
     biasScore: inst.biasScore,
+    rankScore: inst.rankScore,
+    zoneDistATR: inst.zoneDistATR,
+    zoneLevel:   inst.zoneLevel,
     reasons:   inst.reasons,
     tfs:       ALL_TFS,
     autoShort: true,
-    tier:      inst.biasScore >= 6 ? 1 : inst.biasScore >= 5 ? 2 : 3,
+    tier:      inst.rankScore >= 6 ? 1 : inst.rankScore >= 5 ? 2 : 3,
   }));
 
   const watchlist = {
@@ -223,7 +269,7 @@ async function main() {
     generatedAt:   new Date().toISOString(),
     scanTF:        `AutoTL 4H ×${SCAN_BARS}`,
     totalScanned:  INSTRUMENT_UNIVERSE.length,
-    eligible:      scored.filter(s => s.biasScore >= MIN_SCORE).length,
+    eligible:      scored.filter(s => s.rankScore >= MIN_SCORE).length,
     unavailable:   unavailable.length,
     errors:        errored.length,
     instruments,
