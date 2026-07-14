@@ -124,6 +124,7 @@ async function main() {
   const utcHour = new Date().getUTCHours();
   const scored  = [];
   const unavailable = [];
+  const errored = [];
   let noTrend = 0;
 
   for (const inst of INSTRUMENT_UNIVERSE) {
@@ -163,10 +164,20 @@ async function main() {
       process.stdout.write(`  ${tag} ${inst.label}: ${bestDir.toUpperCase()} ${bestScore} — AutoTL 4H ${trend.detail}\n`);
 
     } catch (e) {
+      errored.push(inst.label);
       log(`  ✗ ${inst.label}: ${e.message}`);
     }
   }
-  log(`AutoTL 4H trend found on ${scored.length} instruments; ${noTrend} with no validated trend; ${unavailable.length} unavailable.`);
+  log(`AutoTL 4H trend found on ${scored.length} instruments; ${noTrend} with no validated trend; ${unavailable.length} unavailable; ${errored.length} errored.`);
+
+  // A wedged CDP tab (Runtime.enable timeout) errors EVERY instrument. Writing an
+  // empty-but-today-dated watchlist then looks "valid" downstream: setup_finder
+  // falls back to the full scan list AND requireWithTrendBias fail-opens for the
+  // whole day (2026-07-10 incident). If nothing was readable, keep the previous
+  // watchlist file and fail the cron loudly instead.
+  if (scored.length + noTrend + unavailable.length === 0) {
+    throw new Error(`0/${INSTRUMENT_UNIVERSE.length} instruments readable (${errored.length} errored) — CDP likely wedged; keeping previous watchlist`);
+  }
 
   // Sort by score descending
   scored.sort((a, b) => b.biasScore - a.biasScore);
@@ -214,6 +225,7 @@ async function main() {
     totalScanned:  INSTRUMENT_UNIVERSE.length,
     eligible:      scored.filter(s => s.biasScore >= MIN_SCORE).length,
     unavailable:   unavailable.length,
+    errors:        errored.length,
     instruments,
   };
 

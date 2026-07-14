@@ -18,6 +18,11 @@ _Last updated: 2026-06-28_
 
 > Supersedes the 2026-06-11 block below. The whole stack was migrated to a new VM, and a
 > **per-strategy experiment** + a **Notion trade journal** were added.
+>
+> **Performance scorecard:** every trade decision-maker is graded against trading standards
+> (PF/expectancy/drawdown bands, backtest baselines, run-over-run deltas) in
+> [STRATEGY_BENCHMARK.md](STRATEGY_BENCHMARK.md) — re-run via
+> `strategy_benchmark.mjs` (confirm/scanner/report phases on the VM).
 
 ### Infrastructure — new VM
 
