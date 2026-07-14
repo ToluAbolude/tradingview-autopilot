@@ -153,7 +153,7 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 - `/etc/systemd/system/tv_browser.service` — Chromium + Xvfb launch config (display :99, CDP 9222)
 - `/etc/systemd/system/x11vnc.service` — VNC server for display :99 (localhost:5900)
 - `~/.ctrader_confirm.env` / `~/.ctrader.env` / `~/.notion.env` — broker + Notion secrets (chmod 600, never in repo)
-- `/home/ubuntu/trading-data/scanner.log` — Live scanner output
+- `/home/ubuntu/trading-data/market_scanner.log` — Live scanner output
 - `/home/ubuntu/trading-data/confirm_signals.jsonl` — Per-strategy experiment signals/trades
 
 ### Key files on local PC
