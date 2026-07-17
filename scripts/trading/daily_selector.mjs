@@ -26,7 +26,7 @@ import { join } from 'path';
 import os from 'os';
 import {
   setChart, getBars, waitForBars, runAllStrategies, autoTrendlineTrend,
-  buildSRZones, calcATR,
+  buildSRZones, calcATR, fetchBarsResilient,
 } from './setup_finder.mjs';
 
 const IS_LINUX   = os.platform() === 'linux';
@@ -93,16 +93,23 @@ const INSTRUMENT_UNIVERSE = [
   { sym: 'BLACKBULL:UK100',   label: 'UK100',   category: 'index'     },
   { sym: 'BLACKBULL:GER40',   label: 'GER40',   category: 'index'     },
   { sym: 'BLACKBULL:AUS200',  label: 'AUS200',  category: 'index'     },
-  { sym: 'BLACKBULL:JP225',   label: 'JP225',   category: 'index'     },
+  // TV ticker is JPN225 (BLACKBULL:JP225 = "no data"); label stays JP225 —
+  // every index-classification regex and profile key downstream matches JP225,
+  // and the cTrader bridge aliases both spellings to its JPN225.
+  { sym: 'BLACKBULL:JPN225',  label: 'JP225',   category: 'index'     },
   { sym: 'BLACKBULL:HK50',    label: 'HK50',    category: 'index'     },
-  { sym: 'BLACKBULL:EUSTX50', label: 'EUSTX50', category: 'index'     },
+  // TV ticker is ESTX50 (BLACKBULL:EUSTX50 = "no data"); label stays EUSTX50
+  // for the downstream index-classification regexes; bridge aliases to ESTX50.
+  { sym: 'BLACKBULL:ESTX50',  label: 'EUSTX50', category: 'index'     },
 
   // COMMODITIES
   { sym: 'BLACKBULL:XAUUSD',  label: 'XAUUSD',  category: 'commodity' },
   { sym: 'BLACKBULL:XAGUSD',  label: 'XAGUSD',  category: 'commodity' },
   { sym: 'BLACKBULL:WTI',     label: 'WTI',     category: 'commodity' },
   { sym: 'BLACKBULL:BRENT',   label: 'BRENT',   category: 'commodity' },
-  { sym: 'BLACKBULL:NGAS',    label: 'NGAS',    category: 'commodity' },
+  // TV ticker is NGAS.F, the futures continuous (BLACKBULL:NGAS = "no data";
+  // no BLACKBULL cash gas ticker on TV); cTrader trades it as NATGAS (aliased).
+  { sym: 'BLACKBULL:NGAS.F',  label: 'NGAS',    category: 'commodity' },
   { sym: 'BLACKBULL:COPPER',  label: 'COPPER',  category: 'commodity' },
   { sym: 'BLACKBULL:XPTUSD',  label: 'XPTUSD',  category: 'commodity' },
 
@@ -115,7 +122,8 @@ const INSTRUMENT_UNIVERSE = [
   { sym: 'BLACKBULL:SOLUSD',  label: 'SOLUSD',  category: 'crypto'    },
   { sym: 'BLACKBULL:ADAUSD',  label: 'ADAUSD',  category: 'crypto'    },
   { sym: 'BLACKBULL:DOTUSD',  label: 'DOTUSD',  category: 'crypto'    },
-  { sym: 'BLACKBULL:LINKUSD', label: 'LINKUSD', category: 'crypto'    },
+  // LINKUSD removed 2026-07-17: BlackBull doesn't offer Chainlink at all —
+  // BLACKBULL:LINKUSD is a TV 404 and it's absent from the cTrader account.
   { sym: 'BLACKBULL:AVAXUSD', label: 'AVAXUSD', category: 'crypto'    },
 ];
 
@@ -135,13 +143,15 @@ async function main() {
   for (const inst of INSTRUMENT_UNIVERSE) {
     try {
       // ── Trend: AutoTL on 4H only (operator directive) ──────────────────────
-      await setChart(inst.sym, SCAN_TF);
-      const bars = await waitForBars(SCAN_BARS, MIN_BARS, 3, 700);
-      if (!bars || bars.length < MIN_BARS) {
-        unavailable.push(inst.label);
-        process.stdout.write(`  ✗ ${inst.label}: no data\n`);
-        continue;
-      }
+      // fetchBarsResilient: chart bars normally, cTrader trendbars when Chrome
+      // is down — a wedged CDP morning no longer forfeits the day's watchlist.
+      // A total failure (both sources) throws to the outer catch → errored[],
+      // which keeps the 2026-07-10 "0 readable → keep previous file" guard
+      // meaningful. Symbols simply absent from the broker land there too now
+      // (the JSON's `unavailable` count goes cosmetic-only — acceptable).
+      const r = await fetchBarsResilient(inst, SCAN_TF, SCAN_BARS, MIN_BARS);
+      const bars = r.bars;
+      if (r.source === 'broker') process.stdout.write(`  [broker bars] ${inst.label}\n`);
 
       const trend = autoTrendlineTrend(bars);
       if (!trend.dir) {

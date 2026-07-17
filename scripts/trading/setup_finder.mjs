@@ -208,6 +208,60 @@ const PER_TF_BARS = {
   'W':   { req: 250, min: 200 },
 };
 
+// ── Resilient bar source (2026-07-17) ─────────────────────────────────────────
+// The 07-15/16 Chrome outage proved the chart is the scanner's only fragile
+// dependency: runAllStrategies is a pure function of the bars array, so the
+// SAME decisions come out of broker candles. SCANNER_BARS picks the source:
+//   chart  — CDP chart tab only (pre-2026-07-17 behavior)
+//   broker — cTrader trendbars only (no Chrome needed at all)
+//   auto   — chart first, broker fallback on any chart failure (default)
+// Broker bars are normalized to the chart-bar shape: t in unix SECONDS
+// (buildDailyContext and friends assume seconds; getTrendbars returns ms).
+// Caveat: TV and cTrader feeds are the same broker but not bit-identical —
+// bar boundaries/volume can differ slightly, so near-threshold votes may
+// occasionally flip between sources. The scan log tags fallback fetches.
+const BARS_SOURCE   = (process.env.SCANNER_BARS || 'auto').toLowerCase();
+const TF_TO_PERIOD  = { '1': 'M1', '5': 'M5', '15': 'M15', '30': 'M30', '60': 'H1', '240': 'H4', 'D': 'D1', 'W': 'W1' };
+const TF_MINUTES    = { '1': 1, '5': 5, '15': 15, '30': 30, '60': 60, '240': 240, 'D': 1440, 'W': 10080 };
+let _brokerBridge = null;
+
+export async function getBrokerBars(label, tf, count = 250) {
+  const period = TF_TO_PERIOD[tf];
+  if (!period) throw new Error(`no broker period for TF ${tf}`);
+  if (!_brokerBridge) _brokerBridge = await import('./broker_ctrader.mjs');
+  // Window wide enough to cover `count` bars incl. weekends/closed hours:
+  // intraday FX runs ~24/5 (×2.5 covers weekends), D has weekend gaps (×1.6),
+  // W has none (×1.1).
+  const mult   = tf === 'W' ? 1.1 : tf === 'D' ? 1.6 : 2.5;
+  const spanMs = Math.ceil(count * TF_MINUTES[tf] * 60000 * mult);
+  const bars = await _brokerBridge.getTrendbars(label, {
+    period,
+    fromMs: Date.now() - spanMs,
+    windowDays: Math.max(5, Math.ceil(spanMs / 86400000)),
+  });
+  return bars.slice(-count).map(b => ({ ...b, t: Math.floor(b.t / 1000) }));
+}
+
+// Drop-in replacement for the setChart+waitForBars pair. Returns
+// { bars, source } or throws when neither source can deliver `min` bars.
+export async function fetchBarsResilient(inst, tf, req, min) {
+  let chartErr = null;
+  if (BARS_SOURCE !== 'broker') {
+    try {
+      await setChart(inst.sym, tf);
+      const bars = await waitForBars(req, min);
+      if (bars && bars.length >= min) return { bars, source: 'chart' };
+      chartErr = new Error(`chart bars short: ${bars?.length ?? 0} < ${min}`);
+    } catch (e) { chartErr = e; }
+    if (BARS_SOURCE === 'chart') throw chartErr;
+  }
+  const bars = await getBrokerBars(inst.label, tf, req);
+  if (!bars || bars.length < min) {
+    throw new Error(`both sources failed for ${inst.label}/${tf}: chart=${chartErr?.message ?? 'skipped'}, broker=${bars?.length ?? 0} bars < ${min}`);
+  }
+  return { bars, source: 'broker' };
+}
+
 // TF display labels and confluence weights (higher TF = more signal weight, less noise)
 const TF_LABEL  = { '1':'1M', '5':'5M', '15':'15M', '30':'30M', '60':'1H', '240':'4H', 'D':'D', 'W':'W' };
 const TF_WEIGHT = Object.keys(TFW).length > 0
@@ -1553,24 +1607,25 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
     // ── Pass 1: scan every TF, collect any that pass threshold ──────────────
     process.stdout.write(`  [T${inst.tier}] ${inst.label} `);
 
-    let instrumentBroken = false;
     for (const tf of inst.tfs) {
-      if (instrumentBroken) break;
       process.stdout.write(`${TF_LABEL[tf]||tf}:`);
-      // Isolate per-TF errors so a single CDP timeout (e.g. Runtime.enable
-      // exceeded 8000ms) doesn't kill the entire scan cycle. Skip the rest of
-      // this instrument and move on.
+      // Chart failures fall back to broker bars (fetchBarsResilient) — a dead
+      // Chrome no longer blinds the scanner. When BOTH sources fail for a TF
+      // (commonly thin W/D history on exotics — HK50 weekly has neither), skip
+      // just that TF like the old short-bars path. The old instrumentBroken
+      // fast-bail existed for wedged-CDP cycles; with the broker fallback a
+      // wedged CDP degrades gracefully instead, so it's gone.
       let bars = null;
       try {
-        await setChart(inst.sym, tf);
         // Uniform latest-250 window per operator rule — too much history dilutes
         // the current trend; too little starves the EMAs. See PER_TF_BARS map.
         const { req, min } = PER_TF_BARS[tf] || { req: 250, min: 200 };
-        bars = await waitForBars(req, min);
+        const r = await fetchBarsResilient(inst, tf, req, min);
+        bars = r.bars;
+        if (r.source === 'broker') process.stdout.write('b');
       } catch (e) {
-        process.stdout.write(`!${(e.message || 'err').slice(0, 12)} `);
+        process.stdout.write(`?${(e.message || 'err').slice(0, 12)} `);
         skipped.push(`${inst.label}/${tf}/${e.message}`);
-        instrumentBroken = true;
         continue;
       }
 
@@ -1607,20 +1662,27 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       byDir[c.dir].push(c);
     }
 
-    await setChart(inst.sym, '15');
-    // Pass-2 15M entry calc — use the same per-TF profile as the scan loop
-    const { req: bars15Req, min: bars15Min } = PER_TF_BARS['15'];
-    const bars15 = await waitForBars(bars15Req, bars15Min);
+    // Pass-2 15M entry calc — same per-TF profile as the scan loop, same
+    // chart→broker fallback (these fetches used to sit outside any try/catch,
+    // so one CDP failure here killed the whole scan cycle).
+    let bars15 = null, bars60 = null;
+    try {
+      const { req: bars15Req, min: bars15Min } = PER_TF_BARS['15'];
+      bars15 = (await fetchBarsResilient(inst, '15', bars15Req, bars15Min)).bars;
 
-    // H1 bars for RISK GEOMETRY (2026-07-07): entry timing stays on the 15M
-    // trigger, but SL/TP are built from H1 structure. 15M ATR stops sat inside
-    // spread/noise (under the broker minSlFrac floors — 5/7 signals rejected in
-    // one executor run) and 15M targets couldn't pay 2R against a floored stop.
-    // H1 ATR ≈ 2× 15M ATR, so stops clear the floors on merit and sit behind
-    // zones that have a reason to hold.
-    await setChart(inst.sym, '60');
-    const { req: bars60Req, min: bars60Min } = PER_TF_BARS['60'];
-    const bars60 = await waitForBars(bars60Req, bars60Min);
+      // H1 bars for RISK GEOMETRY (2026-07-07): entry timing stays on the 15M
+      // trigger, but SL/TP are built from H1 structure. 15M ATR stops sat inside
+      // spread/noise (under the broker minSlFrac floors — 5/7 signals rejected in
+      // one executor run) and 15M targets couldn't pay 2R against a floored stop.
+      // H1 ATR ≈ 2× 15M ATR, so stops clear the floors on merit and sit behind
+      // zones that have a reason to hold.
+      const { req: bars60Req, min: bars60Min } = PER_TF_BARS['60'];
+      bars60 = (await fetchBarsResilient(inst, '60', bars60Req, bars60Min)).bars;
+    } catch (e) {
+      process.stdout.write(`\n  → entry-TF fetch failed for ${inst.label}: ${e.message}\n`);
+      skipped.push(`${inst.label}/entry/${e.message}`);
+      continue;
+    }
 
     for (const [dir, cands] of Object.entries(byDir)) {
       if (!bars15) {

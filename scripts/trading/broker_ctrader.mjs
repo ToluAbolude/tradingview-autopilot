@@ -243,9 +243,13 @@ const _symbolIdMap = new Map();   // name -> id (populated from light list)
 // Scanner uses TradingView symbol names (e.g. GER40, JP225). BlackBull cTrader
 // demo carries some of these under different names — translate on lookup so
 // callers don't need to know.
+// Verified against the live account symbol list 2026-07-17 (98+ symbols probed
+// by exact name). GER40 has NO cTrader equivalent on this account (GER30/DE40/
+// DAX all absent — chart-only symbol); the old GER40→GER30 alias was stale.
 const CTRADER_NAME_MAP = {
-  GER40: 'GER30',
-  JP225: 'JPN225',
+  JP225:   'JPN225',
+  EUSTX50: 'ESTX50',
+  NGAS:    'NATGAS',
 };
 // Reverse map (cTrader name -> TradingView/scanner name) for resolving a
 // position's symbolId back to the name the scanner + trades.csv use.
@@ -254,7 +258,10 @@ const CTRADER_NAME_REV = Object.fromEntries(
 );
 // Symbols we know are NOT carried by cTrader on this account. Throwing a
 // recognizable error keeps the inline_trader's fallback-to-TV-DOM logic clean.
-const CTRADER_UNSUPPORTED = new Set(['HK50']);
+// HK50 removed 2026-07-17: the CURRENT account carries it (id 4765) — the
+// hardcoded block was stale from the old account. GER40/COPPER/LINKUSD are
+// genuinely absent but need no entry: the name lookup fails accurately.
+const CTRADER_UNSUPPORTED = new Set([]);
 
 async function _loadSymbolList() {
   if (_symbolIdMap.size > 0) return;

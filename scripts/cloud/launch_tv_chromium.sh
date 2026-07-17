@@ -75,12 +75,21 @@ CHROMIUM_PID=$!
 echo "[launch] Chromium PID: $CHROMIUM_PID"
 
 # --- Wait for CDP to become ready --------------------------------------------
+# 120s deadline: under restart churn a cold snap-chromium start on this ARM box
+# can take well over 30s — the old 30s cutoff created a LIVELOCK (2026-07-15/16:
+# 96 watchdog restarts/day; every start was killed as "not ready" while still
+# booting, and the churn kept the next start just as slow; scanner blind for two
+# days). Bail out early only if the Chromium process itself has died.
 echo "[launch] Waiting for CDP to become available..."
-MAX_WAIT=30
+MAX_WAIT=120
 COUNT=0
 until curl -sf "http://127.0.0.1:$TV_CDP_PORT/json/version" > /dev/null 2>&1; do
     sleep 2
     COUNT=$((COUNT + 2))
+    if ! kill -0 $CHROMIUM_PID 2>/dev/null; then
+        echo "[launch] ERROR: Chromium process died after ${COUNT}s (see chromium.log)"
+        exit 1
+    fi
     if [ $COUNT -ge $MAX_WAIT ]; then
         echo "[launch] ERROR: CDP not ready after ${MAX_WAIT}s"
         exit 1
