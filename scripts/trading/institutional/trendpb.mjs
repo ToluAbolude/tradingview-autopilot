@@ -11,6 +11,10 @@ export const SL_ATR_MULT = 2.0;
 export const R_MULTIPLE = 2;
 export const PULLBACK_WINDOW_D = 5; // pullback touch must be within last 5 D1 bars
 export const EXTREME_LOOKBACK_D = 20;
+// Family A redesign cycle 2: retraces deeper than 50% of the 20d range are
+// treated as reversal risk, not pullbacks (house fib backtest: ≥61.8% depth
+// discriminates reversal; 50% is the conservative side of that finding).
+export const MAX_PULLBACK_DEPTH = 0.5;
 
 /**
  * Unanimous multi-lookback trend (SPEC: |mean of signs| = 1).
@@ -56,7 +60,13 @@ export function detectPullback({ d1Bars, direction }) {
   const pullbackExtreme = direction === 'long'
     ? Math.min(...window.map(b => b.l))
     : Math.max(...window.map(b => b.h));
-  return { inPullback: touched, pullbackExtreme, atr: a, ema: e };
+  // depth of the retrace relative to the 20d range (0 = none, 1 = full give-back)
+  const ref20 = d1Bars.slice(-EXTREME_LOOKBACK_D);
+  const hi = Math.max(...ref20.map(b => b.h)), lo = Math.min(...ref20.map(b => b.l));
+  const depth = hi > lo
+    ? (direction === 'long' ? (hi - pullbackExtreme) : (pullbackExtreme - lo)) / (hi - lo)
+    : 1;
+  return { inPullback: touched, pullbackExtreme, depth, atr: a, ema: e };
 }
 
 /**
@@ -83,6 +93,7 @@ export function computeTrendPbSignal({ d1Bars, h4Bars }) {
 
   const pb = detectPullback({ d1Bars, direction: ts.direction });
   if (!pb.inPullback) return { status: 'no_pullback', direction: ts.direction, reason: pb.reason };
+  if (pb.depth > MAX_PULLBACK_DEPTH) return { status: 'pullback_too_deep', direction: ts.direction, depth: pb.depth };
 
   const rs = detectResumption({ h4Bars, direction: ts.direction });
   if (!rs.resumed) return { status: 'no_resumption', direction: ts.direction };

@@ -13,11 +13,21 @@ import { computeTrendPbSignal, trendScore, LOOKBACKS_D } from './trendpb.mjs';
 import { computeMetrics, splitFolds, gradeStage1 } from './metrics.mjs';
 
 const DAY = 86400_000;
-const SMORB_SYMBOLS = ['XAUUSD', 'US30', 'NAS100', 'SPX500', 'BTCUSD', 'ETHUSD'];
+const SMORB_SYMBOLS = [
+  'XAUUSD', 'US30', 'NAS100', 'SPX500', 'BTCUSD', 'ETHUSD',
+  // Widened universe (FINDINGS §4) — cross-sectional OOS: the frozen config
+  // (relVol>=1.5, costR<=0.2, natural session) never saw these symbols.
+  'UK100', 'JP225', 'AUS200', 'EUSTX50', 'FRA40', 'GER40', 'HK50',
+];
+// Family A redesign cycle 2 (FINAL): majors + gold only — deepest history,
+// lowest measured costs; wide crosses, short-history indices and pricey crypto
+// dropped. (Fetch still caches the full list for paper/fidelity use.)
 const TREND_SYMBOLS = [
   'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'NZDUSD', 'USDCAD', 'USDCHF',
-  'EURGBP', 'GBPJPY', 'AUDJPY', 'EURJPY', 'NZDCAD', 'GBPNZD',
-  'XAUUSD', 'US30', 'NAS100', 'SPX500', 'BTCUSD', 'ETHUSD',
+  'EURGBP', 'GBPJPY', 'AUDJPY', 'EURJPY', 'XAUUSD',
+];
+const FETCH_TREND_SYMBOLS = [
+  ...TREND_SYMBOLS, 'NZDCAD', 'GBPNZD', 'US30', 'NAS100', 'SPX500', 'BTCUSD', 'ETHUSD',
 ];
 const M5_YEARS = 3, DEEP_YEARS = 6;
 const CACHE_DIR = process.env.IA_CACHE_DIR
@@ -29,7 +39,19 @@ const SWAP_BPS_PER_NIGHT = sym =>
   ['BTCUSD', 'ETHUSD'].includes(sym) ? 3 : ['US30', 'NAS100', 'SPX500'].includes(sym) ? 2 : 1;
 
 const cachePath = (sym, tf) => path.join(CACHE_DIR, `${sym}_${tf}.json`);
-const loadBars = (sym, tf) => JSON.parse(fs.readFileSync(cachePath(sym, tf), 'utf8'));
+// Sanity filter: the feed can contain mis-scaled bars (seen live: NZDCAD H4 bar
+// opening at 23.1 on a 0.81 pair → one fake −763R trade). Drop non-positive
+// prices and bars opening >50% away from the previous close.
+function saneBars(bars) {
+  const out = []; let prev = null;
+  for (const b of bars) {
+    if (!(b.o > 0 && b.h > 0 && b.l > 0 && b.c > 0 && b.h >= b.l)) continue;
+    if (prev && (b.o > prev.c * 1.5 || b.o < prev.c * 0.5)) continue;
+    out.push(b); prev = b;
+  }
+  return out;
+}
+const loadBars = (sym, tf) => saneBars(JSON.parse(fs.readFileSync(cachePath(sym, tf), 'utf8')));
 const isSaturdayUtc = ms => new Date(ms).getUTCDay() === 6;
 
 // ---------------- fetch phase (VM) ----------------
@@ -38,7 +60,7 @@ async function fetchPhase() {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   const jobs = [];
   for (const s of SMORB_SYMBOLS) jobs.push([s, 'M5', M5_YEARS]);
-  for (const s of TREND_SYMBOLS) { jobs.push([s, 'H4', DEEP_YEARS]); jobs.push([s, 'D1', DEEP_YEARS]); }
+  for (const s of FETCH_TREND_SYMBOLS) { jobs.push([s, 'H4', DEEP_YEARS]); jobs.push([s, 'D1', DEEP_YEARS]); }
   for (const [sym, tf, years] of jobs) {
     const p = cachePath(sym, tf);
     if (fs.existsSync(p)) { console.log(`skip ${sym} ${tf} (cached)`); continue; }
@@ -54,10 +76,13 @@ async function fetchPhase() {
 }
 
 // ---------------- SMORB simulation ----------------
+// Family B redesign cycle 1: every SMORB symbol is evaluated at EVERY session —
+// the in-play gate (not a fixed assignment) decides which symbol-session-days
+// trade. IS analysis showed the edge is dose-dependent in relVol; more candidate
+// sessions buy sample size at strict gates.
 function sessionOpensFor(sym, dayStartMs) {
   const opens = [];
   for (const s of SESSIONS) {
-    if (!s.symbols.includes(sym)) continue;
     if (s.openUTC) {
       const [hh, mm] = s.openUTC.split(':').map(Number);
       opens.push({ name: s.name, openMs: dayStartMs + (hh * 60 + mm) * 60_000 });
@@ -84,9 +109,13 @@ function runSmorb() {
       byDay.get(day).push(b);
     }
     const days = [...byDay.keys()].sort((a, b) => a - b);
-    const orHistory = []; // rolling {vol, range} per completed session (per symbol)
+    // OR stats history is PER SESSION — Asia volume norms differ from NY norms;
+    // mixing them would corrupt relVol.
+    const orHistoryBySession = new Map();
     for (const day of days) {
       for (const { name, openMs } of sessionOpensFor(sym, day)) {
+        if (!orHistoryBySession.has(name)) orHistoryBySession.set(name, []);
+        const orHistory = orHistoryBySession.get(name);
         const dayBars = [...(byDay.get(day) || []), ...(byDay.get(day + DAY) || [])]
           .filter(b => b.t >= openMs - DAY && b.t <= openMs + DAY);
         const or = orWindow(dayBars, openMs);
@@ -156,10 +185,28 @@ function runTrendPb() {
       const h4Closed = h4.slice(0, i + 1);
       const sig = computeTrendPbSignal({ d1Bars: d1Closed, h4Bars: h4Closed });
       if (sig.status !== 'signal' || sig.direction !== weekDir.get(fri)) continue;
-      // resolve on subsequent H4 bars — brackets ride nights/weekends (Gate D→B decision)
-      const walk = h4.slice(i + 1);
-      const res = simulateBracket({ bars: walk, direction: sig.direction, entry: sig.entry, sl: sig.sl, tp: sig.tp });
-      if (res.outcome === 'open') continue; // still running at data end — drop
+      // resolve on subsequent H4 bars — brackets ride nights/weekends (Gate D→B
+      // decision) BUT the position follows the SIGNAL: when the weekly trend is
+      // no longer unanimous in the trade's direction, exit at that H4 close.
+      // (Family A redesign cycle 1: the first run held dead theses for 600+
+      // nights of swap because only the bracket could exit.)
+      let res = null;
+      for (let j = i + 1; j < h4.length; j++) {
+        const b = h4[j];
+        const one = simulateBracket({ bars: [b], direction: sig.direction, entry: sig.entry, sl: sig.sl, tp: sig.tp });
+        if (one.outcome !== 'open') { res = one; break; }
+        const fri2 = fridayAsOf(b.t + 4 * 3600_000);
+        if (!weekDir.has(fri2)) {
+          const closes = d1.filter(x => x.t + DAY <= fri2).map(x => x.c);
+          weekDir.set(fri2, trendScore(closes).direction);
+        }
+        if (weekDir.get(fri2) !== sig.direction) {
+          const gross = (sig.direction === 'long' ? b.c - sig.entry : sig.entry - b.c) / Math.abs(sig.entry - sig.sl);
+          res = { outcome: 'flip', exitPrice: b.c, exitTs: b.t, grossR: gross };
+          break;
+        }
+      }
+      if (!res) continue; // still running at data end — drop
       const nights = Math.max(0, Math.floor((res.exitTs - sig.entryTs) / DAY));
       const swapR = (sig.entry * SWAP_BPS_PER_NIGHT(sym) / 10000) * nights / Math.abs(sig.entry - sig.sl);
       candidates.push({

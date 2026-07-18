@@ -96,6 +96,15 @@ Evidence: MOP 2012, Hurst/Ooi/Pedersen 2017 (1/3/12m blend), Baltas-Kosowski 202
 - **Data**: cTrader `getTrendbars` (M5 for SMORB, D1/H4 for TREND-PB) via
   `fetchBarsResilient`; chart/CDP not required (survives Chrome outages).
 
+### Redesign log (charter: max 2 cycles per family)
+
+- **Family A cycle 1 (2026-07-18)**: added **signal-flip exit** — position closes at
+  H4 close when the weekly trend score is no longer unanimous in the trade's
+  direction (first run held dead theses 600+ nights, bleeding swap; positions must
+  follow the signal, per TSMOM practice). Engine also gained a bar-sanity filter
+  after a mis-scaled NZDCAD H4 bar (open 23.1 on a 0.81 pair) fabricated a −763R
+  fill — data hygiene, not a strategy change.
+
 ## 4. Validation plan (walk-forward, pre-registered)
 
 - **Data window**: max available depth per symbol (target ≥ 2022-01 for M5 where the

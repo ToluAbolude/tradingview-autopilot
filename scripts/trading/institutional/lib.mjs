@@ -8,6 +8,10 @@ export const COST_RT_BPS = {
   EURUSD: 2, AUDUSD: 4, NZDUSD: 5, NZDCAD: 4, GBPJPY: 4, AUDJPY: 5,
   USDCHF: 9, GBPUSD: 4, USDJPY: 4, USDCAD: 4, EURGBP: 4, EURJPY: 4,
   GBPNZD: 8, XAUUSD: 6, SPX500: 4, US30: 6, NAS100: 4, BTCUSD: 15, ETHUSD: 20,
+  // Widened index universe (FINDINGS §4) — ASSUMED index-class defaults, no
+  // fills to measure from yet. Any positive result must survive a 1.5× cost
+  // stress before being believed.
+  UK100: 6, JP225: 6, AUS200: 6, EUSTX50: 6, FRA40: 6, GER40: 6, HK50: 8,
 };
 
 export function roundTripCostPrice(symbol, price) {

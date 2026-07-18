@@ -81,6 +81,17 @@ test('computeTrendPbSignal: pullback without resumption stays flat', () => {
   assert.equal(r.status, 'no_resumption');
 });
 
+test('computeTrendPbSignal: retrace deeper than 50% of the 20d range is rejected', () => {
+  const d1 = uptrendD1({ dipLastBars: 3, dipDepth: 8 }); // 20d range ≈ 10 → depth ≈ 0.8
+  const h4 = [
+    { t: 1000, o: 244, h: 245, l: 243.5, c: 244.2 },
+    { t: 1001, o: 244.2, h: 246, l: 244, c: 245.5 },
+  ];
+  const r = computeTrendPbSignal({ d1Bars: d1, h4Bars: h4 });
+  assert.equal(r.status, 'pullback_too_deep');
+  assert.ok(r.depth > 0.5);
+});
+
 test('computeTrendPbSignal: no trend means no evaluation of entries', () => {
   const d1 = uptrendD1({ n: 100 });
   const r = computeTrendPbSignal({ d1Bars: d1, h4Bars: [] });
