@@ -147,6 +147,9 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 | `confirm_runner.mjs` (cron) | Per-strategy experiment, acct 2131377 (4×H1 + ORB/M15) |
 | `trade_notion_sync.mjs` (cron, 10 min) | Logs every trade to Notion with a screenshot |
 | `confirm_weekly_review.mjs` (cron, Fri 21:00) | Per-strategy PASS/WATCH/CUT review → Notion |
+| `ctrader_refresh_cron.sh` (cron, Sun 03:10) | Rotates cTrader OAuth tokens into BOTH env files (~30d expiry, single-use refresh tokens — never rotate one file alone) |
+
+> `tv_browser` launch depends on `loginctl enable-linger ubuntu` (uid **1001**): snap-confine on cgroup-v2 needs the user D-Bus at `/run/user/1001/bus` to start Chromium from the service. If launches die in ~2s with "is not a snap cgroup", check linger first.
 
 ### Key files on VM
 

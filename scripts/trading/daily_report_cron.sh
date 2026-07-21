@@ -16,14 +16,34 @@ cd "${PROJECT_ROOT}" || { echo "[$TS] cd failed" >> "$DAILY_LOG"; exit 99; }
 gen() { ( set -a; . "/home/ubuntu/$1" 2>/dev/null; set +a; export BROKER_PROVIDER=ctrader
           node scripts/trading/daily_trade_report.mjs ); }
 
-EXP_TXT="$(gen .ctrader_confirm.env 2>&1)"; EXP_EXIT=$?; cp -f "$HTML_FILE" /tmp/eod_exp.html 2>/dev/null || true
-SCAN_TXT="$(gen .ctrader.env 2>&1)";        SCAN_EXIT=$?; cp -f "$HTML_FILE" /tmp/eod_scan.html 2>/dev/null || true
+# On generation failure the old behavior copied the PREVIOUS successful run's
+# $HTML_FILE into the email — Fri numbers went out relabeled as Mon/Tue during
+# the 2026-07-19..21 token outage. Now: stale file is removed up front, HTML is
+# attached only from a same-run success, and failures are loud in the subject.
+fail_html() {  # $1 label, $2 exit code, $3 captured output
+  printf '<pre style="font:12px monospace;color:#b91c1c;background:#fef2f2;padding:10px 14px;white-space:pre-wrap">%s report generation FAILED (exit %s) — no numbers shown (a stale report is worse than none).\n\n%s</pre>\n' \
+    "$1" "$2" "$(printf %s "$3" | tail -c 1200 | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g')"
+}
+
+rm -f "$HTML_FILE"
+EXP_TXT="$(gen .ctrader_confirm.env 2>&1)"; EXP_EXIT=$?
+if [ $EXP_EXIT -eq 0 ] && [ -s "$HTML_FILE" ]; then cp -f "$HTML_FILE" /tmp/eod_exp.html
+else fail_html "EXPERIMENT" "$EXP_EXIT" "$EXP_TXT" > /tmp/eod_exp.html; fi
+rm -f "$HTML_FILE"
+SCAN_TXT="$(gen .ctrader.env 2>&1)"; SCAN_EXIT=$?
+if [ $SCAN_EXIT -eq 0 ] && [ -s "$HTML_FILE" ]; then cp -f "$HTML_FILE" /tmp/eod_scan.html
+else fail_html "SCANNER" "$SCAN_EXIT" "$SCAN_TXT" > /tmp/eod_scan.html; fi
 echo "[$TS] exp_exit=$EXP_EXIT scan_exit=$SCAN_EXIT" >> "$DAILY_LOG"
+
+SUBJECT="[EOD] $TODAY: trade report (experiment + scanner)"
+if [ $EXP_EXIT -ne 0 ] || [ $SCAN_EXIT -ne 0 ]; then
+  SUBJECT="[EOD][FAILED] $TODAY: report generation errors (exp=$EXP_EXIT scan=$SCAN_EXIT)"
+fi
 
 hdr() { printf '<div style="font:bold 15px -apple-system,Segoe UI,sans-serif;background:#111827;color:#fff;padding:10px 14px;margin-top:10px">%s</div>\n' "$1"; }
 BOUNDARY="eodb_$(date +%s)_$$"
 {
-  printf 'To: %s\nFrom: %s\nSubject: [EOD] %s: trade report (experiment + scanner)\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary="%s"\n\n' "$MAILTO" "$MAILTO" "$TODAY" "$BOUNDARY"
+  printf 'To: %s\nFrom: %s\nSubject: %s\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary="%s"\n\n' "$MAILTO" "$MAILTO" "$SUBJECT" "$BOUNDARY"
   printf -- '--%s\nContent-Type: text/plain; charset=utf-8\n\n' "$BOUNDARY"
   printf '===== EXPERIMENT  acct 2131377 =====\n%s\n\n===== SCANNER  acct 2118552 =====\n%s\n' "$EXP_TXT" "$SCAN_TXT"
   printf -- '\n--%s\nContent-Type: text/html; charset=utf-8\n\n' "$BOUNDARY"

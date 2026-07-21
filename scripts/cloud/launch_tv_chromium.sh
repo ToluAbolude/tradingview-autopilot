@@ -50,6 +50,18 @@ fi
 echo "[launch] Starting Chromium with CDP on port $TV_CDP_PORT..."
 export DISPLAY="$TV_DISPLAY"
 
+# snap-confine on cgroup-v2 requires a reachable user D-Bus so `snap run` can
+# place Chromium in a transient snap.chromium.* scope; without one every launch
+# dies in ~2s with "<cgroup> is not a snap cgroup" (2026-07-19..21 outage: only
+# worked historically when an SSH session happened to keep the user bus alive).
+# `loginctl enable-linger ubuntu` keeps user@$(id -u).service + this bus socket
+# up permanently, including at boot with no SSH session.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+if [ ! -S "$XDG_RUNTIME_DIR/bus" ]; then
+    echo "[launch] WARNING: user bus $XDG_RUNTIME_DIR/bus missing (linger disabled?) — snap chromium will likely fail to launch"
+fi
+
 $CHROMIUM_BIN \
     --remote-debugging-port=$TV_CDP_PORT \
     --remote-debugging-address=127.0.0.1 \
