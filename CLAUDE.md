@@ -148,6 +148,9 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 | `trade_notion_sync.mjs` (cron, 10 min) | Logs every trade to Notion with a screenshot |
 | `confirm_weekly_review.mjs` (cron, Fri 21:00) | Per-strategy PASS/WATCH/CUT review → Notion |
 | `ctrader_refresh_cron.sh` (cron, Sun 03:10) | Rotates cTrader OAuth tokens into BOTH env files (~30d expiry, single-use refresh tokens — never rotate one file alone) |
+| `cdp_watchdog.sh` (cron, */5) | Restart tv_browser after 3 CDP fails; self-heals the linger/user-bus precondition; hard-resets (kill+clear singleton locks) when restarts don't stick; emails at ~30 min down |
+| `snap_hold_guard.sh` (cron, daily 04:30) | Re-asserts the chromium/mesa-2404 snap refresh holds and alerts if one had dropped (auto-refresh under the running browser breaks CDP) |
+| `heartbeat.sh` (cron, */5) | Off-VM dead-man's switch: pings a healthchecks.io URL (`~/.healthcheck_url`) only when CDP is healthy, so an external monitor catches VM-down/network/reboot failures the on-VM watchdog can't. No-op until the URL file exists |
 
 > `tv_browser` launch depends on `loginctl enable-linger ubuntu` (uid **1001**): snap-confine on cgroup-v2 needs the user D-Bus at `/run/user/1001/bus` to start Chromium from the service. If launches die in ~2s with "is not a snap cgroup", check linger first.
 
