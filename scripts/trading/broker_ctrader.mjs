@@ -25,6 +25,7 @@
  * v1-only and abandoned. Proto files vendored from spotware/ctrader-open-api-v2-java-example.
  */
 import tls from 'tls';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -343,12 +344,51 @@ async function _fibVetoStateFor(symbol) {
   return state;
 }
 
+// Chart-layer liveness, cached 60s. When CDP is down the whole context stack
+// (daily_selector, AutoTL bias, screenshots) is degraded — the broker-bars
+// fallback may keep SCANNING through an outage, but it must not OPEN new risk
+// (2026-07-19..21: Sunday-reopen entries during a 47h Chrome outage, -$2.5k).
+let _cdpProbe = { ts: 0, up: true };
+async function _chartLayerUp() {
+  if (Date.now() - _cdpProbe.ts < 60_000) return _cdpProbe.up;
+  let up = false;
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 1500);
+    const r = await fetch(`http://127.0.0.1:${process.env.TV_CDP_PORT || 9222}/json/version`, { signal: ac.signal });
+    clearTimeout(t);
+    up = r.ok;
+  } catch { up = false; }
+  _cdpProbe = { ts: Date.now(), up };
+  return up;
+}
+
 export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false }) {
   const cls = _instrumentClass(symbol);
   const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
 
   if (!Number.isFinite(slPrice) || slPrice <= 0) {
     throw new Error(`ORDER_SAFETY_REJECT ${symbol}: missing/invalid slPrice (${slPrice})`);
+  }
+
+  // Sunday-reopen block: the FX weekend reopen (Sun 21:00Z) trades thin books,
+  // wide spreads, and gap risk — the 2026-07-20 -$2.5k Monday started with
+  // entries placed into this window. Crypto is exempt (trades 24/7, no weekend
+  // gap). Kill switch: SUNDAY_REOPEN_BLOCK=off.
+  if ((process.env.SUNDAY_REOPEN_BLOCK || 'on') !== 'off' && cls !== 'CRYPTO') {
+    const now = new Date();
+    if (now.getUTCDay() === 0 && now.getUTCHours() >= 21) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: Sunday-reopen window (21:00–24:00Z) — no new entries`);
+    }
+  }
+
+  // Degraded-ops gate: no new entries while the chart layer is down. Runners
+  // whose sample must not be censored by infra state (the per-strategy
+  // experiment) opt out with DEGRADED_ENTRY_GUARD=off in their wrapper.
+  if ((process.env.DEGRADED_ENTRY_GUARD || 'on') !== 'off') {
+    if (!(await _chartLayerUp())) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: chart layer (CDP :9222) down — degraded ops, no new entries`);
+    }
   }
 
   if (Number.isFinite(entry) && entry > 0) {
@@ -376,6 +416,23 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
     if (openVol > 0) {
       throw new Error(`ORDER_SAFETY_REJECT ${symbol}: existing open volume ${openVol} — no stacking`);
     }
+  }
+
+  // Twin guard (2026-07-20 GBPCAD double-fill, positions 32981536/7): two
+  // market orders sent in the same instant both pass the open-volume check —
+  // neither position exists yet when the second is validated. Cross-process
+  // cooldown file: one MARKET entry per symbol per 60s across all runners.
+  // Resting limits are exempt (the zone runner legitimately straddles a
+  // symbol with a long and a short limit in one cycle).
+  if (!allowStack && !isLimit) {
+    const lockDir = process.env.TRADING_DATA_DIR || '/home/ubuntu/trading-data';
+    const lock = path.join(lockDir, `.entry_cooldown_${String(symbol).replace(/[^A-Za-z0-9]/g, '')}`);
+    let recentMs = null;
+    try { recentMs = Date.now() - fs.statSync(lock).mtimeMs; } catch { /* no lock yet */ }
+    if (recentMs != null && recentMs < 60_000) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: entry attempted ${Math.round(recentMs / 1000)}s ago — twin guard (60s/symbol)`);
+    }
+    try { fs.writeFileSync(lock, String(Date.now())); } catch { /* lock dir missing (non-VM run) — guard degrades to open-volume check only */ }
   }
 
   // Fib-depth veto (hard rule, 2026-07-02). fib_backtest (2y H1 × 7 symbols,
@@ -802,6 +859,13 @@ export async function getPositions() {
     commission:  _toNum(p.commission),
     openTimestamp: _toNum(p.tradeData?.openTimestamp),   // unix ms — for anchoring the chart screenshot at the real entry candle
   }));
+}
+
+/** Public symbol-meta lookup (lotSize etc.) for consumers that must convert
+ *  raw cTrader volume cents into lots (trade_notion_sync planned-risk math). */
+export async function getSymbolMeta(symbolName) {
+  await connect();
+  return _symbolMetaFor(symbolName);
 }
 
 /**

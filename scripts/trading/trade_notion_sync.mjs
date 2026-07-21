@@ -47,6 +47,24 @@ const WEEK_DB_SCHEMA = {
 };
 
 function log(m) { process.stdout.write(`[${new Date().toISOString()}] ${m}\n`); }
+
+// Planned $ risk from the position's OWN geometry: |entry−SL| × per-lot value
+// factor × lots. Mirrors calcLots' per-class factors (inline_trader /
+// zone_limit_runner) so R is measured against what the sizer intended.
+// Needed because scanner-account positions have no confirm_signals.jsonl
+// record — the old fallback divided net P&L by CONFIRM_RISK_PCT (0.1% of
+// $10k = $10), which printed absurdities like GBPCAD R=-20.13 on a -$201
+// trade (2026-07-20).
+function plannedRiskUsd(symbol, entry, sl, lots) {
+  const d = Math.abs(entry - sl);
+  if (!(d > 0) || !(lots > 0)) return 0;
+  const s = String(symbol).toUpperCase();
+  if (/XAU|GOLD/.test(s))                                             return d * 100 * lots;
+  if (/US30|NAS100|SPX500|GER|UK100|JP225|JPN225|AUS200|DOW/.test(s)) return d * lots;
+  if (/BTC|ETH|SOL|ADA|XRP|LTC|BNB|DOT|AVAX/.test(s))                 return d * lots;
+  if (/JPY/.test(s))                                                  return (d / 0.01) * 6.5 * lots;
+  return (d / 0.0001) * 10 * lots;   // FX default: ~$10/pip/lot
+}
 function loadState() { try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return {}; } }
 function saveState(s) { if (!existsSync(DATA_ROOT)) mkdirSync(DATA_ROOT, { recursive: true }); writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
 
@@ -326,7 +344,18 @@ async function main() {
     const entryTime = sig.barT ? Math.floor(sig.barT / 1000) : (p.openTimestamp ? Math.floor(p.openTimestamp / 1000) : Math.floor(Date.now() / 1000));
     const tf = sig.tf || '60';
     const t = { positionId: p.positionId, symbol, dir: p.direction, entry: p.entryPrice, sl: p.stopLoss, tp: p.takeProfit, strategy: sig.strategy || 'scanner', tf, entryTime };
-    const risk = (sig.equity || 10000) * ((sig.riskPct || CONFIRM_RISK_PCT) / 100);
+    // Planned risk: signal record when available (experiment), else the
+    // position's own entry/SL/volume geometry (scanner). Last-resort constant
+    // only if both are unusable.
+    let risk = (sig.equity && sig.riskPct) ? sig.equity * (sig.riskPct / 100) : 0;
+    if (!(risk > 0)) {
+      try {
+        const meta = await b.getSymbolMeta(symbol);
+        const lots = meta?.lotSize > 0 ? p.volumeCents / meta.lotSize : 0;
+        risk = plannedRiskUsd(symbol, p.entryPrice, p.stopLoss, lots);
+      } catch { /* fall through */ }
+    }
+    if (!(risk > 0)) risk = (sig.equity || 10000) * (CONFIRM_RISK_PCT / 100);
     try {
       // No entry screenshot (removed 2026-07-03): the single wide-frame OUTCOME shot
       // at close is the record that matters. Row is still journaled at open.

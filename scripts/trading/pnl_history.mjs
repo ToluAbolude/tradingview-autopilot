@@ -10,13 +10,6 @@ import os from 'os';
 const FROM = (process.argv.find(a => a.startsWith('--from=')) || '').split('=')[1] || '2026-04-01';
 const fromMs = Date.parse(`${FROM}T00:00:00.000Z`);
 
-const SYMBOLS = [
-  'WTI','BRENT','COPPER','XAUUSD','XAGUSD',
-  'BTCUSD','ETHUSD','XRPUSD','SOLUSD','ADAUSD','LTCUSD','BNBUSD','DOTUSD','AVAXUSD',
-  'NAS100','US30','SPX500','GER30','UK100','JPN225','AUS200',
-  'EURUSD','GBPUSD','AUDUSD','NZDUSD','USDJPY','EURJPY','GBPJPY','AUDJPY','USDCAD','USDCHF','NZDCAD','NZDJPY',
-];
-
 const dayKey  = ms => new Date(ms).toISOString().slice(0, 10);
 const weekKey = ms => { const d = new Date(ms); const day = (d.getUTCDay() + 6) % 7; const mon = ms - day*864e5; return dayKey(mon); };
 const money = n => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
@@ -24,28 +17,18 @@ const money = n => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString
 async function main() {
   const bridge = await import('./broker_ctrader.mjs');
   await bridge.connect();
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  // Pull all round-trip positions since FROM
+  // Pull EVERY round-trip position since FROM from the unfiltered ledger.
+  // The old version seeded a hardcoded symbol list and silently missed any
+  // pair not on it — the 2026-07-20 -$2.5k day happened almost entirely on
+  // crosses (GBPNZD/EURCAD/GBPCAD/EURAUD/GBPCHF/AUDNZD) the list lacked, so
+  // this report showed -$304 while the account lost $2,485.
   const byPos = new Map();
-  for (const sym of SYMBOLS) {
-    let attempt = 0;
-    while (attempt < 3) {
-      try {
-        const r = await bridge.getRecentClosePnl(sym, fromMs);
-        for (const d of (r.deals || [])) {
-          const cur = byPos.get(d.positionId) || { symbol: sym, closeTs: d.execTs, net: 0 };
-          cur.net += d.net;
-          if (d.execTs > cur.closeTs) cur.closeTs = d.execTs;
-          byPos.set(d.positionId, cur);
-        }
-        break;
-      } catch (e) {
-        if (/rate limited|BLOCKED_PAYLOAD_TYPE/i.test(e.message) && attempt < 2) { attempt++; await sleep(2000*attempt); continue; }
-        break;
-      }
-    }
-    await sleep(200);
+  for (const d of await bridge.getAllClosedDeals(fromMs)) {
+    const cur = byPos.get(d.positionId) || { symbol: d.symbolName, closeTs: d.execTs, net: 0 };
+    cur.net += d.net;
+    if (d.execTs > cur.closeTs) cur.closeTs = d.execTs;
+    byPos.set(d.positionId, cur);
   }
   const trades = [...byPos.values()];
   console.log(`\n=== P&L HISTORY since ${FROM} — ${trades.length} round-trip trades ===\n`);
