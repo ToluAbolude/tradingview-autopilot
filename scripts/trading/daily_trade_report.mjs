@@ -69,10 +69,31 @@ function resolveWindow() {
   return { fromMs, toMs, label: dayStr };
 }
 
+// A single transient TCP timeout to demo.ctraderapi.com must not nuke the whole
+// EOD report (a bare connect() failure => process.exit(2), the "[EOD][FAILED]
+// report generation FAILED (exit 2)" email). Retry with backoff. Retries MUST go
+// through reconnect(): a rejected connect() leaves _readyPromise set, so calling
+// connect() again just re-returns the same rejected promise — reconnect() resets
+// _socket/_ready/_readyPromise and re-establishes fresh.
+async function connectWithRetry(bridge, tries = 3) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      await (i === 0 ? bridge.connect() : bridge.reconnect());
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.error(`[cTrader] connect attempt ${i + 1}/${tries} failed: ${e.message}`);
+      if (i < tries - 1) await new Promise(r => setTimeout(r, 2500 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 // ── Pull today's closing deals, group into round-trip positions ──────────────
 async function pullTrades(fromMs, toMs) {
   const bridge = await import('./broker_ctrader.mjs');
-  await bridge.connect();
+  await connectWithRetry(bridge);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const byPos = new Map();
 
