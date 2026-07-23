@@ -161,20 +161,97 @@ _(Removed 2026-07-03: the 06:00 `morning_review_cron.sh` email — it had been s
 
 ## Architecture
 
+The system is a **read/decide/execute** pipeline: TradingView is a *chart-reading
+surface only* (via CDP), all trade decisions are made by Node decision-makers, and
+order execution is exclusively through broker Open APIs (cTrader primary, Tradovate
+for the prop account). A reliability layer keeps the headless browser and broker
+tokens alive, and a reporting layer pushes journals/reports out. Data flows top-down
+through the layers below; reliability and reporting are cross-cutting.
+
+```mermaid
+flowchart TB
+  subgraph LOCAL["🖥️ Local PC (Windows)"]
+    CC["Claude Code + TradingView MCP<br/>(68 CDP tools, stdio)"]
+    DEPLOY["scp deploy · proxy_tunnel.ps1<br/>sync_cookies.mjs"]
+  end
+
+  subgraph VM["☁️ Oracle Cloud A1.Flex — ubuntu@145.241.220.213 (ARM, 4 OCPU / 24 GB)"]
+    direction TB
+
+    subgraph DISPLAY["Display / chart-read layer (systemd)"]
+      XVFB["Xvfb :99"] --> CHROME["Chromium — TradingView<br/>tv_browser.service"]
+      CHROME -->|"CDP :9222"| CDP{{"CDP endpoint"}}
+      VNC["x11vnc.service → :5900<br/>(SSH tunnel only)"] -.-> CHROME
+    end
+
+    subgraph DECIDE["Decision layer (cron + persistent)"]
+      SCAN["market_scanner.mjs<br/>acct 2118552"]
+      CONFIRM["confirm_runner.mjs<br/>per-strategy experiment · acct 2131377"]
+      SELECT["daily_selector · setup_finder<br/>AutoTL bias · S/R zones · patterns"]
+      ORB["orb_runner.mjs"]
+      VALID["institutional/validate_strategy.mjs<br/>Sharpe · Monte Carlo · edge significance"]
+    end
+
+    subgraph EXEC["Execution layer"]
+      BROKER["broker_ctrader.mjs<br/>assertOrderSafety · brackets · guards"]
+      TVO["broker_tradovate.mjs<br/>(Tradeify prop, when .tvo_live)"]
+    end
+
+    subgraph RELY["Reliability layer (cron)"]
+      WD["cdp_watchdog.sh (*/5)<br/>linger self-heal · hard-reset ladder"]
+      SNAP["snap_hold_guard.sh (04:30)"]
+      HB["heartbeat.sh (*/5) → healthchecks.io"]
+      TOK["ctrader_refresh_cron.sh (Sun 03:10)<br/>rotates BOTH env files"]
+    end
+
+    subgraph REPORT["Reporting layer (cron)"]
+      EOD["daily_trade_report.mjs<br/>(retry-hardened cTrader connect)"]
+      NOTION["trade_notion_sync.mjs (10 min)"]
+      WEEKLY["confirm_weekly_review.mjs (Fri 21:00)"]
+    end
+
+    CDP -->|"chart data, Pine graphics"| SCAN & CONFIRM & SELECT
+    SELECT --> SCAN
+    SCAN & CONFIRM & ORB --> BROKER
+    ORB --> TVO
+    VALID -. "grades books offline" .-> CONFIRM
+    WD -.-> CHROME
+    SNAP -.-> CHROME
+    TOK -.-> BROKER
+  end
+
+  subgraph EXT["External services"]
+    CTAPI[["cTrader Open API<br/>demo.ctraderapi.com:5035"]]
+    TVOAPI[["Tradovate REST<br/>demo.tradovateapi.com"]]
+    NOTIONDB[["Notion trade journal"]]
+    SMTP[["Gmail SMTP (msmtp)"]]
+    HC[["healthchecks.io"]]
+  end
+
+  CC -->|"CDP over SSH tunnel"| CDP
+  DEPLOY -->|"scp / ssh"| VM
+  BROKER <-->|"TLS Protobuf"| CTAPI
+  TVO <--> TVOAPI
+  NOTION --> NOTIONDB
+  EOD --> SMTP
+  WEEKLY --> SMTP
+  HB --> HC
+
+  classDef ext fill:#1f2937,stroke:#9ca3af,color:#fff;
+  classDef reliability fill:#4c1d95,stroke:#a78bfa,color:#fff;
+  class CTAPI,TVOAPI,NOTIONDB,SMTP,HC ext;
+  class WD,SNAP,HB,TOK reliability;
 ```
-Oracle Cloud VM (ubuntu@145.241.220.213)
-│
-├── Xvfb (virtual display :1)
-│   └── TradingView Desktop (Electron, CDP port 9222)
-│
-├── market_scanner.mjs  ← persistent process; continuous scan → scanner.log + live_signals.json
-│
-└── Cron jobs
-    ├── session_runner.mjs   ← main orchestrator (every 15 min Mon–Fri + Sun 22-23 UTC)
-    ├── eod_close.mjs        ← force-close all positions (20:00 + 21:45 UTC)
-    ├── position_monitor.mjs ← per-trade watcher (spawned detached per order)
-    └── review_params.mjs    ← daily performance review (20:30 UTC Mon–Fri)
-```
+
+> **Design notes.** (1) The browser is a *dependency*, not the source of truth — the
+> `fetchBarsResilient` path lets the scanner fall back to cTrader broker bars when the
+> chart dies, and `assertOrderSafety` gates every order (Sunday-reopen block, degraded-ops
+> guard, twin-fill guard). (2) Token rotation is atomic across **both** env files because
+> cTrader refresh tokens are single-use on a shared grant. (3) The off-VM `healthchecks.io`
+> dead-man's switch catches whole-VM/network failures the on-VM watchdog structurally can't.
+> (4) The validation module (`institutional/`) grades a book of realized/backtested trades
+> for Sharpe, Monte Carlo robustness, and entry-edge significance **before** a strategy is
+> trusted live — see [STRATEGY_BENCHMARK.md](STRATEGY_BENCHMARK.md).
 
 **Data files** — all at `/home/ubuntu/trading-data/`:
 
