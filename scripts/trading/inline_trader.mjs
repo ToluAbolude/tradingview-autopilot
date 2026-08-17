@@ -23,6 +23,7 @@ import { fetchHighImpactNews, isSafeToTrade, filterForSymbol } from './news_chec
 import { analyzePerformance } from './performance_tracker.mjs';
 import { trifectaCount, describeConfluence, hasTrifecta } from './confluence.mjs';
 import { verifyOrderLanded } from './broker_history.mjs';
+import { checkPlan, applyPlanLevels } from './daily_plan_gate.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -413,6 +414,20 @@ export async function attemptInlineTrade(setup) {
     log(`Broker-rejecting cooldown active for ${setup.label} (${brokerBlock.reason}, ${minsLeft}m left). Skip.`);
     return;
   }
+
+  // ── 2c. DAILY PLAN GATE — the plan is the only thing that originates a trade ─
+  // Everything below this line can still VETO a setup; nothing below it can invent
+  // a reason to be in the market. The instrument must be in today's written plan,
+  // the direction must match the analyst's committed bias, and price must actually
+  // be AT a planned zone. Otherwise we wait — a day with no fills is a normal day.
+  //
+  // This replaces "scan 40 instruments, trade whatever pings" (147 trades / 6wk /
+  // 20% WR / -$6,667, of which -$7,790 was non-USD crosses nobody had a view on).
+  // Fails closed: no plan or a stale plan halts trading. Kill switch PLAN_GATE=off.
+  const planCheck = checkPlan(setup);
+  if (!planCheck.ok) { log(`PLAN GATE: ${planCheck.reason}. Skip.`); return; }
+  log(`PLAN GATE ✓ ${planCheck.reason}`);
+  applyPlanLevels(setup, planCheck.zone, m => log(`  ${m}`));
 
   // ── 3. Score gate — Trifecta-aware ─────────────────────────────────────────
   // Trifecta: Trend + Level + Signal families (see confluence.mjs).

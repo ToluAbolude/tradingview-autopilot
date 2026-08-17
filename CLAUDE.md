@@ -144,6 +144,7 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 | `x11vnc.service` | VNC for display `:99` on `localhost:5900` (no pw, via SSH tunnel) |
 | `cdp_watchdog.sh` (cron) | Restarts `tv_browser` only after **3 consecutive** CDP failures |
 | `market_scanner.mjs` | Node.js scanner (acct 2118552) |
+| `daily_plan_cron.sh` (cron, 06:00 UTC daily) | **Pre-market analyst** — writes the day's plan (bias, entry zones, invalidation, targets, ADR budget) for the 8 core instruments; the plan gate enforces it all day. Fails loud: no plan = nothing trades |
 | `confirm_runner.mjs` (cron) | Per-strategy experiment, acct 2131377 (4×H1 + ORB/M15) |
 | `trade_notion_sync.mjs` (cron, 10 min) | Logs every trade to Notion with a screenshot |
 | `confirm_weekly_review.mjs` (cron, Fri 21:00) | Per-strategy PASS/WATCH/CUT review → Notion |
@@ -153,6 +154,18 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 | `heartbeat.sh` (cron, */5) | Off-VM dead-man's switch: pings a healthchecks.io URL (`~/.healthcheck_url`) only when CDP is healthy, so an external monitor catches VM-down/network/reboot failures the on-VM watchdog can't. No-op until the URL file exists |
 
 > `tv_browser` launch depends on `loginctl enable-linger ubuntu` (uid **1001**): snap-confine on cgroup-v2 needs the user D-Bus at `/run/user/1001/bus` to start Chromium from the service. If launches die in ~2s with "is not a snap cgroup", check linger first.
+
+### Plan-first execution (2026-07-30 cutover)
+
+The scanner account no longer originates trades from signals. Causality is now **thesis → level → wait → trade**:
+
+1. `daily_plan.mjs` (06:00 UTC) commits to a written plan for **8 core instruments** — XAUUSD, NAS100, US30, GER40, EURUSD, GBPUSD, USDJPY, BTCUSD. Per instrument: bias, expected path, entry **zones** (bands), invalidation, targets, and the **ADR volatility budget** (range used vs remaining). Deterministic levels + Claude analyst; every zone re-validated in code (≥2R vs invalidation, reachable inside remaining ADR, direction matches bias). Rejected zones get one repair pass, then stay in the plan marked `tradeable: false`.
+2. `daily_plan_gate.mjs` enforces it. The instrument must be in the plan, direction must match the bias, and price must be **at** a planned zone. Plan invalidation replaces the signal SL when it is wider (widen-only); plan targets replace the TPs.
+3. Wired in **two** places: `inline_trader.attemptInlineTrade` (gate 2c) and — because `zone_limit_runner`, `session_runner` and `orb_runner`'s cTrader leg reach the broker without touching inline_trader — `broker_ctrader.assertOrderSafety`, the one chokepoint every entry funnels through. That call is **entry-only**; closes/modifies/cancels bypass it, so it can never trap a position.
+
+**Fails closed**: no plan, or a stale plan, and nothing trades. Scoped to acct **2118552** only — the experiment (2131377) is untouched.
+Kill switches: `PLAN_GATE=off` (restore originate-anywhere), `CORE_ONLY=off` (restore the 55-instrument universe), `PLAN_GATE_ACCOUNT`, `PLAN_ZONE_BUFFER`.
+Why: 15 Jun–30 Jul the scanner took 147 trades at ~20% WR for **-$6,667**; non-USD crosses alone were **-$7,790** while metals/indices/USD-majors/BTC netted **+$1,123**.
 
 ### Key files on VM
 

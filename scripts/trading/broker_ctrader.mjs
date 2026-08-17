@@ -391,6 +391,28 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
     }
   }
 
+  // Daily-plan gate (2026-07-30) — the broker-level backstop for the hard cutover.
+  // inline_trader checks the plan too, but THREE other paths reach the broker without
+  // ever touching it: zone_limit_runner (resting limits), session_runner (session-open
+  // entries) and orb_runner's cTrader leg. Gating only inline_trader would have left
+  // the cutover full of holes while looking complete. assertOrderSafety is the one
+  // chokepoint every entry funnels through, and it is entry-only — closePosition,
+  // closeAllPositions, modifyPosition, cancelOrder and cancelOrphanLimits all bypass
+  // it, so this can never trap an open position or block a flatten.
+  //
+  // SCOPED BY ACCOUNT: the scanner (2118552) is the account being cut over. The
+  // per-strategy experiment (2131377) is a separate forward test and is deliberately
+  // untouched — same opt-out shape as DEGRADED_ENTRY_GUARD above.
+  // Kill switches: PLAN_GATE=off, or PLAN_GATE_ACCOUNT to re-point it.
+  if (String(process.env.CTRADER_ACCOUNT_ID || '') === String(process.env.PLAN_GATE_ACCOUNT || '2118552')
+      && (process.env.PLAN_GATE ?? 'on') !== 'off') {
+    const { checkPlan } = await import('./daily_plan_gate.mjs');
+    const verdict = checkPlan({ label: symbol, dir, entry });
+    if (!verdict.ok) {
+      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: ${verdict.reason}`);
+    }
+  }
+
   if (Number.isFinite(entry) && entry > 0) {
     if (dir === 'long' && slPrice >= entry) {
       throw new Error(`ORDER_SAFETY_REJECT ${symbol}: long SL ${slPrice} not below entry ${entry}`);

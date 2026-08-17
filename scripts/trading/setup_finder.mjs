@@ -1568,6 +1568,20 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
     console.log(`  [daily_selector] Using watchlist${staleNote}: ${scanList.map(i => i.label).join(', ')}`);
   }
 
+  // ── Core-universe clamp (2026-07-30) ───────────────────────────────────────
+  // Belt-and-braces with daily_selector's own filter: this also catches the
+  // FULL_SCAN_LIST fallback above, so a missing/failed watchlist can never quietly
+  // re-admit the 28 non-USD crosses that cost -$7,790 over six weeks. These eight
+  // are the instruments daily_plan.mjs writes a pre-market plan for; anything else
+  // has no plan, so inline_trader's plan gate would refuse it anyway — scanning it
+  // just burns chart switches. Kill switch: CORE_ONLY=off.
+  if ((process.env.CORE_ONLY ?? 'on') !== 'off') {
+    const CORE = new Set(['XAUUSD', 'NAS100', 'US30', 'GER40', 'EURUSD', 'GBPUSD', 'USDJPY', 'BTCUSD']);
+    const before = scanList.length;
+    scanList = scanList.filter(i => CORE.has(i.label));
+    if (scanList.length !== before) console.log(`  [core-only] ${before} → ${scanList.length} instruments (${scanList.map(i => i.label).join(', ') || 'none'})`);
+  }
+
   // ── Drop scan list down by blockedSymbols + broker_rejects ───────────────────
   // No point scanning symbols we can't trade — wastes ~8 chart switches per inst.
   // WTI in particular was killing scans with CDP timeouts (2026-05-24).

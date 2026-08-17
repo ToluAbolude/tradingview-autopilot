@@ -127,12 +127,29 @@ const INSTRUMENT_UNIVERSE = [
   { sym: 'BLACKBULL:AVAXUSD', label: 'AVAXUSD', category: 'crypto'    },
 ];
 
+// ── CORE UNIVERSE (2026-07-30) ───────────────────────────────────────────────
+// The eight instruments daily_plan.mjs writes a pre-market plan for. Everything
+// else is switched off, because the ledger — not taste — says so: over 147 trades
+// from 15 June the 28 non-USD crosses in the list above lost -$7,790 while metals,
+// indices, USD majors and BTC together netted +$1,123. Crosses are wide-spread,
+// structurally muddy, and are just two majors wearing a trench coat; the account
+// never had an opinion on any of them and paid for it.
+//
+// Scanning 8 instead of 55 also cuts a selector pass to a fraction of its old
+// runtime, which shrinks the 06:10 selector/scanner shared-tab overlap window.
+//
+// Kill switch: CORE_ONLY=off restores the full universe.
+const CORE_UNIVERSE = ['XAUUSD', 'NAS100', 'US30', 'GER40', 'EURUSD', 'GBPUSD', 'USDJPY', 'BTCUSD'];
+const SCAN_LIST = (process.env.CORE_ONLY ?? 'on') === 'off'
+  ? INSTRUMENT_UNIVERSE
+  : INSTRUMENT_UNIVERSE.filter(i => CORE_UNIVERSE.includes(i.label));
+
 // ── Diversification limits — prevent all slots going to one category ──────────
 const CATEGORY_MAX = { forex: 8, index: 5, commodity: 4, crypto: 5 };
 
 async function main() {
   log('=== DAILY SELECTOR START ===');
-  log(`Scanning ${INSTRUMENT_UNIVERSE.length} instruments — trend from AutoTL on 4H×${SCAN_BARS}`);
+  log(`Scanning ${SCAN_LIST.length} instruments (${SCAN_LIST.length === INSTRUMENT_UNIVERSE.length ? 'FULL universe' : `core-only: ${CORE_UNIVERSE.join(', ')}`}) — trend from AutoTL on 4H×${SCAN_BARS}`);
 
   const utcHour = new Date().getUTCHours();
   const scored  = [];
@@ -140,7 +157,7 @@ async function main() {
   const errored = [];
   let noTrend = 0;
 
-  for (const inst of INSTRUMENT_UNIVERSE) {
+  for (const inst of SCAN_LIST) {
     try {
       // ── Trend: AutoTL on 4H only (operator directive) ──────────────────────
       // fetchBarsResilient: chart bars normally, cTrader trendbars when Chrome
@@ -229,7 +246,7 @@ async function main() {
   // accept that file up to 3 days old (loadDailyWatchlist), so a failed morning
   // run degrades to "yesterday's bias" rather than "scan everything blind".
   if (scored.length + noTrend + unavailable.length === 0) {
-    throw new Error(`0/${INSTRUMENT_UNIVERSE.length} instruments readable (${errored.length} errored) — CDP likely wedged; keeping previous watchlist`);
+    throw new Error(`0/${SCAN_LIST.length} instruments readable (${errored.length} errored) — CDP likely wedged; keeping previous watchlist`);
   }
 
   // Sort by rank score (confluence + zone-proximity bonus) descending
@@ -278,7 +295,7 @@ async function main() {
     date:          new Date().toISOString().slice(0, 10),
     generatedAt:   new Date().toISOString(),
     scanTF:        `AutoTL 4H ×${SCAN_BARS}`,
-    totalScanned:  INSTRUMENT_UNIVERSE.length,
+    totalScanned:  SCAN_LIST.length,
     eligible:      scored.filter(s => s.rankScore >= MIN_SCORE).length,
     unavailable:   unavailable.length,
     errors:        errored.length,
