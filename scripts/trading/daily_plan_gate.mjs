@@ -33,6 +33,25 @@ const PLAN_FILE = join(DATA_ROOT, 'daily_plan.json');
 // the band; 25% keeps that legitimate while still refusing a fill 3 handles away.
 const ZONE_BUFFER = Number(process.env.PLAN_ZONE_BUFFER ?? 0.25);
 
+// ── Session windows (2026-08-17): originate entries ONLY at London open and NY ──
+// open. Intraday FX/index volatility is periodic with peaks at these two opens
+// (Andersen & Bollerslev 1997 — primary academic source); the ORB literature's
+// edge (Zarattini et al.) lives entirely in the cash-open window; and our own
+// ledger's worst close-hours were the rollover (h21-h22, -$5.7k) and mid-NY chop.
+// Format: "H:MM-H:MM,..." UTC. Applies at ORDER PLACEMENT — a resting limit
+// placed in-window may legitimately fill later at its planned level.
+// Kill switch: TRADE_WINDOWS=off.
+const WINDOWS = (process.env.PLAN_WINDOWS ?? '7:00-10:00,12:30-16:00').split(',').map(w => {
+  const [a, b] = w.split('-').map(s => { const [h, m] = s.split(':').map(Number); return h + (m || 0) / 60; });
+  return [a, b];
+});
+
+export function inTradeWindow(now = new Date()) {
+  if ((process.env.TRADE_WINDOWS ?? 'on') === 'off') return true;
+  const h = now.getUTCHours() + now.getUTCMinutes() / 60;
+  return WINDOWS.some(([a, b]) => h >= a && h < b);
+}
+
 export function loadPlan() {
   if (!existsSync(PLAN_FILE)) return null;
   try { return JSON.parse(readFileSync(PLAN_FILE, 'utf8')); } catch (_) { return null; }
@@ -44,6 +63,10 @@ export function loadPlan() {
  */
 export function checkPlan(setup) {
   if ((process.env.PLAN_GATE ?? 'on') === 'off') return { ok: true, reason: 'plan gate disabled (PLAN_GATE=off)' };
+
+  if (!inTradeWindow()) {
+    return { ok: false, reason: `outside trade windows (${process.env.PLAN_WINDOWS ?? '7:00-10:00,12:30-16:00'} UTC) — entries originate only at London/NY open` };
+  }
 
   const plan = loadPlan();
   if (!plan) return { ok: false, reason: 'no daily_plan.json — pre-market plan never ran. Nothing trades without a plan.' };

@@ -746,11 +746,24 @@ export async function attemptInlineTrade(setup) {
     : `[${legLots.join('+')}]=${legLots.reduce((a,b)=>a+b,0)}`;
   log(`Risk:${riskPct}% | Equity:${equity} | ${lotsLabel} lots | TP1:${setup.tp1} TP2:${setup.tp2} TP3:${setup.tp3} SL:${setup.sl}`);
 
-  const legs = [
-    { name: 'O1', tp: setup.tp1, minRR: 1.0, reanchor: false, screenshot: false },
-    { name: 'O2', tp: setup.tp2, minRR: 2.0, reanchor: true,  screenshot: false },
-    { name: 'O3', tp: setup.tp3, minRR: 2.0, reanchor: true,  screenshot: true  },
-  ];
+  // ── Exit model (2026-08-17): partial at 2R + TP-less runner ────────────────
+  // Old ladder (1R/2R/capped-3R TPs) produced 44% full-SL / 24% cut-winner /
+  // 10% full-TP — a 23% WR with capped targets can never break even (needs
+  // avgW/avgL > 3.35). New shape: ~1/3 takes profit at the structural 2R level
+  // (tp2), the other ~2/3 rides with SL only; trail_runner.mjs (cron) moves that
+  // SL to BE at +1R and chandelier-trails it beyond +2R. cTrader only — the
+  // TV-DOM per-leg path can't place a TP-less leg, so it keeps the old ladder.
+  // Kill switch: RUNNER_EXIT=off restores the 3-TP ladder.
+  const RUNNER_EXIT = (process.env.RUNNER_EXIT ?? 'on') !== 'off'
+    && process.env.BROKER_PROVIDER === 'ctrader';
+  const legs = RUNNER_EXIT
+    ? [{ name: 'O1', tp: setup.tp2, minRR: 2.0, reanchor: true, screenshot: true }]
+    : [
+        { name: 'O1', tp: setup.tp1, minRR: 1.0, reanchor: false, screenshot: false },
+        { name: 'O2', tp: setup.tp2, minRR: 2.0, reanchor: true,  screenshot: false },
+        { name: 'O3', tp: setup.tp3, minRR: 2.0, reanchor: true,  screenshot: true  },
+      ];
+  if (RUNNER_EXIT) log(`Runner exit: 1/3 TP @2R (${setup.tp2}), 2/3 trails via trail_runner (SL ${setup.sl})`);
 
   let placed = 0;
 

@@ -28,8 +28,12 @@
     "setup_type_boost":   3
   },
 
+  "_trim_note": "2026-08-17 strategy trim. disabled_strategies switches votes OFF without deleting code (they are precious — re-enable by removing from this list). Disabled: K (pattern-in-vacuum ~coin-flip, Z supersedes it AT zones), R/BB/O (mean-reversion & fib votes that fire both directions — 24% of signal-bars emitted long AND short at once; fib entries net-negative per fib_backtest), H (weak), U (proximity vote, direction-blind), P (superseded by the hard TRADE_WINDOWS gate in daily_plan_gate). class_vote_overrides drops zone votes on indices — their own inst_profiles already say indices gap through zones (slMode atr). pass1_min_score 6→5 compensates the removed vote supply; executor scoreThreshold needs a 2-week recalibration observation.",
+  "disabled_strategies": ["K", "R", "BB", "O", "H", "U", "P"],
+  "class_vote_overrides": { "index": ["C", "C-near", "F"] },
+
   "thresholds": {
-    "pass1_min_score":   6,
+    "pass1_min_score":   5,
     "ema_flat_pct":      0.004,
     "rr_min":            2.0,
     "ema_fast":          8,

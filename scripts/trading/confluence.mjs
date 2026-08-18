@@ -19,7 +19,7 @@
 export const FAMILIES = {
   TREND:  ['A', 'T', 'B', 'L', 'FL'],                                    // SmartTrail, Weekly, EMA stack, Trendline, Flag (continuation)
   LEVEL:  ['C', 'C-near', 'U', 'F', 'O', 'BB', 'TB', 'TT', 'OR'],       // S/R zone, PDH/PDL, FVG, OTE Fib, BB; Triple Top/Bottom; Opening Range boundary
-  SIGNAL: ['K', 'H', 'HS', 'IHS', 'TB', 'TT', 'OR'],                    // Candle pattern, HA pullback; chart-pattern reversals; OR breakout candle
+  SIGNAL: ['K', 'H', 'Z', 'HS', 'IHS', 'TB', 'TT', 'OR'],               // Candle pattern, HA pullback, pattern-AT-zone (Z); chart-pattern reversals; OR breakout candle
   BONUS:  ['V', 'P', 'R', 'D'],                                          // Volume, Prime session, RSI extreme, Daily bias
 };
 

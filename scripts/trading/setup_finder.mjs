@@ -29,6 +29,8 @@ let MTFC = [];
 let TFW = {};
 let INST_CFG = {};
 let EMA_OVR = {};
+let DIS = new Set();      // globally disabled vote codes (2026-08-17 trim — see config notes)
+let CLASS_DROP = {};      // per-instrument-class vote codes to drop
 try {
   const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
   SC    = cfg.scoring       || {};
@@ -37,6 +39,8 @@ try {
   TFW   = cfg.tf_weights    || {};
   INST_CFG = cfg.inst_profiles || {};
   EMA_OVR  = cfg.ema_overrides || {};
+  DIS        = new Set(cfg.disabled_strategies || []);
+  CLASS_DROP = cfg.class_vote_overrides || {};
 } catch (_) {
   // config missing — all defaults below apply
 }
@@ -926,6 +930,20 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const srZones = buildSRZones(bars, atr, isT1 ? { pivotLen: 3, minStrength: 0.05 } : {});
   const last   = bars[n];
 
+  // ── Vote filter (2026-08-17 trim) ──────────────────────────────────────────
+  // disabled_strategies (global) + class_vote_overrides (per class) in
+  // scanner_config.json switch votes OFF without deleting them. Both accounts'
+  // ledgers landed on the same ~23% hit rate because the score is direction-
+  // blind: 24% of signal-bars emitted long AND short simultaneously. The
+  // mean-reversion / pattern-in-a-vacuum votes are what fire both ways; the
+  // movement votes (trend, breakout, trendline, volume, zone-verdict Z) don't.
+  const _cls = /NAS100|US30|SPX500|GER40|UK100|AUS200|JP225|HK50/.test(label) ? 'index'
+             : /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/.test(label)        ? 'crypto'
+             : /XAU|XAG|XPT|COPPER/.test(label)                                ? 'metal'
+             : /WTI|BRENT/.test(label)                                         ? 'oil' : 'fx';
+  const _drop  = new Set([...DIS, ...(CLASS_DROP[_cls] || [])]);
+  const voteOn = c => !_drop.has(c);
+
   let score = 0;
   const reasons = [];
   const strats  = [];
@@ -960,7 +978,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   //      sellers/buyers front-run the zone (banks defending the level early).
   //      Awarded smaller score so it can't replace a strict touch but it stops
   //      the algo from being blind to S/R that is visibly respected on chart.
-  {
+  if (voteOn('C')) {
     const atrLast = atr[n] || 0;
     const nearThresh = atrLast * (SC.C_near_atr ?? 0.4);
 
@@ -1027,8 +1045,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     const dc = buildDailyContext(bars);
     if (dc) {
       const { PDH, PDL, PDC, pricePos, bias } = dc;
-      const nearPDL = pricePos < 0.40 && dir === 'long';
-      const nearPDH = pricePos > 0.60 && dir === 'short';
+      const nearPDL = voteOn('U') && pricePos < 0.40 && dir === 'long';
+      const nearPDH = voteOn('U') && pricePos > 0.60 && dir === 'short';
       if (nearPDL) {
         score += (SC.U_pdh_pdl ?? 1);
         reasons.push(`PDL support zone (${(pricePos*100).toFixed(0)}% of range, PDL=${PDL.toFixed(4)})`);
@@ -1051,7 +1069,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   }
 
   // ── F. Fair Value Gap (FVG) — institutional imbalance zone ──
-  {
+  if (voteOn('F')) {
     const fvgZones = detectFVGZones(bars, atr);
     const relevantType = dir === 'long' ? 'bullish' : 'bearish';
     const hitZones = fvgZones
@@ -1102,7 +1120,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   }
 
   // ── P. Prime session — London open + NY overlap (highest liquidity) ──
-  {
+  // (Superseded by the hard TRADE_WINDOWS gate in daily_plan_gate — disable via config)
+  if (voteOn('P')) {
     if (utcHour >= 8 && utcHour < 17) {
       score += (SC.P_prime_session ?? 1);
       reasons.push('Prime session'); strats.push('P');
@@ -1110,7 +1129,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   }
 
   // ── R. RSI extreme — oversold for longs, overbought for shorts ──
-  {
+  if (voteOn('R')) {
     const rsiVal = rsi[n];
     if ((dir === 'long' && rsiVal < 45) || (dir === 'short' && rsiVal > 55)) {
       score += (SC.R_rsi_extreme ?? 1);
@@ -1124,7 +1143,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   // candle and scans drift mid-candle, so a pattern seen at minute 7 can
   // evaporate by the close; bars[n-1] is always fully formed.
   {
-    if (n >= 2) {
+    if (voteOn('K') && n >= 2) {
       const cur = bars[n - 1], prev = bars[n - 2];
       const body       = Math.abs(cur.c - cur.o);
       const range      = cur.h - cur.l;
@@ -1209,7 +1228,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     const ha = calcHA(bars);
     const haDir = c => c.c >= c.o ? 1 : -1;
     const wantDir = dir === 'long' ? 1 : -1;
-    if (ha.length >= 5 && haDir(ha[n]) === wantDir) {
+    if (voteOn('H') && ha.length >= 5 && haDir(ha[n]) === wantDir) {
       let pullLen = 0;
       for (let k = n - 1; k >= Math.max(0, n - 4); k--) {
         if (haDir(ha[k]) === -wantDir) pullLen++;
@@ -1233,7 +1252,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   }
 
   // ── O. ICT Optimal Trade Entry — 61.8–79% Fibonacci retracement zone ──
-  {
+  if (voteOn('O')) {
     const lookback = bars.slice(Math.max(0, n - 30), n);
     const swingH = Math.max(...lookback.map(b => b.h));
     const swingL = Math.min(...lookback.map(b => b.l));
@@ -1363,7 +1382,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   }
 
   // ── BB. Bollinger Band touch or squeeze ──
-  {
+  if (voteOn('BB')) {
     const bb = calcBB(bars);
     const bbN = bb[n];
     if (bbN) {

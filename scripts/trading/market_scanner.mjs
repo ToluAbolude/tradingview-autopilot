@@ -28,7 +28,11 @@ const DATA_ROOT       = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d
 const SIGNALS_FILE    = join(DATA_ROOT, 'live_signals.json');
 const SCAN_INTERVAL   = 15 * 60 * 1000;   // 15 minutes
 const MAX_HISTORY     = 500;               // keep last 500 expired signals
-const MIN_SCORE       = 6;                 // per-TF Pass 1 threshold (MTF bonus adds up to +3 on top)
+// 6 → 5 with the 2026-08-17 strategy trim: 7 vote codes were switched off in
+// scanner_config (K/R/BB/O/H/U/P), shrinking the score supply by ~2-3 points on
+// a typical bar. NOTE scanner_config's "pass1_min_score" was never read — this
+// constant (or env MIN_SCORE) is the real knob.
+const MIN_SCORE       = Number(process.env.MIN_SCORE ?? 5);  // per-TF Pass 1 threshold (MTF bonus adds up to +3 on top)
 // --scan-only: look at charts + write live_signals.json every 15 min, but place
 // NO trades (pass no executor to scanForSetups). Visibility/planning without the
 // overtrading risk of continuous auto-execution.

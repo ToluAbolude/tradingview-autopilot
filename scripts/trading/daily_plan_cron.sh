@@ -5,6 +5,16 @@
 # failure is loud in the subject line rather than silent.
 #
 # Cron: 0 6 * * *  (06:00 UTC daily — 7 days, because BTCUSD trades weekends)
+# PLUS catch-up runs (see below) — this script is idempotent: if today's plan
+# already exists it exits immediately without re-planning or re-emailing.
+#
+# Why catch-up runs exist: the plan failed 7 of the 12 days to 2026-08-18, every
+# time as a cTrader connect timeout in the 05:00Z window, and each failure meant
+# a whole day of no trading (the gate fails closed). One missed connection must
+# not cost a session, so schedule retries alongside the main run:
+#   0  6 * * * .../daily_plan_cron.sh
+#   20 6 * * * .../daily_plan_cron.sh
+#   50 6 * * * .../daily_plan_cron.sh     (still ahead of the 07:00Z London window)
 set -u
 MAILTO="toludavid07@gmail.com"
 PROJECT_ROOT="/home/ubuntu/tradingview-mcp-jackson"
@@ -15,6 +25,13 @@ PLAN_FILE="${DATA_ROOT}/daily_plan.json"
 TODAY="$(date -u +%Y-%m-%d)"; TS="$(date -Iseconds)"
 
 cd "${PROJECT_ROOT}" || { echo "[$TS] cd failed" >> "$CRON_LOG"; exit 99; }
+
+# Idempotence guard — makes the catch-up runs free. Today's plan already on
+# disk? Nothing to do, and no duplicate email.
+if [ -s "$PLAN_FILE" ] && grep -q "\"date\": *\"$TODAY\"" "$PLAN_FILE" 2>/dev/null; then
+  echo "[$TS] plan for $TODAY already present — skipping" >> "$CRON_LOG"
+  exit 0
+fi
 
 # A stale HTML from yesterday emailed as today's plan is exactly the failure the
 # EOD report hit during the July token outage. Remove it first; only a same-run

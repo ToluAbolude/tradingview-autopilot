@@ -142,23 +142,43 @@ async function attemptClose() {
 // the account is actually flat — retrying and logging CRITICAL if not.
 async function ctraderFlatten() {
   const bridge = await import('./broker_ctrader.mjs');
+
+  // Runner carve-out (2026-08-17): a position whose broker-side SL is at or
+  // beyond its entry has ZERO open risk — the header rule ("no carryover
+  // positions with open risk") is satisfied, so it may carry overnight to let
+  // trail_runner ride the move. Fridays and the weekend backstop still flatten
+  // everything (weekend gap risk, the -$5,659 lesson). EOD_CARRY_RUNNERS=off
+  // restores flatten-all.
+  const CARRY = (process.env.EOD_CARRY_RUNNERS ?? 'on') !== 'off'
+    && now.getUTCDay() !== 5 && !WEEKEND_CHECK;
+  const atRisk = p => !(CARRY && p.stopLoss
+    && (p.direction === 'long' ? p.stopLoss >= p.entryPrice : p.stopLoss <= p.entryPrice));
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     const positions = await bridge.getPositions();
-    if (positions.length === 0) {
-      log(attempt === 1 ? 'cTrader: account is flat — nothing to close.' : `✓ cTrader verified flat (attempt ${attempt}).`);
+    const targets = positions.filter(atRisk);
+    const carried = positions.length - targets.length;
+    if (targets.length === 0) {
+      log((carried ? `cTrader: carrying ${carried} BE-protected runner(s); ` : 'cTrader: ') +
+          (attempt === 1 ? 'no at-risk positions to close.' : `✓ verified flat of risk (attempt ${attempt}).`));
       return true;
     }
-    log(`cTrader: ${positions.length} open position(s) — closing (attempt ${attempt})…`);
-    try { await bridge.closeAllPositions(); } catch (e) { log(`  closeAllPositions error: ${e.message}`); }
+    log(`cTrader: ${targets.length} at-risk position(s)${carried ? ` (+${carried} runner(s) carried)` : ''} — closing (attempt ${attempt})…`);
+    for (const p of targets) {
+      try {
+        await bridge.closePosition(p.positionId);
+        try { await bridge.cancelOrphanLimits(p.positionId); } catch (_) {}
+      } catch (e) { log(`  closePosition ${p.positionId} error: ${e.message}`); }
+    }
     await sleep(4000);
   }
-  const remaining = await bridge.getPositions().catch(() => null);
-  if (remaining && remaining.length > 0) {
-    log(`✗ CRITICAL NOT FLAT: ${remaining.length} position(s) still open after 3 cTrader close attempts — overnight/weekend gap risk! ` +
+  const remaining = (await bridge.getPositions().catch(() => null) || []).filter(atRisk);
+  if (remaining.length > 0) {
+    log(`✗ CRITICAL NOT FLAT: ${remaining.length} at-risk position(s) still open after 3 cTrader close attempts — overnight/weekend gap risk! ` +
         JSON.stringify(remaining.map(p => ({ id: p.positionId, symbolId: p.symbolId, vol: p.volumeCents, dir: p.direction }))));
     return false;
   }
-  log('✓ cTrader verified flat.');
+  log('✓ cTrader verified flat of risk.');
   return true;
 }
 

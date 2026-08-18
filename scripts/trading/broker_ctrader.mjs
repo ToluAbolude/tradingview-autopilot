@@ -42,7 +42,10 @@ const ENDPOINTS = {
 };
 
 const ENV = process.env.CTRADER_ENV || 'demo';
-const endpoint = ENDPOINTS[ENV] || ENDPOINTS.demo;
+// CTRADER_HOST/PORT override the endpoint — an escape hatch if cTrader moves the
+// gateway, and the seam the connect-retry test uses to simulate a dead endpoint.
+const _ep = ENDPOINTS[ENV] || ENDPOINTS.demo;
+const endpoint = { host: process.env.CTRADER_HOST || _ep.host, port: Number(process.env.CTRADER_PORT || _ep.port) };
 
 // ── Load protos ─────────────────────────────────────────────────────────────
 const root = await protobuf.load([
@@ -82,6 +85,7 @@ let _socket   = null;
 let _ready    = false;
 let _readyPromise = null;
 let _accountId = null;
+let _heartbeatTimer = null;
 let _msgCounter = 0;
 const _pending = new Map();   // clientMsgId -> { resolve, reject, timer }
 const _eventHandlers = new Map();  // payloadName -> [handler, ...]
@@ -150,6 +154,19 @@ export function on(name, handler) {
   _eventHandlers.set(name, arr);
 }
 
+/**
+ * Connect, with transparent retry. Every caller routes through here, so the
+ * resilience lives here rather than in each script.
+ *
+ * TWO failure modes are handled, and the second is the nastier one:
+ *   1. A transient TCP timeout to demo.ctraderapi.com (seen 2026-08-18 05:00Z).
+ *   2. POISONED STATE — the old code left the REJECTED `_readyPromise` in place,
+ *      so every subsequent connect() in that process re-returned the same
+ *      rejection forever. One 2-second network blip at 05:00 therefore killed
+ *      the whole daily plan ("no D1 data on cTrader" × 8 instruments → no plan →
+ *      the plan gate failed closed → nothing traded all day). Clearing
+ *      `_readyPromise` on failure is what makes a later call able to recover.
+ */
 export async function connect() {
   if (_ready) return;
   if (_readyPromise) return _readyPromise;
@@ -163,10 +180,46 @@ export async function connect() {
     throw new Error('Missing CTRADER_* env vars. See docs/CTRADER_SETUP.md');
   }
 
+  _readyPromise = (async () => {
+    const tries = Number(process.env.CTRADER_CONNECT_TRIES ?? 3);
+    let lastErr;
+    for (let i = 0; i < tries; i++) {
+      try {
+        await _openSocket(clientId, clientSecret, accessToken, accountNum);
+        return;
+      } catch (e) {
+        lastErr = e;
+        console.error(`[cTrader] connect attempt ${i + 1}/${tries} failed: ${e.message}`);
+        try { _socket?.destroy(); } catch (_) {}
+        if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
+        _socket = null;
+        _ready  = false;
+        if (i < tries - 1) await new Promise(r => setTimeout(r, 2500 * (i + 1)));
+      }
+    }
+    _readyPromise = null;   // never leave a rejected promise cached — see above
+    throw lastErr;
+  })();
+
+  return _readyPromise;
+}
+
+function _openSocket(clientId, clientSecret, accessToken, accountNum) {
   console.log(`[cTrader] Connecting to ${endpoint.host}:${endpoint.port} (env=${ENV})`);
 
-  _readyPromise = new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     _socket = tls.connect(endpoint.port, endpoint.host, { servername: endpoint.host });
+
+    // Fail fast. A bare TCP timeout to demo.ctraderapi.com takes ~135s to
+    // surface (observed 05:00:01 → 05:02:16), which made retrying useless — the
+    // job ran out of morning before it could try again. Cap the handshake so a
+    // dead endpoint costs seconds, and the retry budget covers a real window.
+    const dialMs = Number(process.env.CTRADER_CONNECT_TIMEOUT_MS ?? 20_000);
+    const dialTimer = setTimeout(() => {
+      if (!_ready) { try { _socket?.destroy(); } catch (_) {} reject(new Error(`connect timeout after ${dialMs}ms`)); }
+    }, dialMs);
+    dialTimer.unref();
+    const clearDial = () => clearTimeout(dialTimer);
 
     let recvBuf = Buffer.alloc(0);
     _socket.on('data', (chunk) => {
@@ -181,13 +234,20 @@ export async function connect() {
       }
     });
 
-    _socket.on('error', (e) => { console.error('[cTrader] socket error:', e.message); if (!_ready) reject(e); });
-    _socket.on('end',   ()  => { console.log('[cTrader] connection ended'); _ready = false; _socket = null; _readyPromise = null; });
+    _socket.on('error', (e) => { console.error('[cTrader] socket error:', e.message); if (!_ready) { clearDial(); reject(e); } });
+    _socket.on('end',   ()  => {
+      console.log('[cTrader] connection ended');
+      _ready = false; _socket = null; _readyPromise = null;
+      if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
+    });
 
     _socket.on('secureConnect', async () => {
       try {
-        // Heartbeat every 25s
-        setInterval(() => { try { _sendRaw(_nameToType['ProtoHeartbeatEvent'], {}, ''); } catch (_) {} }, 25_000).unref();
+        // Heartbeat every 25s. Tracked so a retry doesn't stack timers that
+        // fire against a destroyed socket.
+        if (_heartbeatTimer) clearInterval(_heartbeatTimer);
+        _heartbeatTimer = setInterval(() => { try { _sendRaw(_nameToType['ProtoHeartbeatEvent'], {}, ''); } catch (_) {} }, 25_000);
+        _heartbeatTimer.unref();
 
         await send('ProtoOAApplicationAuthReq', { clientId, clientSecret });
         console.log('[cTrader] App auth OK');
@@ -204,8 +264,9 @@ export async function connect() {
         await send('ProtoOAAccountAuthReq', { ctidTraderAccountId: _accountId, accessToken });
         console.log('[cTrader] Account auth OK — ready');
         _ready = true;
+        clearDial();
         resolve();
-      } catch (e) { reject(e); }
+      } catch (e) { clearDial(); reject(e); }
     });
   });
 

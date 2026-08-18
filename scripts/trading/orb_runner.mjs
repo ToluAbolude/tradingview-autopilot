@@ -55,14 +55,20 @@ const TVO_LIVE = process.env.TVO_LIVE === 'on' || existsSync('/home/ubuntu/.tvo_
 
 // ── Strategy config (from the 90d backtest) ──────────────────────────────────
 const OR_DURATION_MIN  = 30;
-const BREAKOUT_WINDOW_H = 4;     // only enter within 4h of the OR close
+const BREAKOUT_WINDOW_H = 2;     // confined: only enter within 2h of the OR close (2026-08-17, was 4)
 const MAX_ENTRY_AGE_MIN = 15;    // don't chase a breakout older than this (price moved)
 const MIN_OR_BARS       = 4;     // need >=4 of the 6 M5 bars in the 30-min OR
 
-// Each config carries its own R target (NAS100-Asia validated at 1R, rest at 2R).
+// Each config carries its own R target.
+// 2026-08-17: London + NY opens ONLY (operator directive). The ORB literature's
+// edge is specifically the cash-open session (Zarattini et al., SSRN 4416622 /
+// 4729284: 5-min ORB at the 09:30 ET open, indices) — so NY 13:30 UTC carries
+// the index pairings; SPX500@London keeps its own 90d-backtest slot (PF 1.35).
+// The ASIA pairing is retired, not deleted — git history + this comment keep it:
+//   { session: 'ASIA', openUTC: '00:00', configs: [XAUUSD@2R, US30@2R, NAS100@1R] }
 const PAIRINGS = [
-  { session: 'ASIA',   openUTC: '00:00', configs: [{ sym: 'XAUUSD', R: 2 }, { sym: 'US30', R: 2 }, { sym: 'NAS100', R: 1 }] },
-  { session: 'LONDON', openUTC: '07:00', configs: [{ sym: 'SPX500', R: 2 }] },
+  { session: 'LONDON',  openUTC: '07:00', configs: [{ sym: 'SPX500', R: 2 }] },
+  { session: 'NEWYORK', openUTC: '13:30', configs: [{ sym: 'NAS100', R: 2 }, { sym: 'US30', R: 2 }] },
 ];
 
 function log(msg) { process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`); }

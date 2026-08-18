@@ -13,7 +13,11 @@ TODAY="$(date -u +%Y-%m-%d)"; TS="$(date -Iseconds)"
 mkdir -p "${LOG_DIR}"
 cd "${PROJECT_ROOT}" || { echo "[$TS] cd failed" >> "$DAILY_LOG"; exit 99; }
 
+# $2 = TVO_SECTION. The Tradeify/Tradovate block is ONE account, not per-cTrader-
+# account data, so only the scanner run (rendered last) emits it — otherwise it
+# appeared in both stacked reports, i.e. twice in one email.
 gen() { ( set -a; . "/home/ubuntu/$1" 2>/dev/null; set +a; export BROKER_PROVIDER=ctrader
+          export TVO_SECTION="${2:-on}"
           node scripts/trading/daily_trade_report.mjs ); }
 
 # On generation failure the old behavior copied the PREVIOUS successful run's
@@ -26,7 +30,7 @@ fail_html() {  # $1 label, $2 exit code, $3 captured output
 }
 
 rm -f "$HTML_FILE"
-EXP_TXT="$(gen .ctrader_confirm.env 2>&1)"; EXP_EXIT=$?
+EXP_TXT="$(gen .ctrader_confirm.env off 2>&1)"; EXP_EXIT=$?
 if [ $EXP_EXIT -eq 0 ] && [ -s "$HTML_FILE" ]; then cp -f "$HTML_FILE" /tmp/eod_exp.html
 else fail_html "EXPERIMENT" "$EXP_EXIT" "$EXP_TXT" > /tmp/eod_exp.html; fi
 rm -f "$HTML_FILE"
