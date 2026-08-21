@@ -19,6 +19,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { detectChartPatterns } from './bulkowski_patterns.mjs';
+import { applyBlockExpiry } from './params_blocks.mjs';
 
 // ── Load tunable config (auto-updated weekly by weekly_review_agent) ──────────
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -1608,7 +1609,10 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
   try {
     const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
     if (existsSync(PARAMS_FILE)) {
-      const p = JSON.parse(readFileSync(PARAMS_FILE, 'utf8'));
+      // applyBlockExpiry: honour the one-week cooloff here too. Without it the scan
+      // list keeps dropping symbols whose block has lapsed, so unblocking at the
+      // execution gate alone would never produce a signal to execute.
+      const p = applyBlockExpiry(JSON.parse(readFileSync(PARAMS_FILE, 'utf8')));
       (p.blockedSymbols || []).forEach(s => scanBlocked.add(s));
     }
     const REJECT_FILE = join(DATA_ROOT, 'broker_rejects.json');
