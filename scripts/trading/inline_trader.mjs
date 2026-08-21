@@ -460,8 +460,15 @@ export async function attemptInlineTrade(setup) {
     ? Math.max(PARAMS.planScoreFloor ?? 6, baseThreshold - (PARAMS.planScoreRelief ?? 2))
     : baseThreshold;
   if (planBacked && threshold !== baseThreshold) log(`  score bar ${baseThreshold} → ${threshold} (plan-backed)`);
-  const trif = trifectaCount(setup.strategies || []);
-  const conf = describeConfluence(setup.strategies || []);
+  // A plan-backed setup already HAS its trend leg: the plan's bias is the AutoTL read
+  // on H4+D1 (daily_plan.autoTL_H4/autoTL_D1), filtered by the analyst. The TL vote
+  // inside setup_finder runs on 15M bars, where a validated 3-touch line almost never
+  // exists — measured 0/5 live on 2026-08-21, the same reason the 1H leg was dropped
+  // from daily_selector on 2026-07-08. Without this credit the Trifecta gate would
+  // charge every plan-backed entry +1/+2 for missing a leg it demonstrably has.
+  const strategiesForTrif = planBacked ? [...(setup.strategies || []), 'TL'] : (setup.strategies || []);
+  const trif = trifectaCount(strategiesForTrif);
+  const conf = describeConfluence(strategiesForTrif);
 
   if (PARAMS.requireTrifecta && trif < 3) {
     log(`Trifecta required but only ${trif}/3 (${conf}). Skip.`); return;

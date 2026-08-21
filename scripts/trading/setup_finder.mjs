@@ -734,6 +734,7 @@ function detectORB(bars, label, tf, dir) {
 // Re-exported under the historical name so daily_selector and confirm_eod_close
 // keep working unchanged.
 export { autoTrendline as autoTrendlineTrend } from './auto_trendline.mjs';
+import { autoTrendline } from './auto_trendline.mjs';
 
 // ── Opportunity-type classifier ────────────────────────────────────────────
 // Looks at the current bars + indicators and decides which kind of setup is
@@ -894,7 +895,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   if (st.dir[n] !== null) {
     const aligned = (dir === 'long' && st.dir[n] === 1) || (dir === 'short' && st.dir[n] === -1);
     if (aligned) {
-      score += (SC.A_smarttrail ?? 1);
+      score += (SC.A_smarttrail ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
       reasons.push('SmartTrail aligned'); strats.push('A');
     }
   }
@@ -961,7 +962,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const wkBull = emaW[n] > emaW[n - shift];
       const wkBear = emaW[n] < emaW[n - shift];
       if ((dir === 'long' && wkBull) || (dir === 'short' && wkBear)) {
-        score += (SC.T_weekly_trend ?? 1);
+        score += (SC.T_weekly_trend ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
         reasons.push(isFullWeek ? 'W1 trend aligned' : 'Trend aligned (partial week)');
         strats.push('T');
       }
@@ -987,7 +988,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       }
       const biasMatch = (dir === 'long' && bias === 'bullish') || (dir === 'short' && bias === 'bearish');
       if (biasMatch) {
-        score += (SC.D_daily_bias ?? 1);
+        score += (SC.D_daily_bias ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
         reasons.push(`Daily bias ${bias}`); strats.push('D');
       } else if (bias !== 'neutral') {
         score -= (SC.bias_penalty ?? 1);
@@ -1021,7 +1022,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       ? ema8[n] > ema21[n] && ema21[n] > ema50[n]
       : ema50[n] > ema21[n] && ema21[n] > ema8[n];
     if (stacked) {
-      score += (SC.B_ema_stack ?? 1);
+      score += (SC.B_ema_stack ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
       reasons.push('EMA stack aligned'); strats.push('B');
     }
   }
@@ -1345,6 +1346,23 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   //   Triple Top/Bottom, Head & Shoulders (both), High & Tight Flag
   //   Each scores +2; the pattern itself implies Level + Signal confluence
   //   (see families in confluence.mjs — TB/TT and HS/IHS land in both families).
+  // ── TL: AutoTL trendline IS the trend read (operator directive 2026-08-21) ──
+  // Replaces the A/T/B/D EMA-derived cluster, which fired on 88-96% of signals and
+  // added a flat +4 pedestal to 84% of them. Weighted by information, not agreement:
+  // a trendline agreeing is the common case and worth little; one pointing the OTHER
+  // way is rare and genuinely disqualifying.
+  {
+    const tl = autoTrendline(bars);
+    if (tl.dir === dir) {
+      score += (SC.TL_aligned ?? 1);
+      reasons.push(`AutoTL ${tl.detail}`); strats.push('TL');
+    } else if (tl.dir && tl.dir !== dir) {
+      score -= (SC.TL_opposed ?? 2);
+      reasons.push(`⚠ AutoTL opposes: ${tl.detail} (-${SC.TL_opposed ?? 2})`); strats.push('TL-opp');
+    }
+    // tl.dir === null (contraction / no validated line) scores 0 — no opinion
+  }
+
   {
     const pattern = detectChartPatterns(bars, atr, dir);
     if (pattern) {

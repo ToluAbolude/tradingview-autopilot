@@ -67,13 +67,13 @@ function parseTrades() {
   return rows;
 }
 
-function eodCutoff(ts) {
+export function eodCutoff(ts) {
   const d = new Date(ts);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), EOD_HOUR, 0, 0);
 }
 
 // Returns { outcome:R, kind:'tp'|'sl'|'eod'|'mtf'|'open', exitTs }
-function replay(trade, bars) {
+export function replay(trade, bars) {
   const { ts, dir, entry, sl, tp1 } = trade;
   const risk = Math.abs(entry - sl);
   const horizonEnd = NO_EOD ? ts + HORIZON_H * 3600e3 : Math.max(eodCutoff(ts), ts + 60 * 60e3);
@@ -94,7 +94,7 @@ function replay(trade, bars) {
   return { outcome: mtm, kind: NO_EOD ? 'mtf' : 'eod', exitTs: last.t };
 }
 
-function stats(rows) {
+export function stats(rows) {
   const resolved = rows.filter(r => r.outcome != null);
   const n = resolved.length;
   if (!n) return null;
@@ -239,4 +239,7 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(e => { console.error('FATAL', e); process.exit(1); });
+// Run the report only when invoked directly — vote_edge.mjs imports replay()/stats().
+if (process.argv[1] && process.argv[1].endsWith('edge_replay.mjs')) {
+  main().catch(e => { console.error('FATAL', e); process.exit(1); });
+}
