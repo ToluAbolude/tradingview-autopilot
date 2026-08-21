@@ -28,6 +28,7 @@ import {
   setChart, getBars, waitForBars, runAllStrategies, autoTrendlineTrend,
   buildSRZones, calcATR, fetchBarsResilient,
 } from './setup_finder.mjs';
+import { acquireChartLock, releaseChartLock } from './chart_lock.mjs';
 
 const IS_LINUX   = os.platform() === 'linux';
 const DATA_ROOT  = IS_LINUX
@@ -191,6 +192,15 @@ async function main() {
   const errored = [];
   let noTrend = 0;
 
+  // Serialise chart access against market_scanner — both drive the same tab, and an
+  // overlap misattributes one instrument's prices to another. Unlike the scanner we
+  // ABORT on timeout: a cross-contaminated watchlist sets wrong biasScore/zoneLevel for
+  // the whole trading day, whereas aborting keeps yesterday's file, which downstream
+  // already tolerates for up to 3 days (loadDailyWatchlist).
+  if (!await acquireChartLock('daily_selector', 180000, log)) {
+    throw new Error('chart lock held by market_scanner for >3min — aborting rather than write a cross-contaminated watchlist; previous watchlist kept');
+  }
+  try {
   for (const inst of SCAN_LIST) {
     try {
       // ── Trend: AutoTL on 4H only (operator directive) ──────────────────────
@@ -279,6 +289,7 @@ async function main() {
       log(`  ✗ ${inst.label}: ${e.message}`);
     }
   }
+  } finally { releaseChartLock(); }
   log(`AutoTL 4H trend found on ${scored.length} instruments; ${noTrend} with no validated trend; ${unavailable.length} unavailable; ${errored.length} errored.`);
 
   // A wedged CDP tab (Runtime.enable timeout) errors EVERY instrument. Writing an
