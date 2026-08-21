@@ -895,8 +895,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   if (st.dir[n] !== null) {
     const aligned = (dir === 'long' && st.dir[n] === 1) || (dir === 'short' && st.dir[n] === -1);
     if (aligned) {
-      score += (SC.A_smarttrail ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
-      reasons.push('SmartTrail aligned'); strats.push('A');
+      // A (SmartTrail) removed 2026-08-21: fired on 91-93% of signals, zero weight,
+      // and its only remaining effect was inflating the continuation type-boost.
     }
   }
 
@@ -962,9 +962,10 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const wkBull = emaW[n] > emaW[n - shift];
       const wkBear = emaW[n] < emaW[n - shift];
       if ((dir === 'long' && wkBull) || (dir === 'short' && wkBear)) {
-        score += (SC.T_weekly_trend ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
-        reasons.push(isFullWeek ? 'W1 trend aligned' : 'Trend aligned (partial week)');
-        strats.push('T');
+        // T (weekly trend) removed 2026-08-21: fired on 94-96% of signals, zero weight.
+        // NOTE: T was robust-positive in both OOS halves (+0.121/+0.131). It could not
+        // discriminate at 94% fire, but if that edge is ever harvested it must be as a
+        // PENALTY for absence, re-derived here — not by restoring this +1.
       }
     }
   }
@@ -988,8 +989,9 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       }
       const biasMatch = (dir === 'long' && bias === 'bullish') || (dir === 'short' && bias === 'bearish');
       if (biasMatch) {
-        score += (SC.D_daily_bias ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
-        reasons.push(`Daily bias ${bias}`); strats.push('D');
+        // D (daily bias aligned) removed 2026-08-21: fired on 87-88% of signals, zero
+        // weight. The counter-trend PENALTY below is kept — opposition is still rare and
+        // informative, which is the whole asymmetry.
       } else if (bias !== 'neutral') {
         score -= (SC.bias_penalty ?? 1);
         reasons.push(`⚠ Daily bias ${bias} (counter-trend, -${SC.bias_penalty ?? 1})`);
@@ -1022,8 +1024,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       ? ema8[n] > ema21[n] && ema21[n] > ema50[n]
       : ema50[n] > ema21[n] && ema21[n] > ema8[n];
     if (stacked) {
-      score += (SC.B_ema_stack ?? 0);   // 0: fires >88% of signals — a pedestal, not evidence
-      reasons.push('EMA stack aligned'); strats.push('B');
+      // B (EMA stack) removed 2026-08-21: fired on 89-92% of signals, zero weight.
     }
   }
 
@@ -1385,7 +1386,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   if (setupType) {
     const TYPE_BOOST = SC.setup_type_boost ?? 3;
     const typeStrategies = {
-      continuation: ['A','B','T','L','H'],
+      continuation: ['TL','L','H'],   // was ['A','B','T','L','H'] — A/B/T removed, so the
+      // +3 boost is no longer handed out for the presence of near-constant votes
       breakout:     ['OR','BB','V','L'],
       reversal:     ['K','H','R','F','U','BB','C','C-near'],
       retest:       ['C','C-near','F','U','K','H'],

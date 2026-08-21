@@ -23,7 +23,7 @@ export const FAMILIES = {
   TREND:  ['TL', 'L', 'FL'],                                             // AutoTL trend read, trendline break/bounce, Flag (continuation)
   LEVEL:  ['C', 'C-near', 'U', 'F', 'O', 'BB', 'TB', 'TT', 'OR'],       // S/R zone, PDH/PDL, FVG, OTE Fib, BB; Triple Top/Bottom; Opening Range boundary
   SIGNAL: ['K', 'H', 'Z', 'HS', 'IHS', 'TB', 'TT', 'OR'],               // Candle pattern, HA pullback, pattern-AT-zone (Z); chart-pattern reversals; OR breakout candle
-  BONUS:  ['V', 'P', 'R', 'D'],                                          // Volume, Prime session, RSI extreme, Daily bias
+  BONUS:  ['V', 'P', 'R'],                                               // Volume, Prime session, RSI extreme (D removed 2026-08-21 — no longer emitted)
 };
 
 /**
