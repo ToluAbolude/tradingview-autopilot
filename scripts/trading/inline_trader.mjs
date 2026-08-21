@@ -24,6 +24,7 @@ import { analyzePerformance } from './performance_tracker.mjs';
 import { trifectaCount, describeConfluence, hasTrifecta } from './confluence.mjs';
 import { verifyOrderLanded } from './broker_history.mjs';
 import { checkPlan, applyPlanLevels } from './daily_plan_gate.mjs';
+import { applyBlockExpiry } from './params_blocks.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -108,7 +109,9 @@ async function getEquityTruth() {
 // ── Param loader — reads trading_params.json each call (hot-reload) ────────────
 function loadParams() {
   if (!existsSync(PARAMS_FILE)) return { scoreThreshold: 8, stopRuleLosses: 4, riskPct: [6.0, 4.2, 3.0], maxConcurrent: 3, blockedSessions: [], blockedSymbols: [] };
-  return JSON.parse(readFileSync(PARAMS_FILE, 'utf8'));
+  // applyBlockExpiry: a block whose 30-day cooloff has passed stops binding. Nothing
+  // else in the stack ever lifted one, so blocks accumulated permanently.
+  return applyBlockExpiry(JSON.parse(readFileSync(PARAMS_FILE, 'utf8')));
 }
 
 // ── Session helper ─────────────────────────────────────────────────────────────
@@ -429,6 +432,12 @@ export async function attemptInlineTrade(setup) {
   log(`PLAN GATE ✓ ${planCheck.reason}`);
   applyPlanLevels(setup, planCheck.zone, m => log(`  ${m}`));
 
+  // Plan-backed = this entry came from a real zone in a real plan. Keyed off the zone,
+  // not off planCheck.ok: PLAN_GATE=off returns ok with NO zone, so disabling the plan
+  // gate can never silently relax the momentum gates below.
+  const planBacked = !!(planCheck.zone && planCheck.instrument)
+    && (process.env.PLAN_PRIORITY ?? 'on') !== 'off';
+
   // ── 3. Score gate — Trifecta-aware ─────────────────────────────────────────
   // Trifecta: Trend + Level + Signal families (see confluence.mjs).
   //   3/3 (full)     → standard score threshold applies
@@ -437,9 +446,29 @@ export async function attemptInlineTrade(setup) {
   //   0/3            → reject unconditionally (no structure backing)
   //
   // requireTrifecta=true in params forces a hard reject of anything < 3/3.
-  const threshold = PARAMS.scoreThreshold || 8;
-  const trif = trifectaCount(setup.strategies || []);
-  const conf = describeConfluence(setup.strategies || []);
+  // Plan-backed entries answer to a lower score bar. The score is a proxy for a macro
+  // thesis; a plan-backed entry HAS one — written, direction-committed, validated at
+  // >=2R against a structural invalidation, with price actually at the level. Charging
+  // it the full momentum score double-counts. Worse, plan zones are reversion levels
+  // ("sweep-and-reclaim of the low", "range top"), where momentum confluence is absent
+  // by construction — so the plan gate and the score gate were asking for opposite
+  // things. Aug 2026: the plan gate passed 5 times and all 5 died here or at the MTF
+  // gate below, for 1 scanner trade in the 3 weeks after the plan-first cutover.
+  // Kill switch: PLAN_PRIORITY=off restores the single shared threshold.
+  const baseThreshold = PARAMS.scoreThreshold || 8;
+  const threshold = planBacked
+    ? Math.max(PARAMS.planScoreFloor ?? 6, baseThreshold - (PARAMS.planScoreRelief ?? 2))
+    : baseThreshold;
+  if (planBacked && threshold !== baseThreshold) log(`  score bar ${baseThreshold} → ${threshold} (plan-backed)`);
+  // A plan-backed setup already HAS its trend leg: the plan's bias is the AutoTL read
+  // on H4+D1 (daily_plan.autoTL_H4/autoTL_D1), filtered by the analyst. The TL vote
+  // inside setup_finder runs on 15M bars, where a validated 3-touch line almost never
+  // exists — measured 0/5 live on 2026-08-21, the same reason the 1H leg was dropped
+  // from daily_selector on 2026-07-08. Without this credit the Trifecta gate would
+  // charge every plan-backed entry +1/+2 for missing a leg it demonstrably has.
+  const strategiesForTrif = planBacked ? [...(setup.strategies || []), 'TL'] : (setup.strategies || []);
+  const trif = trifectaCount(strategiesForTrif);
+  const conf = describeConfluence(strategiesForTrif);
 
   if (PARAMS.requireTrifecta && trif < 3) {
     log(`Trifecta required but only ${trif}/3 (${conf}). Skip.`); return;
@@ -461,7 +490,13 @@ export async function attemptInlineTrade(setup) {
   const SENIOR_TFS = new Set(['60', '240', 'D', 'W']);
   const mtfTFs = setup.mtfTFs || [];
   if (!mtfTFs.some(tf => SENIOR_TFS.has(tf))) {
-    log(`No ≥1H TF confluence — MTF TFs: [${mtfTFs.join(',') || 'none'}]. Skip.`); return;
+    // Same reasoning as the score relief: this gate exists to reject a 15M/30M signal
+    // with no macro backing. A plan zone IS the macro backing — the analyst derived it
+    // from D1/H4 structure (S/R shelves, prior-day levels, H4 trendlines) that morning.
+    if (!planBacked) {
+      log(`No ≥1H TF confluence — MTF TFs: [${mtfTFs.join(',') || 'none'}]. Skip.`); return;
+    }
+    log(`No ≥1H TF confluence [${mtfTFs.join(',') || 'none'}] — allowed: plan zone supplies the D1/H4 backing.`);
   }
 
   // ── 4. News safety ─────────────────────────────────────────────────────────

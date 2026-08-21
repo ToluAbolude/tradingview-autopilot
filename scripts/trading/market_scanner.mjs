@@ -18,6 +18,7 @@
  */
 
 import { scanForSetups } from './setup_finder.mjs';
+import { acquireChartLock, releaseChartLock } from './chart_lock.mjs';
 import { attemptInlineTrade, resetCycleState } from './inline_trader.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -83,11 +84,17 @@ async function runScan(state) {
   resetCycleState();
 
   let fresh = [];
+  // Serialise chart access against daily_selector — both drive the same tab, and an
+  // overlap attributes one instrument's prices to another (2026-08-21). On timeout we
+  // scan anyway: a possibly-contaminated scan beats a scanner that silently stops.
+  await acquireChartLock('market_scanner', 90000, m => console.log(m));
   try {
     fresh = await scanForSetups(MIN_SCORE, 1.5, SCAN_ONLY ? null : attemptInlineTrade);
   } catch (e) {
     console.error(`  Scan error: ${e.message}`);
     return state;
+  } finally {
+    releaseChartLock();
   }
 
   const now = Date.now();

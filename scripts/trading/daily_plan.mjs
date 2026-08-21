@@ -44,6 +44,7 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
 import { getTrendbars } from './broker_ctrader.mjs';
+import { autoTrendline } from './auto_trendline.mjs';
 
 const IS_LINUX  = os.platform() === 'linux';
 const DATA_ROOT = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
@@ -127,77 +128,6 @@ function swings(bars, k = 2, keep = 8) {
   return out.slice(-keep).map(p => ({ ...p, date: new Date(p.t * 1000).toISOString().slice(0, 10) }));
 }
 
-/**
- * AutoTL trendline read — the same geometry as setup_finder.autoTrendlineTrend and
- * the "Auto Trendlines — Zone & Break" Pine indicator on the chart (best-fit line
- * across recent pivots, ≥3 touches within ½ ATR, full containment, body-close break
- * of the ¼-ATR zone flips it). Reimplemented here rather than imported because
- * setup_finder pulls in chrome-remote-interface at module load via a hardcoded
- * Linux path, and the whole point of this file is to work when the chart is down.
- * Keep the two in sync if the Pine geometry ever changes.
- */
-function autoTrendline(bars) {
-  const n = bars.length - 1;
-  if (!bars || n < 30) return { dir: null, detail: 'insufficient bars', touches: 0 };
-  const a = atrSeries(bars);
-  const pivLen = 5, maxPiv = 8, minTouch = 3, minSpan = 10;
-  const tol = (a[n] || 0) * 0.5, zoneHalf = (a[n] || 0) * 0.25;
-
-  const pivotsOf = type => {
-    const out = [];
-    for (let i = pivLen; i <= n - pivLen; i++) {
-      let ok = true;
-      for (let j = i - pivLen; j <= i + pivLen; j++) {
-        if (j !== i && (type === 'high' ? bars[j].h >= bars[i].h : bars[j].l <= bars[i].l)) { ok = false; break; }
-      }
-      if (ok) out.push({ idx: i, price: type === 'high' ? bars[i].h : bars[i].l });
-    }
-    return out.slice(-maxPiv);
-  };
-
-  const fit = type => {
-    const pv = pivotsOf(type);
-    if (pv.length < 2) return null;
-    let best = null;
-    for (let x = 0; x < pv.length - 1; x++) {
-      for (let y = x + 1; y < pv.length; y++) {
-        const span = pv[y].idx - pv[x].idx;
-        if (span < minSpan) continue;
-        const slope = (pv[y].price - pv[x].price) / span;
-        if (type === 'high' && slope > 0) continue;   // resistance must slope down
-        if (type === 'low' && slope < 0) continue;    // support must slope up
-        let touches = 0, contained = true;
-        for (const p of pv) {
-          const diff = p.price - (pv[x].price + slope * (p.idx - pv[x].idx));
-          if (type === 'high' ? diff > tol : diff < -tol) { contained = false; break; }
-          if (Math.abs(diff) <= tol) touches++;
-        }
-        if (!contained || touches < minTouch) continue;
-        if (!best || touches > best.touches || (touches === best.touches && span > best.span)) {
-          best = { x1: pv[x].idx, y1: pv[x].price, slope, touches, span };
-        }
-      }
-    }
-    if (!best) return null;
-    best.at = i => best.y1 + best.slope * (i - best.x1);
-    return best;
-  };
-
-  const sup = fit('low'), res = fit('high');
-  const last = bars[n];
-  const supBroken = sup != null && last.c < sup.at(n) - zoneHalf;
-  const resBroken = res != null && last.c > res.at(n) + zoneHalf;
-
-  const out = { supportAt: sup ? r5(sup.at(n)) : null, resistanceAt: res ? r5(res.at(n)) : null };
-  if (sup && res) {
-    if (supBroken && !resBroken) return { ...out, dir: 'short', detail: `rising support ×${sup.touches} BROKEN`, touches: sup.touches };
-    if (resBroken && !supBroken) return { ...out, dir: 'long', detail: `falling resistance ×${res.touches} BROKEN`, touches: res.touches };
-    return { ...out, dir: null, detail: `contracting between support ×${sup.touches} and resistance ×${res.touches}`, touches: Math.max(sup.touches, res.touches) };
-  }
-  if (sup) return { ...out, dir: supBroken ? 'short' : 'long', detail: `rising support ×${sup.touches}${supBroken ? ' BROKEN' : ' holding'}`, touches: sup.touches };
-  if (res) return { ...out, dir: resBroken ? 'long' : 'short', detail: `falling resistance ×${res.touches}${resBroken ? ' BROKEN' : ' holding'}`, touches: res.touches };
-  return { ...out, dir: null, detail: 'no validated 3-touch trendline', touches: 0 };
-}
 
 /** S/R shelves: cluster recent pivots that repeat within ½ ATR; more touches = stronger. */
 function srShelves(bars, a, maxOut = 6) {

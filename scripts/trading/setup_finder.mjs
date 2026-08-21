@@ -19,6 +19,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { detectChartPatterns } from './bulkowski_patterns.mjs';
+import { applyBlockExpiry } from './params_blocks.mjs';
 
 // ── Load tunable config (auto-updated weekly by weekly_review_agent) ──────────
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -728,84 +729,12 @@ function detectORB(bars, label, tf, dir) {
   return null;
 }
 
-// ── AutoTL trend read — standalone trend direction from trendlines only ─────
-// Same geometry as the L vote / "Auto Trendlines — Zone & Break" Pine indicator
-// (pivLen 5, ≤8 recent pivots, 3+ touches, ≥10-bar span, 0.5×ATR touch tol,
-// 0.25×ATR zone half-width) but instead of scoring a break/bounce EVENT it
-// answers "which way is this market trending right now" — the daily_selector's
-// bias source (operator directive 2026-07-08: AutoTL is the primary and only
-// trend indicator; run on 1H×180 and 4H×180):
-//   • rising support intact (no body close below its zone) → long  (higher lows)
-//   • falling resistance intact (no body close above zone) → short (lower highs)
-//   • a line BROKEN by a body close beyond its zone flips trend to the break side
-//   • both lines intact (contraction/channel), conflicting breaks, or no
-//     validated line → null (no clear trend — a valid answer, not an error)
-export function autoTrendlineTrend(bars) {
-  const n = bars.length - 1;
-  if (!bars || n < 30) return { dir: null, detail: 'insufficient bars', touches: 0 };
-  const atr = calcATR(bars);
-  const pivLen = 5, maxPiv = 8, minTouch = 3, minSpan = 10;
-  const tol      = (atr[n] || 0) * 0.5;
-  const zoneHalf = (atr[n] || 0) * 0.25;
-
-  const pivotsOf = (type) => {
-    const out = [];
-    for (let i = pivLen; i <= n - pivLen; i++) {
-      let ok = true;
-      for (let j = i - pivLen; j <= i + pivLen; j++) {
-        if (j !== i && (type === 'high' ? bars[j].h >= bars[i].h : bars[j].l <= bars[i].l)) { ok = false; break; }
-      }
-      if (ok) out.push({ idx: i, price: type === 'high' ? bars[i].h : bars[i].l });
-    }
-    return out.slice(-maxPiv);
-  };
-
-  const fit = (type) => {
-    const pv = pivotsOf(type);
-    if (pv.length < 2) return null;
-    let best = null;
-    for (let a = 0; a < pv.length - 1; a++) {
-      for (let b = a + 1; b < pv.length; b++) {
-        const span = pv[b].idx - pv[a].idx;
-        if (span < minSpan) continue;
-        const slope = (pv[b].price - pv[a].price) / span;
-        if (type === 'high' && slope > 0) continue;   // resistance must slope down
-        if (type === 'low'  && slope < 0) continue;   // support must slope up
-        let touches = 0, contained = true;
-        for (const p of pv) {
-          const diff = p.price - (pv[a].price + slope * (p.idx - pv[a].idx));
-          if (type === 'high' ? diff > tol : diff < -tol) { contained = false; break; }
-          if (Math.abs(diff) <= tol) touches++;
-        }
-        if (!contained || touches < minTouch) continue;
-        if (!best || touches > best.touches || (touches === best.touches && span > best.span)) {
-          best = { x1: pv[a].idx, y1: pv[a].price, slope, touches, span };
-        }
-      }
-    }
-    if (!best) return null;
-    best.at = (i) => best.y1 + best.slope * (i - best.x1);
-    return best;
-  };
-
-  const sup = fit('low'), res = fit('high');
-  const last = bars[n];
-  const supBroken = sup != null && last.c < sup.at(n) - zoneHalf;  // body close below support zone
-  const resBroken = res != null && last.c > res.at(n) + zoneHalf;  // body close above resistance zone
-
-  if (sup && res) {
-    if (supBroken && !resBroken) return { dir: 'short', detail: `rising support ×${sup.touches} BROKEN`, touches: sup.touches };
-    if (resBroken && !supBroken) return { dir: 'long',  detail: `falling resistance ×${res.touches} BROKEN`, touches: res.touches };
-    return { dir: null, detail: `contraction (support ×${sup.touches} + resistance ×${res.touches} both intact)`, touches: 0 };
-  }
-  if (sup) return supBroken
-    ? { dir: 'short', detail: `rising support ×${sup.touches} BROKEN`,               touches: sup.touches }
-    : { dir: 'long',  detail: `rising support ×${sup.touches} intact (higher lows)`, touches: sup.touches };
-  if (res) return resBroken
-    ? { dir: 'long',  detail: `falling resistance ×${res.touches} BROKEN`,                touches: res.touches }
-    : { dir: 'short', detail: `falling resistance ×${res.touches} intact (lower highs)`,  touches: res.touches };
-  return { dir: null, detail: 'no validated trendline (3+ touches required)', touches: 0 };
-}
+// ── AutoTL trend read ────────────────────────────────────────────────────────
+// Geometry lives in auto_trendline.mjs (one copy, shared with daily_plan.mjs).
+// Re-exported under the historical name so daily_selector and confirm_eod_close
+// keep working unchanged.
+export { autoTrendline as autoTrendlineTrend } from './auto_trendline.mjs';
+import { autoTrendline } from './auto_trendline.mjs';
 
 // ── Opportunity-type classifier ────────────────────────────────────────────
 // Looks at the current bars + indicators and decides which kind of setup is
@@ -966,8 +895,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   if (st.dir[n] !== null) {
     const aligned = (dir === 'long' && st.dir[n] === 1) || (dir === 'short' && st.dir[n] === -1);
     if (aligned) {
-      score += (SC.A_smarttrail ?? 1);
-      reasons.push('SmartTrail aligned'); strats.push('A');
+      // A (SmartTrail) removed 2026-08-21: fired on 91-93% of signals, zero weight,
+      // and its only remaining effect was inflating the continuation type-boost.
     }
   }
 
@@ -1033,9 +962,10 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const wkBull = emaW[n] > emaW[n - shift];
       const wkBear = emaW[n] < emaW[n - shift];
       if ((dir === 'long' && wkBull) || (dir === 'short' && wkBear)) {
-        score += (SC.T_weekly_trend ?? 1);
-        reasons.push(isFullWeek ? 'W1 trend aligned' : 'Trend aligned (partial week)');
-        strats.push('T');
+        // T (weekly trend) removed 2026-08-21: fired on 94-96% of signals, zero weight.
+        // NOTE: T was robust-positive in both OOS halves (+0.121/+0.131). It could not
+        // discriminate at 94% fire, but if that edge is ever harvested it must be as a
+        // PENALTY for absence, re-derived here — not by restoring this +1.
       }
     }
   }
@@ -1048,19 +978,20 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const nearPDL = voteOn('U') && pricePos < 0.40 && dir === 'long';
       const nearPDH = voteOn('U') && pricePos > 0.60 && dir === 'short';
       if (nearPDL) {
-        score += (SC.U_pdh_pdl ?? 1);
+        score += (SC.U_pdh_pdl ?? 0);   // robust NEGATIVE both OOS halves (-0.050/-0.049, n=431)
         reasons.push(`PDL support zone (${(pricePos*100).toFixed(0)}% of range, PDL=${PDL.toFixed(4)})`);
         strats.push('U');
       }
       if (nearPDH) {
-        score += (SC.U_pdh_pdl ?? 1);
+        score += (SC.U_pdh_pdl ?? 0);   // robust NEGATIVE both OOS halves (-0.050/-0.049, n=431)
         reasons.push(`PDH resistance zone (${(pricePos*100).toFixed(0)}% of range, PDH=${PDH.toFixed(4)})`);
         strats.push('U');
       }
       const biasMatch = (dir === 'long' && bias === 'bullish') || (dir === 'short' && bias === 'bearish');
       if (biasMatch) {
-        score += (SC.D_daily_bias ?? 1);
-        reasons.push(`Daily bias ${bias}`); strats.push('D');
+        // D (daily bias aligned) removed 2026-08-21: fired on 87-88% of signals, zero
+        // weight. The counter-trend PENALTY below is kept — opposition is still rare and
+        // informative, which is the whole asymmetry.
       } else if (bias !== 'neutral') {
         score -= (SC.bias_penalty ?? 1);
         reasons.push(`⚠ Daily bias ${bias} (counter-trend, -${SC.bias_penalty ?? 1})`);
@@ -1093,8 +1024,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       ? ema8[n] > ema21[n] && ema21[n] > ema50[n]
       : ema50[n] > ema21[n] && ema21[n] > ema8[n];
     if (stacked) {
-      score += (SC.B_ema_stack ?? 1);
-      reasons.push('EMA stack aligned'); strats.push('B');
+      // B (EMA stack) removed 2026-08-21: fired on 89-92% of signals, zero weight.
     }
   }
 
@@ -1123,7 +1053,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   // (Superseded by the hard TRADE_WINDOWS gate in daily_plan_gate — disable via config)
   if (voteOn('P')) {
     if (utcHour >= 8 && utcHour < 17) {
-      score += (SC.P_prime_session ?? 1);
+      score += (SC.P_prime_session ?? 2);   // robust POSITIVE both OOS halves (+0.087/+0.092, n=966) at 40% fire
       reasons.push('Prime session'); strats.push('P');
     }
   }
@@ -1164,7 +1094,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
         }
       }
       if (pattern) {
-        score += (SC.K_candle_pattern ?? 1);
+        score += (SC.K_candle_pattern ?? 0);   // 84% fire, lift flips (-0.045/+0.035) — pedestal
         reasons.push(pattern); strats.push('K');
       }
     }
@@ -1246,7 +1176,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     const slice = bars.slice(Math.max(0, n - 20), n);
     const avgVol = slice.reduce((s, b) => s + (b.v || 0), 0) / slice.length;
     if (avgVol > 0 && last.v > avgVol * 1.5) {
-      score += (SC.V_volume_spike ?? 1);
+      score += (SC.V_volume_spike ?? 0);   // robust NEGATIVE both OOS halves (-0.071/-0.090, n=183)
       reasons.push(`Volume spike ${(last.v / avgVol).toFixed(1)}×`); strats.push('V');
     }
   }
@@ -1387,14 +1317,14 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     const bbN = bb[n];
     if (bbN) {
       if (dir === 'long'  && last.l <= bbN.lower * 1.001) {
-        score += (SC.BB_band_touch ?? 1);
+        score += (SC.BB_band_touch ?? 0);   // 83% fire, lift flips (-0.039/+0.001) — pedestal
         reasons.push('BB lower band touch'); strats.push('BB');
       } else if (dir === 'short' && last.h >= bbN.upper * 0.999) {
-        score += (SC.BB_band_touch ?? 1);
+        score += (SC.BB_band_touch ?? 0);   // 83% fire, lift flips (-0.039/+0.001) — pedestal
         reasons.push('BB upper band touch'); strats.push('BB');
       }
       if (bbN.bw < 0.005) {
-        score += (SC.BB_squeeze ?? 1);
+        score += (SC.BB_squeeze ?? 0);   // paired with BB_band_touch — same pedestal
         reasons.push('BB squeeze (breakout pending)'); strats.push('BB');
       }
     }
@@ -1417,6 +1347,23 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   //   Triple Top/Bottom, Head & Shoulders (both), High & Tight Flag
   //   Each scores +2; the pattern itself implies Level + Signal confluence
   //   (see families in confluence.mjs — TB/TT and HS/IHS land in both families).
+  // ── TL: AutoTL trendline IS the trend read (operator directive 2026-08-21) ──
+  // Replaces the A/T/B/D EMA-derived cluster, which fired on 88-96% of signals and
+  // added a flat +4 pedestal to 84% of them. Weighted by information, not agreement:
+  // a trendline agreeing is the common case and worth little; one pointing the OTHER
+  // way is rare and genuinely disqualifying.
+  {
+    const tl = autoTrendline(bars);
+    if (tl.dir === dir) {
+      score += (SC.TL_aligned ?? 1);
+      reasons.push(`AutoTL ${tl.detail}`); strats.push('TL');
+    } else if (tl.dir && tl.dir !== dir) {
+      score -= (SC.TL_opposed ?? 2);
+      reasons.push(`⚠ AutoTL opposes: ${tl.detail} (-${SC.TL_opposed ?? 2})`); strats.push('TL-opp');
+    }
+    // tl.dir === null (contraction / no validated line) scores 0 — no opinion
+  }
+
   {
     const pattern = detectChartPatterns(bars, atr, dir);
     if (pattern) {
@@ -1439,7 +1386,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   if (setupType) {
     const TYPE_BOOST = SC.setup_type_boost ?? 3;
     const typeStrategies = {
-      continuation: ['A','B','T','L','H'],
+      continuation: ['TL','L','H'],   // was ['A','B','T','L','H'] — A/B/T removed, so the
+      // +3 boost is no longer handed out for the presence of near-constant votes
       breakout:     ['OR','BB','V','L'],
       reversal:     ['K','H','R','F','U','BB','C','C-near'],
       retest:       ['C','C-near','F','U','K','H'],
@@ -1608,7 +1556,10 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
   try {
     const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
     if (existsSync(PARAMS_FILE)) {
-      const p = JSON.parse(readFileSync(PARAMS_FILE, 'utf8'));
+      // applyBlockExpiry: honour the one-week cooloff here too. Without it the scan
+      // list keeps dropping symbols whose block has lapsed, so unblocking at the
+      // execution gate alone would never produce a signal to execute.
+      const p = applyBlockExpiry(JSON.parse(readFileSync(PARAMS_FILE, 'utf8')));
       (p.blockedSymbols || []).forEach(s => scanBlocked.add(s));
     }
     const REJECT_FILE = join(DATA_ROOT, 'broker_rejects.json');

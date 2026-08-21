@@ -14,6 +14,7 @@ import { placeOrder, getEquity, closeAllPositions } from './execute_trade.mjs';
 import { evaluate } from '../../src/connection.js';
 import { fetchTwitterSignals, aggregateSignals } from './twitter_feed.mjs';
 import { analyzePerformance } from './performance_tracker.mjs';
+import { applyBlockExpiry } from './params_blocks.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -64,7 +65,7 @@ function releaseLock() {
 // Load tunable parameters from config file (falls back to safe defaults if missing)
 const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
 const PARAMS = existsSync(PARAMS_FILE)
-  ? JSON.parse(readFileSync(PARAMS_FILE, 'utf8'))
+  ? applyBlockExpiry(JSON.parse(readFileSync(PARAMS_FILE, 'utf8')))
   : { scoreThreshold: 6, stopRuleLosses: 4, riskPct: [5.0, 3.5, 2.5], slAtrMult: 1.5, minRR: 2.0, maxConcurrent: 4, blockedSessions: [], blockedSymbols: [], blockedSymbolExpiry: {} };
 
 // Daily context written by morning_agent.mjs at 06:45 UTC — bias, skip flag, threshold override

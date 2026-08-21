@@ -28,6 +28,7 @@ import {
   setChart, getBars, waitForBars, runAllStrategies, autoTrendlineTrend,
   buildSRZones, calcATR, fetchBarsResilient,
 } from './setup_finder.mjs';
+import { acquireChartLock, releaseChartLock } from './chart_lock.mjs';
 
 const IS_LINUX   = os.platform() === 'linux';
 const DATA_ROOT  = IS_LINUX
@@ -50,6 +51,40 @@ function log(msg) {
   process.stdout.write(line);
   try { appendFileSync(LOG_FILE, line); } catch (_) {}
 }
+
+// ── Today's plan — the authority on what we intend to trade ──────────────────
+// daily_plan.mjs writes at 05:00 UTC, ten minutes before this job. Until now the
+// two never spoke: the plan committed to zones on 7-8 instruments while this
+// selector independently kept only those passing an AutoTL 3-touch read, so the
+// analyst's highest-conviction calls were routinely never scanned. On 2026-08-21
+// the plan named continuation shorts on US30/USDJPY as the cleanest setups of the
+// day and both were absent from the watchlist — biasScore pays for trend
+// ALIGNMENT, which a continuation short into a pullback never earns.
+//
+// Any instrument the analyst gave a tradeable zone is now admitted on the plan's
+// authority, in the plan's direction (bullish → long, bearish → short). AutoTL
+// still runs and still ranks; it just no longer holds a veto over the plan.
+// Kill switch: PLAN_WATCHLIST=off restores pure AutoTL selection.
+function loadPlanBias() {
+  const out = new Map();
+  if ((process.env.PLAN_WATCHLIST ?? 'on') === 'off') return out;
+  try {
+    const f = join(DATA_ROOT, 'daily_plan.json');
+    if (!existsSync(f)) { log('  [plan] no daily_plan.json — falling back to pure AutoTL selection'); return out; }
+    const plan = JSON.parse(readFileSync(f, 'utf8'));
+    const today = new Date().toISOString().slice(0, 10);
+    if (plan.date !== today) { log(`  [plan] plan is stale (${plan.date} vs ${today}) — no plan authority today`); return out; }
+    for (const inst of plan.instruments || []) {
+      const dir = inst.bias === 'bullish' ? 'long' : inst.bias === 'bearish' ? 'short' : null;
+      if (!dir) continue;                                   // no-view = analyst stood aside
+      const zones = (inst.entry_zones || inst.zones || []).filter(z => z.tradeable !== false);
+      if (!zones.length) continue;                          // bias but nothing actionable
+      out.set(inst.symbol, { dir, zones });
+    }
+  } catch (e) { log(`  [plan] unreadable (${e.message}) — falling back to pure AutoTL selection`); }
+  return out;
+}
+const PLAN = loadPlanBias();
 
 // ── Full instrument universe — everything BlackBull offers on TradingView ─────
 // daily_selector prunes this to the 10-15 highest-conviction instruments each morning.
@@ -157,6 +192,15 @@ async function main() {
   const errored = [];
   let noTrend = 0;
 
+  // Serialise chart access against market_scanner — both drive the same tab, and an
+  // overlap misattributes one instrument's prices to another. Unlike the scanner we
+  // ABORT on timeout: a cross-contaminated watchlist sets wrong biasScore/zoneLevel for
+  // the whole trading day, whereas aborting keeps yesterday's file, which downstream
+  // already tolerates for up to 3 days (loadDailyWatchlist).
+  if (!await acquireChartLock('daily_selector', 180000, log)) {
+    throw new Error('chart lock held by market_scanner for >3min — aborting rather than write a cross-contaminated watchlist; previous watchlist kept');
+  }
+  try {
   for (const inst of SCAN_LIST) {
     try {
       // ── Trend: AutoTL on 4H only (operator directive) ──────────────────────
@@ -170,15 +214,22 @@ async function main() {
       const bars = r.bars;
       if (r.source === 'broker') process.stdout.write(`  [broker bars] ${inst.label}\n`);
 
-      const trend = autoTrendlineTrend(bars);
-      if (!trend.dir) {
+      const trend     = autoTrendlineTrend(bars);
+      const planEntry = PLAN.get(inst.label);
+      if (!trend.dir && !planEntry) {
         noTrend++;
         process.stdout.write(`  ~ ${inst.label}: no day trend — ${trend.detail}\n`);
-        continue;   // no validated AutoTL trend = no bias today, by design
+        continue;   // no AutoTL trend AND no planned zone = no bias today, by design
       }
 
-      // ── Ranking: confluence score IN the AutoTL direction only ────────────
-      const bestDir = trend.dir;
+      // ── Direction: the plan wins when the analyst committed to one ────────
+      // AutoTL still runs and still ranks; a disagreement is surfaced in
+      // `reasons` rather than silently dropping the instrument.
+      const bestDir  = planEntry ? planEntry.dir : trend.dir;
+      const planNote = !planEntry ? ''
+        : trend.dir && trend.dir !== planEntry.dir
+          ? `PLAN ${bestDir} (⚠ AutoTL says ${trend.dir}); `
+          : `PLAN ${bestDir}; `;
       const bestR   = runAllStrategies(bars, bestDir, utcHour, inst.label, SCAN_TF);
       const bestScore = bestR.score;
 
@@ -216,6 +267,8 @@ async function main() {
 
       scored.push({
         ...inst,
+        planBacked: !!planEntry,
+        planZones:  planEntry ? planEntry.zones.length : 0,
         biasDir:    bestDir,
         biasScore:  bestScore,
         rankScore:  bestScore + zoneBonus,
@@ -224,18 +277,19 @@ async function main() {
         zoneBonus,
         longScore:  bestDir === 'long'  ? bestScore : null,
         shortScore: bestDir === 'short' ? bestScore : null,
-        reasons:    `AutoTL 4H: ${trend.detail}; ${zoneNote}; ` + bestR.reasons.slice(0, 3).join('; '),
+        reasons:    `${planNote}AutoTL 4H: ${trend.detail}; ${zoneNote}; ` + bestR.reasons.slice(0, 3).join('; '),
         atr:        bestR.atrVal || null,
       });
 
-      const tag = bestScore + zoneBonus >= MIN_SCORE ? '✓' : '~';
-      process.stdout.write(`  ${tag} ${inst.label}: ${bestDir.toUpperCase()} ${bestScore}${zoneBonus ? `+${zoneBonus}z` : ''} — AutoTL 4H ${trend.detail}; ${zoneNote}\n`);
+      const tag = (planEntry || bestScore + zoneBonus >= MIN_SCORE) ? '✓' : '~';
+      process.stdout.write(`  ${tag} ${inst.label}: ${bestDir.toUpperCase()} ${bestScore}${zoneBonus ? `+${zoneBonus}z` : ''}${planEntry ? ` [plan ×${planEntry.zones.length}]` : ''} — ${planNote}AutoTL 4H ${trend.detail}; ${zoneNote}\n`);
 
     } catch (e) {
       errored.push(inst.label);
       log(`  ✗ ${inst.label}: ${e.message}`);
     }
   }
+  } finally { releaseChartLock(); }
   log(`AutoTL 4H trend found on ${scored.length} instruments; ${noTrend} with no validated trend; ${unavailable.length} unavailable; ${errored.length} errored.`);
 
   // A wedged CDP tab (Runtime.enable timeout) errors EVERY instrument. Writing an
@@ -249,19 +303,29 @@ async function main() {
     throw new Error(`0/${SCAN_LIST.length} instruments readable (${errored.length} errored) — CDP likely wedged; keeping previous watchlist`);
   }
 
-  // Sort by rank score (confluence + zone-proximity bonus) descending
-  scored.sort((a, b) => b.rankScore - a.rankScore);
+  // Plan-backed instruments first, then by rank score (confluence + zone bonus).
+  // Ordering matters: a plan-backed instrument routinely ranks BELOW MIN_SCORE
+  // (a continuation short earns no trend-alignment points), so it has to be
+  // ahead of the TOP_N cut to survive.
+  scored.sort((a, b) => (Number(!!b.planBacked) - Number(!!a.planBacked)) || (b.rankScore - a.rankScore));
 
   // Pick top N respecting category diversification limits
   const catCounts  = { forex: 0, index: 0, commodity: 0, crypto: 0 };
   const shortlisted = [];
 
   for (const inst of scored) {
-    if (inst.rankScore < MIN_SCORE) break;
     if (shortlisted.length >= TOP_N) break;
-    const cat = inst.category;
-    if ((catCounts[cat] || 0) >= (CATEGORY_MAX[cat] || 99)) continue;
-    catCounts[cat] = (catCounts[cat] || 0) + 1;
+    // Plan-backed entries skip the score cut and the category caps: the analyst
+    // already committed to a zone, an invalidation and a >=2R target on them, and
+    // inline_trader's plan gate is the thing that decides whether to enter. This
+    // loop's job is only to make sure they get SCANNED. `continue` (not `break`)
+    // so a low-ranked plan instrument can't truncate the rest of the list.
+    if (!inst.planBacked) {
+      if (inst.rankScore < MIN_SCORE) continue;
+      const cat = inst.category;
+      if ((catCounts[cat] || 0) >= (CATEGORY_MAX[cat] || 99)) continue;
+      catCounts[cat] = (catCounts[cat] || 0) + 1;
+    }
     shortlisted.push(inst);
   }
 
@@ -283,6 +347,8 @@ async function main() {
     biasDir:   inst.biasDir,
     biasScore: inst.biasScore,
     rankScore: inst.rankScore,
+    planBacked: !!inst.planBacked,
+    planZones:  inst.planZones || 0,
     zoneDistATR: inst.zoneDistATR,
     zoneLevel:   inst.zoneLevel,
     reasons:   inst.reasons,
@@ -296,7 +362,8 @@ async function main() {
     generatedAt:   new Date().toISOString(),
     scanTF:        `AutoTL 4H ×${SCAN_BARS}`,
     totalScanned:  SCAN_LIST.length,
-    eligible:      scored.filter(s => s.rankScore >= MIN_SCORE).length,
+    eligible:      scored.filter(s => s.planBacked || s.rankScore >= MIN_SCORE).length,
+    planBacked:    shortlisted.filter(s => s.planBacked).length,
     unavailable:   unavailable.length,
     errors:        errored.length,
     instruments,

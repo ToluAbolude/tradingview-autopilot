@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
+import { clampBlockExpiry } from './params_blocks.mjs';
 
 const IS_LINUX   = os.platform() === 'linux';
 const DATA_ROOT  = IS_LINUX
@@ -89,7 +90,17 @@ for (const r of recs) {
 updated._lastUpdated = new Date().toISOString().slice(0, 10);
 updated._updatedBy   = 'review_params.mjs';
 
-writeFileSync(PARAMS_FILE, JSON.stringify(updated, null, 2), 'utf8');
+// Every block gets a week-capped expiry on the way in. This is the chokepoint each
+// recommendation funnels through, so a 30-day block cannot enter the file regardless of
+// what the nightly agent proposes, and a block can never arrive without an expiry (which
+// is what made all 7 symbol blocks permanent).
+const clamped = clampBlockExpiry(updated);
+for (const key of ['blockedSymbolExpiry', 'blockedSessionExpiry']) {
+  if (JSON.stringify(clamped[key]) !== JSON.stringify(updated[key] ?? {}))
+    console.log(`  ⓘ ${key} capped to the trading week: ${JSON.stringify(clamped[key])}`);
+}
+
+writeFileSync(PARAMS_FILE, JSON.stringify(clamped, null, 2), 'utf8');
 console.log(`  ✓ trading_params.json updated.`);
 
 // Archive pending_params.json
