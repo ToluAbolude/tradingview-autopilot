@@ -81,6 +81,21 @@ async function main() {
   if (!base) { console.log('nothing resolved'); return; }
   console.log(`\nPOPULATION  n=${base.n}  WR ${pct(base.wr)}  avgR ${base.avgR.toFixed(3)}  PF ${base.pf.toFixed(2)}\n`);
 
+  // Out-of-sample split: chronological halves. A weight change is only worth making
+  // if the sign of the lift survives in BOTH halves — otherwise it's noise, which is
+  // exactly how the original hand-set table got its authority.
+  const resolvedRows = rows.filter(r => r.outcome != null).sort((a, b) => a.ts - b.ts);
+  const mid = Math.floor(resolvedRows.length / 2);
+  const half = [resolvedRows.slice(0, mid), resolvedRows.slice(mid)];
+  const liftIn = (set, c) => {
+    const w = stats(set.filter(r => r.codes.includes(c)));
+    const o = stats(set.filter(r => !r.codes.includes(c)));
+    return (w && o && w.n >= 10) ? w.avgR - o.avgR : null;
+  };
+  const splitDate = i => new Date(half[i][0].ts).toISOString().slice(0, 10);
+  console.log(`OOS halves: A ${splitDate(0)}..${new Date(half[0][half[0].length-1].ts).toISOString().slice(0,10)} (n=${half[0].length})  |  B ${splitDate(1)}..${new Date(half[1][half[1].length-1].ts).toISOString().slice(0,10)} (n=${half[1].length})
+`);
+
   const codes = [...new Set(rows.flatMap(r => r.codes))].sort();
   const table = [];
   for (const c of codes) {
@@ -96,10 +111,17 @@ async function main() {
   }
   table.sort((a, b) => b.lift - a.lift);
 
-  console.log('code      fire    n     WR    avgR    LIFT vs signals without it');
+  console.log('code      fire    n     WR    avgR    LIFT   halfA   halfB   verdict');
   for (const t of table) {
-    const flag = t.lift <= 0 ? '  <- no edge' : '';
-    console.log(`${t.code.padEnd(8)} ${pct(t.fire)} ${String(t.n).padStart(5)}  ${pct(t.wr)} ${t.avgR.toFixed(3).padStart(7)} ${(t.lift >= 0 ? '+' : '') + t.lift.toFixed(3)}${flag}`);
+    const a = liftIn(half[0], t.code), b = liftIn(half[1], t.code);
+    const sgn = x => x == null ? '   n/a' : ((x >= 0 ? '+' : '') + x.toFixed(3)).padStart(6);
+    let verdict = 'noisy';
+    if (a != null && b != null) {
+      if (a > 0 && b > 0) verdict = 'ROBUST +';
+      else if (a < 0 && b < 0) verdict = 'ROBUST -';
+      else verdict = 'flips';
+    }
+    console.log(`${t.code.padEnd(8)} ${pct(t.fire)} ${String(t.n).padStart(5)}  ${pct(t.wr)} ${t.avgR.toFixed(3).padStart(7)} ${((t.lift>=0?'+':'')+t.lift.toFixed(3)).padStart(6)}  ${sgn(a)}  ${sgn(b)}   ${verdict}`);
   }
   console.log('\nLIFT is the honest column: avgR WITH the vote minus avgR WITHOUT it.');
   console.log('A vote with high fire-rate and ~0 lift is a pedestal — it raises every score equally.');

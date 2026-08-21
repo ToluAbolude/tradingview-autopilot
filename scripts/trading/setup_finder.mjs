@@ -977,12 +977,12 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const nearPDL = voteOn('U') && pricePos < 0.40 && dir === 'long';
       const nearPDH = voteOn('U') && pricePos > 0.60 && dir === 'short';
       if (nearPDL) {
-        score += (SC.U_pdh_pdl ?? 1);
+        score += (SC.U_pdh_pdl ?? 0);   // robust NEGATIVE both OOS halves (-0.050/-0.049, n=431)
         reasons.push(`PDL support zone (${(pricePos*100).toFixed(0)}% of range, PDL=${PDL.toFixed(4)})`);
         strats.push('U');
       }
       if (nearPDH) {
-        score += (SC.U_pdh_pdl ?? 1);
+        score += (SC.U_pdh_pdl ?? 0);   // robust NEGATIVE both OOS halves (-0.050/-0.049, n=431)
         reasons.push(`PDH resistance zone (${(pricePos*100).toFixed(0)}% of range, PDH=${PDH.toFixed(4)})`);
         strats.push('U');
       }
@@ -1052,7 +1052,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   // (Superseded by the hard TRADE_WINDOWS gate in daily_plan_gate — disable via config)
   if (voteOn('P')) {
     if (utcHour >= 8 && utcHour < 17) {
-      score += (SC.P_prime_session ?? 1);
+      score += (SC.P_prime_session ?? 2);   // robust POSITIVE both OOS halves (+0.087/+0.092, n=966) at 40% fire
       reasons.push('Prime session'); strats.push('P');
     }
   }
@@ -1093,7 +1093,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
         }
       }
       if (pattern) {
-        score += (SC.K_candle_pattern ?? 1);
+        score += (SC.K_candle_pattern ?? 0);   // 84% fire, lift flips (-0.045/+0.035) — pedestal
         reasons.push(pattern); strats.push('K');
       }
     }
@@ -1175,7 +1175,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     const slice = bars.slice(Math.max(0, n - 20), n);
     const avgVol = slice.reduce((s, b) => s + (b.v || 0), 0) / slice.length;
     if (avgVol > 0 && last.v > avgVol * 1.5) {
-      score += (SC.V_volume_spike ?? 1);
+      score += (SC.V_volume_spike ?? 0);   // robust NEGATIVE both OOS halves (-0.071/-0.090, n=183)
       reasons.push(`Volume spike ${(last.v / avgVol).toFixed(1)}×`); strats.push('V');
     }
   }
@@ -1316,14 +1316,14 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     const bbN = bb[n];
     if (bbN) {
       if (dir === 'long'  && last.l <= bbN.lower * 1.001) {
-        score += (SC.BB_band_touch ?? 1);
+        score += (SC.BB_band_touch ?? 0);   // 83% fire, lift flips (-0.039/+0.001) — pedestal
         reasons.push('BB lower band touch'); strats.push('BB');
       } else if (dir === 'short' && last.h >= bbN.upper * 0.999) {
-        score += (SC.BB_band_touch ?? 1);
+        score += (SC.BB_band_touch ?? 0);   // 83% fire, lift flips (-0.039/+0.001) — pedestal
         reasons.push('BB upper band touch'); strats.push('BB');
       }
       if (bbN.bw < 0.005) {
-        score += (SC.BB_squeeze ?? 1);
+        score += (SC.BB_squeeze ?? 0);   // paired with BB_band_touch — same pedestal
         reasons.push('BB squeeze (breakout pending)'); strats.push('BB');
       }
     }
