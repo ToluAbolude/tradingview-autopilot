@@ -14,6 +14,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { analyzePerformance } from './performance_tracker.mjs';
+import { nextTradingWeekStart } from './params_blocks.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -151,16 +152,14 @@ function generateRecommendations(trades, params) {
 
   for (const [sym, d] of Object.entries(bySymbol)) {
     if (d.total >= MIN_TRADES_SYMBOL && d.wr < 30 && !newBlocked.includes(sym)) {
-      const expiry = new Date();
-      expiry.setUTCDate(expiry.getUTCDate() + 30);
-      const expiryStr = expiry.toISOString().slice(0, 10);
+      const expiryStr = nextTradingWeekStart();   // cooloff ends with the trading week
       newBlocked.push(sym);
       newExpiry[sym] = expiryStr;
       recs.push({
         param: 'blockedSymbols',
         current: currentBlocked,
         proposed: newBlocked,
-        reason: `${sym} WR ${d.wr}% < 30% over ${d.total} trades — cooling off for 30 days (until ${expiryStr})`,
+        reason: `${sym} WR ${d.wr}% < 30% over ${d.total} trades — cooling off until ${expiryStr} (end of this trading week)`,
         condition: `${sym} WR=${d.wr}% over ${d.total} trades`,
       });
       recs.push({

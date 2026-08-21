@@ -17,6 +17,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { analyzePerformance } from './performance_tracker.mjs';
+import { nextTradingWeekStart } from './params_blocks.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -196,7 +197,7 @@ TUNABLE PARAMETERS (your job is to recommend changes to these):
 - slAtrMult (float, 1.0–3.0): ATR multiplier for stop-loss.
 - tp1Mult / tp2Mult (float): TP R-multiples. Defaults 1.0 / 2.0.
 - riskPct (array): [first trade%, second trade%, 3rd+trade%]. Defaults [5.0, 3.5, 2.5].
-- blockedSymbols (string array): instruments paused for 30 days.
+- blockedSymbols (string array): instruments paused until the end of the current trading week.
 - blockedSymbolExpiry (object): expiry dates for blocked symbols.
 - blockedSessions (string array): sessions paused. Valid names (must match exactly): ASIAN, LONDON, LONDON-NY-OVERLAP, NY.
 - blockedSessionExpiry (object): expiry dates for blocked sessions (e.g. {"NY": "2026-08-02"}).
@@ -213,8 +214,8 @@ RULES — follow these strictly when making recommendations:
 1. Only recommend changes the data justifies. No changes without sufficient trade count.
 2. scoreThreshold: raise by 1 if WR < 40% AND total trades ≥ 20. Lower by 1 if WR > 70% AND PF > 2 AND trades ≥ 20. Max 12, min 4.
 3. slAtrMult: increase by 0.1–0.2 if PF < 1.2 (stops too tight). Decrease by 0.1 if PF > 2.5. Max 3.0, min 1.0.
-4. blockedSymbols: block for 30 days if WR < 30% over 15+ trades for that symbol AND its net outcome is materially negative (worse than -1.5R in replay mode, or a loss exceeding 1% of account equity in dollar mode). Unblock on expiry.
-5. blockedSessions: block for 30 days if WR < 35% over 15+ trades for that session AND its net outcome is materially negative (same thresholds as rule 4). Record the expiry in blockedSessionExpiry (same shape as blockedSymbolExpiry) and recommend unblocking when it passes. A handful of small losing trades is noise, not a signal — never block on it.
+4. blockedSymbols: block until the end of the current trading week (the next Monday) if WR < 30% over 15+ trades for that symbol AND its net outcome is materially negative (worse than -1.5R in replay mode, or a loss exceeding 1% of account equity in dollar mode). Unblock on expiry.
+5. blockedSessions: block until the end of the current trading week (the next Monday) if WR < 35% over 15+ trades for that session AND its net outcome is materially negative (same thresholds as rule 4). Record the expiry in blockedSessionExpiry (same shape as blockedSymbolExpiry) and recommend unblocking when it passes. A block is a one-week cooloff, never a sentence: expiries are capped to the next Monday on write, so do not propose longer ones — re-block next week if the pattern persists. A handful of small losing trades is noise, not a signal — never block on it.
 6. riskPct: DO NOT change. Requires explicit user approval.
 7. tp1Mult / tp2Mult: DO NOT change without strong missed-runner evidence.
 8. stopRuleLosses: only suggest changing if loss streak shows a clear pattern.
@@ -318,8 +319,7 @@ function staticFallback(trades, params) {
 
   for (const [sym, d] of Object.entries(bySymbol)) {
     if (d.total >= 5 && d.wr < 30 && !blocked.includes(sym)) {
-      const exp = new Date(); exp.setUTCDate(exp.getUTCDate() + 30);
-      const expStr = exp.toISOString().slice(0, 10);
+      const expStr = nextTradingWeekStart();   // cooloff ends with the trading week
       blocked.push(sym); expiry[sym] = expStr;
       recs.push({ param: 'blockedSymbols', current: params.blockedSymbols, proposed: [...blocked], reason: `${sym} WR ${d.wr}% < 30% over ${d.total} trades`, confidence: 'high', condition: `${sym} WR=${d.wr}%` });
       recs.push({ param: 'blockedSymbolExpiry', current: params.blockedSymbolExpiry, proposed: { ...expiry }, reason: `Expiry for ${sym}`, condition: 'companion' });
@@ -330,7 +330,7 @@ function staticFallback(trades, params) {
   if (unblocked.length) {
     const newBlocked = blocked.filter(s => !unblocked.includes(s));
     const newExpiry  = { ...expiry }; for (const s of unblocked) delete newExpiry[s];
-    recs.push({ param: 'blockedSymbols', current: blocked, proposed: newBlocked, reason: `Unblocking ${unblocked.join(', ')} — 30d cooloff expired`, confidence: 'high', condition: 'expiry reached' });
+    recs.push({ param: 'blockedSymbols', current: blocked, proposed: newBlocked, reason: `Unblocking ${unblocked.join(', ')} — cooloff expired`, confidence: 'high', condition: 'expiry reached' });
     recs.push({ param: 'blockedSymbolExpiry', current: expiry, proposed: newExpiry, reason: 'Remove expired entries', condition: 'companion' });
   }
 
