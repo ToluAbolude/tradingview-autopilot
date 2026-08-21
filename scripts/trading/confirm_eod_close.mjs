@@ -16,7 +16,7 @@
  *     every 30-min tick, any gate failing or erroring closes it. Kill switch:
  *     EOD_CARRY_THESIS=off restores close-all-losers.
  * cTrader Open API only at runtime — no CDP connection is ever opened (the
- * setup_finder import below is for its pure autoTrendlineTrend function).
+ * trendline import below is auto_trendline.mjs — pure geometry, zero deps).
  * Demo-only by env. Safe to run often (it no-ops outside the close windows).
  *
  * Cron: every ~30 min on Fri/Sat/Sun (the script decides whether to act).
@@ -24,7 +24,7 @@
 import { appendFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
-import { autoTrendlineTrend } from './setup_finder.mjs';
+import { autoTrendline as autoTrendlineTrend } from './auto_trendline.mjs';
 import { fibVetoState, pContinue, VETO_DEPTH } from './fib_veto.mjs';
 
 const DATA_ROOT = os.platform() === 'linux'
