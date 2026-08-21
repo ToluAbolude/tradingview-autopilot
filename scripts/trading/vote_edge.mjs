@@ -65,8 +65,12 @@ async function main() {
 
   const rows = [];
   for (const [symbol, list] of Object.entries(bySym)) {
+    // Window the fetch to this symbol's own signals (same shape edge_replay uses) —
+    // getTrendbars takes an options object, and without fromMs it returns nothing.
+    const fromMs = Math.min(...list.map(s => s.ts)) - 2 * 3600e3;
+    const toMs   = Math.max(...list.map(s => s.ts)) + 48 * 3600e3;
     let bars;
-    try { bars = await getTrendbars(symbol, 'M5', 20000); }
+    try { bars = await getTrendbars(symbol, { period: 'M5', fromMs, toMs, windowDays: 5 }); }
     catch (e) { console.error(`  ${symbol}: no bars (${e.message}) — skipped`); continue; }
     if (!bars?.length) { console.error(`  ${symbol}: no bars — skipped`); continue; }
     for (const s of list) rows.push({ ...s, ...replay(s, bars) });
@@ -101,4 +105,6 @@ async function main() {
   console.log('A vote with high fire-rate and ~0 lift is a pedestal — it raises every score equally.');
 }
 
-main().catch(e => { console.error('FATAL', e); process.exit(1); });
+// The cTrader socket keeps the event loop alive — exit explicitly (same reason
+// daily_selector and edge_replay do) so this never lingers as a zombie.
+main().then(() => process.exit(0)).catch(e => { console.error('FATAL', e); process.exit(1); });
