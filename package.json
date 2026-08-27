@@ -25,6 +25,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "chrome-remote-interface": "^0.33.2"
+    "chrome-remote-interface": "^0.33.2",
+    "nodemailer": "^9.0.1",
+    "protobufjs": "^8.6.5"
   }
 }

@@ -1,92 +1,9 @@
 {
-  "version": 1,
-  "updated": "2026-05-14",
-  "notes": "Auto-updated weekly by weekly_review_agent.mjs. Edit history below.",
-
-  "scoring": {
-    "A_smarttrail":       1,
-    "B_ema_stack":        1,
-    "E_ema_cross":        2,
-    "C_sr_fresh":         2,
-    "C_sr_retested":      3,
-    "D_daily_bias":       1,
-    "F_fvg_fresh":        2,
-    "F_fvg_other":        1,
-    "H_ha_pullback":      1,
-    "K_candle_pattern":   1,
-    "L_trendline_break":  2,
-    "L_trendline_bounce": 1,
-    "O_ict_ote":          1,
-    "P_prime_session":    1,
-    "R_rsi_extreme":      1,
-    "T_weekly_trend":     1,
-    "U_pdh_pdl":          1,
-    "V_volume_spike":     1,
-    "BB_band_touch":      1,
-    "BB_squeeze":         1,
-    "bias_penalty":       1,
-    "setup_type_boost":   3
-  },
-
-  "_trim_note": "2026-08-17 strategy trim. disabled_strategies switches votes OFF without deleting code (they are precious — re-enable by removing from this list). Disabled: K (pattern-in-vacuum ~coin-flip, Z supersedes it AT zones), R/BB/O (mean-reversion & fib votes that fire both directions — 24% of signal-bars emitted long AND short at once; fib entries net-negative per fib_backtest), H (weak), U (proximity vote, direction-blind), P (superseded by the hard TRADE_WINDOWS gate in daily_plan_gate). class_vote_overrides drops zone votes on indices — their own inst_profiles already say indices gap through zones (slMode atr). pass1_min_score 6→5 compensates the removed vote supply; executor scoreThreshold needs a 2-week recalibration observation.",
+  "version": 2,
+  "updated": "2026-08-17",
+  "notes": "MINIMAL VM config — strategy trim only. Deliberately omits scoring/inst_profiles/ema_overrides: the VM has run on code defaults since the migration, and the repo config's inst_profiles are stale 15M-ATR-era tuning that would regress the H1-era SL/TP profiles hard-coded in setup_finder. Only add keys here that are meant to OVERRIDE code defaults.",
+  "_trim_note": "2026-08-17: disabled_strategies switches votes OFF without deleting code (re-enable by removing from the list). Disabled: K (pattern-in-vacuum ~coin-flip; Z supersedes it AT zones), R/BB/O (mean-reversion & fib votes that fire both directions — 24% of signal-bars emitted long AND short at once; fib entries net-negative per fib_backtest), H (weak), U (proximity, direction-blind), P (superseded by the hard TRADE_WINDOWS gate in daily_plan_gate). class_vote_overrides drops zone votes on indices (their inst profiles already say indices gap through zones). pass1_min_score 6 -> 5 compensates the removed vote supply.",
   "disabled_strategies": ["K", "R", "BB", "O", "H", "U", "P"],
   "class_vote_overrides": { "index": ["C", "C-near", "F"] },
-
-  "thresholds": {
-    "pass1_min_score":   5,
-    "ema_flat_pct":      0.004,
-    "rr_min":            2.0,
-    "ema_fast":          8,
-    "ema_mid":           21,
-    "ema_slow":          50
-  },
-
-  "_ema_overrides_note": "Per-symbol EMA [fast,mid,slow] override (2026-05-29). Global default is 8/21/50; these symbols opt into 21/50/200 because the full-portfolio backtest showed PF>=1.5 there (USDCHF 3.05, EURJPY 2.85, ETHUSD 2.14, US30 1.89, LTCUSD 1.65, BTCUSD 1.62) plus NZDCAD from its own focused test (~2.0). All other symbols stay on 8/21/50.",
-  "ema_overrides": {
-    "USDCHF": [21, 50, 200],
-    "EURJPY": [21, 50, 200],
-    "ETHUSD": [21, 50, 200],
-    "US30":   [21, 50, 200],
-    "LTCUSD": [21, 50, 200],
-    "BTCUSD": [21, 50, 200],
-    "NZDCAD": [21, 50, 200]
-  },
-
-  "mtf_bonus": [
-    { "min_weight": 5,   "bonus": 3 },
-    { "min_weight": 3,   "bonus": 2 },
-    { "min_weight": 1.5, "bonus": 1 },
-    { "min_weight": 0,   "bonus": 0 }
-  ],
-
-  "tf_weights": {
-    "1": 0.25, "5": 0.5, "15": 1, "30": 1, "60": 1.5, "240": 2.5, "D": 3, "W": 4
-  },
-
-  "inst_profiles": {
-    "XAUUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.50 },
-    "XAGUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.50 },
-    "WTI":    { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.50 },
-    "BTCUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.80, "minSlAtr": 0.10, "tpCap": 2.00, "tp3Cap": 3.00 },
-    "ETHUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.80, "minSlAtr": 0.10, "tpCap": 2.00, "tp3Cap": 3.00 },
-    "LTCUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.00 },
-    "XRPUSD": { "slMode": "fvg_sr", "maxSlAtr": 0.60, "minSlAtr": 0.08, "tpCap": 1.50, "tp3Cap": 2.00 },
-    "NAS100": { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
-    "US30":   { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
-    "SPX500": { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
-    "GER40":  { "slMode": "atr",    "maxSlAtr": 0.35, "minSlAtr": 0.08, "tpCap": 0.80, "tp3Cap": 1.20 },
-    "UK100":  { "slMode": "atr",    "maxSlAtr": 0.30, "minSlAtr": 0.08, "tpCap": 0.70, "tp3Cap": 1.10 },
-    "EURUSD": { "slMode": "sr",     "maxSlAtr": 0.30, "minSlAtr": 0.05, "tpCap": 0.70, "tp3Cap": 1.10 },
-    "GBPUSD": { "slMode": "sr",     "maxSlAtr": 0.30, "minSlAtr": 0.05, "tpCap": 0.70, "tp3Cap": 1.10 },
-    "AUDUSD": { "slMode": "sr",     "maxSlAtr": 0.25, "minSlAtr": 0.05, "tpCap": 0.60, "tp3Cap": 0.90 },
-    "NZDUSD": { "slMode": "sr",     "maxSlAtr": 0.25, "minSlAtr": 0.05, "tpCap": 0.60, "tp3Cap": 0.90 },
-    "USDCAD": { "slMode": "sr",     "maxSlAtr": 0.30, "minSlAtr": 0.05, "tpCap": 0.70, "tp3Cap": 1.10 },
-    "USDCHF": { "slMode": "sr",     "maxSlAtr": 0.25, "minSlAtr": 0.05, "tpCap": 0.60, "tp3Cap": 0.90 },
-    "USDJPY": { "slMode": "sr",     "maxSlAtr": 0.40, "minSlAtr": 0.08, "tpCap": 0.90, "tp3Cap": 1.40 },
-    "EURJPY": { "slMode": "sr",     "maxSlAtr": 0.40, "minSlAtr": 0.08, "tpCap": 0.90, "tp3Cap": 1.40 },
-    "GBPJPY": { "slMode": "sr",     "maxSlAtr": 0.45, "minSlAtr": 0.08, "tpCap": 1.00, "tp3Cap": 1.60 },
-    "AUDJPY": { "slMode": "sr",     "maxSlAtr": 0.40, "minSlAtr": 0.08, "tpCap": 0.90, "tp3Cap": 1.40 }
-  },
-
-  "change_history": []
+  "thresholds": { "pass1_min_score": 5 }
 }
