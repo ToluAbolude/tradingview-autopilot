@@ -193,7 +193,6 @@ STRATEGY FAMILIES:
 - T (weekly trend) AND U (PDH/PDL zone) are MANDATORY gates — setups without both are rejected.
 
 TUNABLE PARAMETERS (your job is to recommend changes to these):
-- scoreThreshold (int, 4–12): min score to take a trade. Current default 6.
 - slAtrMult (float, 1.0–3.0): ATR multiplier for stop-loss.
 - tp1Mult / tp2Mult (float): TP R-multiples. Defaults 1.0 / 2.0.
 - riskPct (array): [first trade%, second trade%, 3rd+trade%]. Defaults [5.0, 3.5, 2.5].
@@ -212,7 +211,7 @@ DATA SOURCE — the summary's dataSource field tells you what the pnl numbers me
 
 RULES — follow these strictly when making recommendations:
 1. Only recommend changes the data justifies. No changes without sufficient trade count.
-2. scoreThreshold: raise by 1 if WR < 40% AND total trades ≥ 20. Lower by 1 if WR > 70% AND PF > 2 AND trades ≥ 20. Max 12, min 4.
+2. scoreThreshold, pass1MinScore, planScoreFloor, planScoreRelief and riskPct are OPERATOR-FROZEN. Never recommend a change to any of them — the entry bar is set by hand against the live score distribution, and risk is set by hand. Recommendations for these are discarded on write. If the data suggests the bar is wrong, say so in your analysis instead.
 3. slAtrMult: increase by 0.1–0.2 if PF < 1.2 (stops too tight). Decrease by 0.1 if PF > 2.5. Max 3.0, min 1.0.
 4. blockedSymbols: block until the end of the current trading week (the next Monday) if WR < 30% over 15+ trades for that symbol AND its net outcome is materially negative (worse than -1.5R in replay mode, or a loss exceeding 1% of account equity in dollar mode). Unblock on expiry.
 5. blockedSessions: block until the end of the current trading week (the next Monday) if WR < 35% over 15+ trades for that session AND its net outcome is materially negative (same thresholds as rule 4). Record the expiry in blockedSessionExpiry (same shape as blockedSymbolExpiry) and recommend unblocking when it passes. A block is a one-week cooloff, never a sentence: expiries are capped to the next Monday on write, so do not propose longer ones — re-block next week if the pattern persists. A handful of small losing trades is noise, not a signal — never block on it.
@@ -297,15 +296,12 @@ function staticFallback(trades, params) {
   const overall = analyzePerformance(trades);
 
   if (overall.total >= MIN_TRADES) {
-    if (overall.wr < 40) {
-      const proposed = Math.min(12, (params.scoreThreshold || 6) + 1);
-      if (proposed !== params.scoreThreshold)
-        recs.push({ param: 'scoreThreshold', current: params.scoreThreshold, proposed, reason: `WR ${overall.wr}% < 40% over ${overall.total} trades`, confidence: 'high', condition: `WR=${overall.wr}%` });
-    } else if (overall.wr > 70 && overall.pf > 2) {
-      const proposed = Math.max(4, (params.scoreThreshold || 6) - 1);
-      if (proposed !== params.scoreThreshold)
-        recs.push({ param: 'scoreThreshold', current: params.scoreThreshold, proposed, reason: `WR ${overall.wr}% > 70% + PF ${overall.pf} > 2 over ${overall.total} trades`, confidence: 'medium', condition: `WR=${overall.wr}% PF=${overall.pf}` });
-    }
+    // scoreThreshold rules removed 2026-08-27 (operator directive). The raise rule
+    // was a one-way ratchet: it fired on WR < 40%, and a tighter bar produces fewer
+    // trades, which on a small sample reads as a worse WR, which raises it again. It
+    // reached 9 by 2026-08-19 and — with market_scanner's Pass-1 bar hardcoded at 5 —
+    // helped strand the account at zero trades for six days. The bar is now set by
+    // hand against the live score distribution and frozen in apply_params.mjs.
     if (overall.pf < 1.2 && overall.pf > 0) {
       const proposed = Math.round(Math.min(3.0, (params.slAtrMult || 1.5) + 0.1) * 10) / 10;
       if (proposed !== params.slAtrMult)

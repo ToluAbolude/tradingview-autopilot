@@ -29,11 +29,21 @@ const DATA_ROOT       = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d
 const SIGNALS_FILE    = join(DATA_ROOT, 'live_signals.json');
 const SCAN_INTERVAL   = 15 * 60 * 1000;   // 15 minutes
 const MAX_HISTORY     = 500;               // keep last 500 expired signals
-// 6 → 5 with the 2026-08-17 strategy trim: 7 vote codes were switched off in
-// scanner_config (K/R/BB/O/H/U/P), shrinking the score supply by ~2-3 points on
-// a typical bar. NOTE scanner_config's "pass1_min_score" was never read — this
-// constant (or env MIN_SCORE) is the real knob.
-const MIN_SCORE       = Number(process.env.MIN_SCORE ?? 5);  // per-TF Pass 1 threshold (MTF bonus adds up to +3 on top)
+// Per-TF Pass-1 threshold (the MTF bonus adds up to +3 on top). It lives in
+// trading_params.json as `pass1MinScore` so every scanner knob sits in ONE file.
+// As a bare constant it silently outranked every param edit, and that is what
+// killed the scanner 2026-08-22..27: the 2026-08-21 vote removal (A/T/B/D, which
+// fired on 87-96% of bars) on top of the 2026-08-17 trim (K/R/BB/O/H/U/P) cut ~4
+// points off a typical bar's score, but this stayed at 5. Pass-1 clears/day fell
+// 1042 → 3-14 and live_signals.json sat empty for six days, while daily_plan.mjs
+// wrote a plan every morning that nothing could ever act on.
+// Read per scan so a param edit lands without restarting the long-lived daemon.
+const PARAMS_FILE     = join(DATA_ROOT, 'trading_params.json');
+function minScore() {
+  if (process.env.MIN_SCORE) return Number(process.env.MIN_SCORE);
+  try { return Number(JSON.parse(readFileSync(PARAMS_FILE, 'utf8')).pass1MinScore ?? 3); }
+  catch (_) { return 3; }
+}
 // --scan-only: look at charts + write live_signals.json every 15 min, but place
 // NO trades (pass no executor to scanForSetups). Visibility/planning without the
 // overtrading risk of continuous auto-execution.
@@ -89,7 +99,7 @@ async function runScan(state) {
   // scan anyway: a possibly-contaminated scan beats a scanner that silently stops.
   await acquireChartLock('market_scanner', 90000, m => console.log(m));
   try {
-    fresh = await scanForSetups(MIN_SCORE, 1.5, SCAN_ONLY ? null : attemptInlineTrade);
+    fresh = await scanForSetups(minScore(), 1.5, SCAN_ONLY ? null : attemptInlineTrade);
   } catch (e) {
     console.error(`  Scan error: ${e.message}`);
     return state;
@@ -203,7 +213,7 @@ process.on('SIGTERM', () => process.exit(0));
 
 console.log('\n══════════════════════════════════════════════════════');
 console.log('  Market Scanner — 15-min continuous scan');
-console.log(`  Threshold ≥${MIN_SCORE} | 27 instruments | All sessions`);
+console.log(`  Threshold ≥${minScore()} | 27 instruments | All sessions`);
 console.log(`  Output: ${SIGNALS_FILE}`);
 console.log('══════════════════════════════════════════════════════');
 

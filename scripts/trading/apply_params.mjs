@@ -83,8 +83,28 @@ if (mode === 'preview') {
 // ── Apply mode ──
 const updated = { ...current };
 
+// Params the nightly agent may never move (operator directive 2026-08-27).
+//
+// The entry bar is set by hand against the live score distribution, not by a
+// win-rate rule. eod_agent had ratcheted scoreThreshold 6 -> 9 by 2026-08-19 and
+// blocked five of the eight core plan instruments; combined with a hardcoded
+// Pass-1 bar of 5 that left the account unable to take a single planned trade for
+// six days. A rule that only ever tightens on a losing sample is a ratchet: it
+// cannot tell "no edge" from "no trades", and it reads the second as the first.
+// riskPct is frozen for the same reason — scale_risk_to_goal used to rail it to
+// the cap chasing a date, and that scaler is gone.
+//
+// This is the chokepoint every recommendation funnels through (LLM and static
+// fallback alike), so one guard here covers both paths. Recommendations are still
+// printed — the reasoning stays visible, it just no longer binds.
+const FROZEN = new Set(['scoreThreshold', 'pass1MinScore', 'planScoreFloor', 'planScoreRelief', 'riskPct']);
+
 // Apply all recs (last write per param wins)
 for (const r of recs) {
+  if (FROZEN.has(r.param)) {
+    console.log(`  ⊘ ${r.param} is operator-frozen — logged, not applied (${JSON.stringify(current[r.param])} → ${JSON.stringify(r.proposed)})`);
+    continue;
+  }
   updated[r.param] = r.proposed;
 }
 updated._lastUpdated = new Date().toISOString().slice(0, 10);

@@ -5,12 +5,60 @@ Live automated day-trading system running on an Oracle Cloud VM. Scans 22 instru
 structured orders via BlackBull Markets through TradingView Desktop. All positions are closed
 by 20:00 UTC — no overnight exposure.
 
-_Last updated: 2026-06-28_
+_Last updated: 2026-08-27_
 
 > **NOTE:** sections below this status block predate the cTrader migration and may be stale.
 > Order execution is now via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`),
 > not the TradingView/BlackBull DOM path. TradingView (Chrome on the VM, CDP 9222) is used for
 > **chart reading only**.
+
+---
+
+## Current Operational Status (2026-08-27)
+
+> Supersedes the blocks below. Two entry gates were silently starving the scanner; both are fixed,
+> and the daily plan can now originate trades instead of only vetoing them.
+
+**Six days of zero signals (2026-08-22..27), three causes pointing the same way:**
+
+1. `market_scanner.mjs` held its Pass-1 bar as `const MIN_SCORE = 5` — a bare constant that
+   **outranked every `trading_params.json` edit**, so the 2026-08-21 `scoreThreshold 6 → 4` never
+   reached the scanner. With the A/T/B/D votes removed that day (they fired on 87–96% of bars) on
+   top of the 2026-08-17 K/R/BB/O/H/U/P trim, a typical bar scores **2**. Pass-1 clears/day fell
+   **1042 → 3–14**. Now `pass1MinScore` (=3), re-read from the params file **per scan**.
+2. Plan relief was **inverted**: with neither key present, `inline_trader` computed
+   `max(planScoreFloor ?? 6, scoreThreshold - planScoreRelief ?? 2)` = `max(6, 2)` = **6**, so
+   plan-backed entries needed a *higher* bar than ordinary ones. `planScoreFloor`/`planScoreRelief`
+   (both 2) now make the documented "plan-backed bar = 2" real.
+3. `eod_agent`'s `scoreThreshold` rule was a **one-way ratchet** — it raised on WR < 40%, a tighter
+   bar produces fewer trades, and on a small sample that reads as a worse WR, which raises it again.
+   It reached **9** by 2026-08-19 and blocked five of the eight core plan instruments. Removed.
+
+**Params frozen** — `scoreThreshold`, `pass1MinScore`, `planScoreFloor`, `planScoreRelief`, `riskPct`
+are operator-frozen in `apply_params.mjs`, the one chokepoint both the LLM and static-fallback paths
+write through. Recommendations still print; they no longer bind.
+
+**`zone_limit_runner.mjs` rewritten — the plan now originates trades.** It used to derive its own
+pivot S&R zones and run dry-run (27 phantom rests/day, nothing placed). It now rests the daily plan's
+tradeable zones as **live** limits at the zone midpoint, SL = plan invalidation, TP = plan target,
+only while price is still outside the zone, refusing anything under 2R. Cron carries `--live`; drop
+that flag to stop it. See the Plan-first section in [CLAUDE.md](CLAUDE.md).
+
+**`weekly_report_cron.sh`** — both accounts render from the same `$HTML_FILE` and
+`daily_trade_report.mjs` exits 2 *before* writing it, so a failed second run mailed the **first**
+account's HTML under the second's banner (that is the 2026-08-22 weekly). Now `rm -f` between runs,
+an explicit failure card, and a `[WEEKLY][FAILED]` subject — the same guard the daily report got on
+2026-08-18.
+
+**`scale_risk_to_goal` REMOVED** from `run_eod_hermes.sh` — see the (now superseded) re-enable note
+below. It back-solved `riskPct` from the $500k-by-2026-10-01 target and railed it to the `[10,7,5]`
+cap, incoherent with the daily drawdown halt: a single 10% loss ended the day on trade one. Risk is
+now `[5, 3.5, 2.5]` with `maxDailyDrawdownPct: 10` — two losses stop the day — set by hand and
+frozen. `scale_risk_to_goal.mjs` is kept in the repo; re-enable by restoring the two node lines.
+
+**Guards** — `test_scanner_gates.mjs` (asserts the hardcoded `MIN_SCORE` constant cannot return) and
+`test_zone_limit_plan.mjs` (plan-zone entry/SL/TP/R math, pure — no broker, no clock). Both read VM
+paths; run them on the VM.
 
 ---
 
@@ -136,7 +184,7 @@ re-run `nlm login` when it expires):
 
 **Kill-switch fixed** — the daily-drawdown halt now reads REAL cTrader P&L (`getTodayRealizedPnl()`); it previously summed `trades.csv` (mostly VOID/0) and was blind through a −9.6% day.
 
-**`scale_risk_to_goal` RE-ENABLED (2026-07-03, operator decision)** — it had been disabled 2026-06-01 after cranking risk toward the old moonshot on a negative edge, then silently dropped entirely in the VM migration. Now runs as the last step of `/home/ubuntu/run_eod_hermes.sh` (20:30 Mon–Fri) against a **refreshed moonshot goal.json: $10,682 → $500k by 2026-10-01** (~46.8x, ~4.4%/day compounded). Consequence: while the measured 30d edge is positive, riskPct rails to the script's **10/7/5 cap** (double the operator tiers); on a negative edge it halves current risk instead of scaling up. `eod_agent` now calls `claude-opus-4-8` and activates automatically once `ANTHROPIC_API_KEY` is placed in `~/.anthropic.env` on the VM; until then hermes_reflect uses static review_params rules.
+**`scale_risk_to_goal` RE-ENABLED (2026-07-03, operator decision)** — **SUPERSEDED: removed again 2026-08-27, see the status block at the top.** — it had been disabled 2026-06-01 after cranking risk toward the old moonshot on a negative edge, then silently dropped entirely in the VM migration. Now runs as the last step of `/home/ubuntu/run_eod_hermes.sh` (20:30 Mon–Fri) against a **refreshed moonshot goal.json: $10,682 → $500k by 2026-10-01** (~46.8x, ~4.4%/day compounded). Consequence: while the measured 30d edge is positive, riskPct rails to the script's **10/7/5 cap** (double the operator tiers); on a negative edge it halves current risk instead of scaling up. `eod_agent` now calls `claude-opus-4-8` and activates automatically once `ANTHROPIC_API_KEY` is placed in `~/.anthropic.env` on the VM; until then hermes_reflect uses static review_params rules.
 
 **ORB strategy** — dedicated time-gated runner `orb_runner.mjs` in **DRY-RUN** (logs would-be trades to `orb_signals.jsonl`, places nothing). Pairings from a 90-day isolated backtest (`orb_backtest.mjs`): **Gold@Asia, indices/AUD-NZD/JPY-cross cluster@London, AUDJPY@NY**, 2R target, SL = opposite OR boundary. Has its own allowlist — **not** gated by `blockedSymbols` (so it trades WTI@London despite the scanner block).
 
@@ -148,7 +196,7 @@ re-run `nlm login` when it expires):
 | 06:15 Mon–Fri | `run_daily_brief.sh` | **daily confirmation** of the weekly calls: on_track/against/invalidated per instrument; broken calls get root-caused (released data + headlines) and REVISED; writes `daily_context/<date>.json` which session_runner consumes (skip/threshold/avoid-list) |
 | 07:00–11:55 / 13:30–18:55 / 00:00–04:55 | `orb_runner_cron.sh` | ORB dry-run, every 5 min in session windows |
 | 20:00 & 21:45 Mon–Fri | `eod_close.mjs` | force-close all positions |
-| 20:30 Mon–Fri | `run_eod_hermes.sh` | eod_agent + hermes_reflect (scale_risk disabled); dropped in the VM migration, re-enabled 2026-07-03 (static rules only until ANTHROPIC_API_KEY is added to `~/.anthropic.env`) |
+| 20:30 Mon–Fri | `run_eod_hermes.sh` | edge_replay → eod_agent → hermes_reflect. **`scale_risk_to_goal` removed 2026-08-27** (riskPct is operator-set and frozen) |
 | 20:35 Mon–Fri | `daily_report_cron.sh` | EOD email — **that day's trades only** (replaced the rolling-30d email) |
 | every 5 min | `scanner_freshness_check.sh` | respawns scanner if stale/dead |
 | every 5 min | `cdp_watchdog.sh` | restarts tv_browser after 3 consecutive CDP failures (heals dead chart tab) |
@@ -473,9 +521,13 @@ Edit locally, deploy to VM with `scp`, picked up on next scan cycle.
 
 | Parameter | Current value | Description |
 |-----------|---------------|-------------|
-| `scoreThreshold` | **6** | Minimum score to emit a signal |
+| `scoreThreshold` | **4** | Minimum score to emit a signal — **operator-frozen** |
+| `pass1MinScore` | **3** | Per-TF Pass-1 gate in `market_scanner` (MTF bonus adds up to +3 on top). Re-read per scan — **operator-frozen**. Was a hardcoded `5` until 2026-08-27 |
+| `planScoreFloor` | **2** | Score floor for plan-backed entries — **operator-frozen** |
+| `planScoreRelief` | **2** | Subtracted from `scoreThreshold` for plan-backed entries — **operator-frozen** |
+| `maxDailyDrawdownPct` | **10** | Daily realized-loss halt (real cTrader P&L) |
 | `stopRuleLosses` | 2 | Consecutive losses before session pause |
-| `riskPct` | **[5.0, 3.5, 2.5]** | Risk % for 1 / 2 / 3+ concurrent trades |
+| `riskPct` | **[5.0, 3.5, 2.5]** | Risk % for 1 / 2 / 3+ concurrent trades — **operator-frozen** |
 | `slAtrMult` | **0.75** | Hard SL cap as ATR multiple |
 | `tp1Mult` | 1.0 | TP1 fallback R multiple (when no zone found) |
 | `tp2Mult` | 2.0 | TP2 runner fallback R multiple |

@@ -1,13 +1,13 @@
 {
   "_note": "Tunable trading parameters. Apply changes via: node scripts/trading/apply_params.mjs --apply",
-  "_lastUpdated": "2026-05-25",
-  "_updatedBy": "scale_risk_to_goal",
-  "scoreThreshold": 6,
+  "_lastUpdated": "2026-08-27",
+  "_updatedBy": "operator (goal-chasing removed; risk set by hand)",
+  "scoreThreshold": 4,
   "stopRuleLosses": 2,
   "riskPct": [
-    2.5,
-    1.8,
-    1.3
+    5,
+    3.5,
+    2.5
   ],
   "slAtrMult": 0.75,
   "tp1Mult": 1,
@@ -16,11 +16,24 @@
   "maxConcurrent": 4,
   "blockedSessions": [],
   "_blockedSymbols_note": "2026-06-01: blocked XAGUSD + WTI per operator decision. 14d cTrader data: XAGUSD -$5,106 over 45 trades (22% WR, PF 0.46) — single-handedly the entire account drawdown. WTI -$10 over 69 trades (12% WR) — structural churn, never finds an edge. Both stay blocked (no auto-expiry) until manually re-enabled after a strategy review. Kept BTCUSD (30d +$3,089) and NAS100 (+$613) trading.",
-  "blockedSymbols": ["XAGUSD", "WTI"],
+  "blockedSymbols": [
+    "XAGUSD",
+    "WTI"
+  ],
   "blockedSymbolExpiry": {},
   "_confluence_note": "Trifecta = Trend + Level + Signal families (see scripts/trading/confluence.mjs). Soft gate raises effective score threshold when families are missing. Set requireTrifecta=true to hard-reject anything <3/3.",
   "requireTrifecta": false,
   "trifectaPartialBonus": 1,
   "trifectaWeakBonus": 2,
-  "_version": 1
+  "_version": 61,
+  "_scoreThreshold_note": "2026-08-21 (2nd pass): 6 -> 4, paired with zeroing U/V/BB/K and raising P to 2 after OOS validation (median signal -2 over 4000). Plan-backed bar = 2.",
+  "pass1MinScore": 3,
+  "_pass1MinScore_note": "2026-08-27: NEW KNOB. market_scanner's Pass-1 per-TF gate was a hardcoded 5 that ignored this file entirely, so the 2026-08-21 'threshold 6 -> 4' edit never reached the scanner. With A/T/B/D removed that day (they fired on 87-96% of bars) a typical bar scores 2, so nothing cleared 5: Pass-1 clears/day fell 1042 -> 3-14 and ZERO signals were emitted 2026-08-22..27. Set to 3 (996 cells at >=3 vs 49 at >=5 that week). maxDailyTotal=5 still caps the day.",
+  "planScoreFloor": 2,
+  "planScoreRelief": 2,
+  "_planScoreFloor_note": "2026-08-27: makes the documented 'Plan-backed bar = 2' real. inline_trader computes max(planScoreFloor ?? 6, scoreThreshold - planScoreRelief ?? 2); with neither key present that was max(6, 4-2) = 6, i.e. plan-backed entries needed a HIGHER score (6) than ordinary ones (4) — the relief was inverted. Now max(2, 4-2) = 2 as intended.",
+  "maxDailyDrawdownPct": 10,
+  "_riskPct_note": "2026-08-27: scale_risk_to_goal REMOVED from run_eod_hermes.sh (VM). It railed riskPct to [10,7,5] chasing $500k-by-Oct-1, incoherent with a 3% daily halt — one 10% loss ended the day on trade one. Operator set [5,3.5,2.5] with the halt at 10%: 2 losses stop the day. riskPct is operator-frozen in apply_params.mjs; no nightly agent may move it.",
+  "blockedSessionExpiry": {},
+  "_blockPolicy": "2026-08-21: a block expires at the start of the next trading week (max 7d, capped on write by apply_params.clampBlockExpiry). The VM cleared its legacy permanent blocks; the XAGUSD/WTI entries below are kept in this seed deliberately (see _blockedSymbols_note)."
 }

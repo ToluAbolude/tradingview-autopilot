@@ -134,7 +134,7 @@ Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines')
 
 The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB)** VM at **ubuntu@145.241.220.213** (the old 1 GB box 132.145.44.68 was terminated). TradingView runs as Chromium on virtual display `:99`, managed by systemd. The repo on the VM is `/home/ubuntu/tradingview-autopilot`.
 
-> **Live status:** see the **Current Operational Status (2026-06-28)** section at the top of [TRADING_SYSTEM.md](TRADING_SYSTEM.md) for the VM, the per-strategy experiment (cTrader demo 2131377), the Notion trade journal (Phases 1–3), VNC, params, blocks, and automations. Order execution is via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`); TradingView/CDP is chart-reading only.
+> **Live status:** see the **Current Operational Status (2026-08-27)** section at the top of [TRADING_SYSTEM.md](TRADING_SYSTEM.md) for the VM, the per-strategy experiment (cTrader demo 2131377), the Notion trade journal (Phases 1–3), VNC, params, blocks, and automations. Order execution is via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`); TradingView/CDP is chart-reading only.
 
 ### Services on the VM
 
@@ -163,9 +163,22 @@ The scanner account no longer originates trades from signals. Causality is now *
 2. `daily_plan_gate.mjs` enforces it. The instrument must be in the plan, direction must match the bias, and price must be **at** a planned zone. Plan invalidation replaces the signal SL when it is wider (widen-only); plan targets replace the TPs.
 3. Wired in **two** places: `inline_trader.attemptInlineTrade` (gate 2c) and — because `zone_limit_runner`, `session_runner` and `orb_runner`'s cTrader leg reach the broker without touching inline_trader — `broker_ctrader.assertOrderSafety`, the one chokepoint every entry funnels through. That call is **entry-only**; closes/modifies/cancels bypass it, so it can never trap a position.
 
+4. `zone_limit_runner.mjs` (every 15 min, `--live` since 2026-08-27) is the plan's **execution arm**. Steps 2–3 could only ever *veto*: nothing in the system originated from the plan, so a morning of validated zones produced no trades unless the momentum scanner independently fired on the same instrument at the same price — which it rarely does, because plan zones are reversion levels where momentum confluence is absent by construction. The runner now rests a limit at each tradeable zone's **midpoint** (the price the plan costed its own `rr_to_t1` at), SL = plan invalidation, TP = plan target, only while price is still *outside* the zone (inside = a market entry, `inline_trader`'s job), refusing anything under 2R. Cancels on plan-rolled / zone-left-plan / invalidation-breached / price-ran-away / position-open / past 19:00 UTC. Placements still funnel through `assertOrderSafety`, so the gate re-checks them.
+
 **Fails closed**: no plan, or a stale plan, and nothing trades. Scoped to acct **2118552** only — the experiment (2131377) is untouched.
-Kill switches: `PLAN_GATE=off` (restore originate-anywhere), `CORE_ONLY=off` (restore the 55-instrument universe), `PLAN_GATE_ACCOUNT`, `PLAN_ZONE_BUFFER`.
+Kill switches: `PLAN_GATE=off` (restore originate-anywhere), `CORE_ONLY=off` (restore the 55-instrument universe), `PLAN_GATE_ACCOUNT`, `PLAN_ZONE_BUFFER`. Drop `--live` from the `zone_limit_runner` cron line to stop the plan originating.
 Why: 15 Jun–30 Jul the scanner took 147 trades at ~20% WR for **-$6,667**; non-USD crosses alone were **-$7,790** while metals/indices/USD-majors/BTC netted **+$1,123**.
+
+### Entry-gate knobs live in `trading_params.json` — never as constants (2026-08-27)
+
+`market_scanner.mjs` held its Pass-1 bar as `const MIN_SCORE = 5`, which silently outranked every params edit: the 2026-08-21 `scoreThreshold 6 → 4` change never reached the scanner. With the A/T/B/D votes removed that day (they fired on 87–96% of bars) on top of the 2026-08-17 K/R/BB/O/H/U/P trim, a typical bar scores **2** — so nothing cleared 5. Pass-1 clears/day fell **1042 → 3–14** and **zero signals were emitted 2026-08-22–27** while `daily_plan.mjs` wrote a plan every morning that nothing could act on.
+
+- The bar is now `pass1MinScore` (=3), re-read from the params file **per scan** so an edit lands without restarting the daemon.
+- `planScoreFloor`/`planScoreRelief` (both 2) make the documented "plan-backed bar = 2" real — absent both keys, `inline_trader` computed `max(6, 4-2) = 6` and plan-backed entries needed a *higher* score than ordinary ones.
+- `scoreThreshold`, `pass1MinScore`, `planScoreFloor`, `planScoreRelief` and `riskPct` are **operator-frozen** in `apply_params.mjs` — the one chokepoint both the LLM and static paths write through. `eod_agent`'s scoreThreshold rule was a one-way ratchet (raise on WR < 40% → fewer trades → worse small-sample WR → raise again; it reached 9) and is gone. Recommendations still print; they no longer bind.
+- `scale_risk_to_goal` was removed from `run_eod_hermes.sh` the same day: it back-solved risk from a $500k-by-Oct-1 target and railed `riskPct` to `[10,7,5]`, incoherent with the daily halt. Risk is now `[5,3.5,2.5]` with `maxDailyDrawdownPct: 10`, set by hand.
+
+Guarded by `scripts/trading/test_scanner_gates.mjs` (asserts no `const MIN_SCORE` returns) and `test_zone_limit_plan.mjs` (the plan-zone money math). Both are VM-path tests — run them there.
 
 ### Key files on VM
 
