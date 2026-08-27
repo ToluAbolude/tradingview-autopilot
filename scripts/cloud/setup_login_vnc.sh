@@ -20,7 +20,8 @@ if [ -f "$SCRIPT_DIR/cloud_config.sh" ]; then
     source "$SCRIPT_DIR/cloud_config.sh"
 else
     TV_DISPLAY=":99"
-    TV_PROFILE_DIR="/home/ubuntu/.config/chromium-trading"
+    # snap confinement on Ubuntu 24.04 blocks ~/.config — the profile MUST live in the snap's writable area.
+    TV_PROFILE_DIR="/home/ubuntu/snap/chromium/common/cdp-profile"
     CHROMIUM_BIN="${CHROMIUM_BIN:-chromium-browser}"
 fi
 

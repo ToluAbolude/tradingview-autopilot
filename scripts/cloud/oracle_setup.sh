@@ -102,9 +102,9 @@ sudo -u ubuntu mkdir -p \
     "$INSTALL_DIR/data/trade_log/scheduler_logs" \
     "$INSTALL_DIR/data/knowledge_base" \
     "$INSTALL_DIR/screenshots" \
-    /home/ubuntu/.config/chromium-trading
+    /home/ubuntu/snap/chromium/common/cdp-profile
 
-chown -R ubuntu:ubuntu /home/ubuntu/.config/chromium-trading
+chown -R ubuntu:ubuntu /home/ubuntu/snap/chromium/common
 
 # --- Write Chromium binary path to cloud config ------------------------------
 CONFIG_FILE="$INSTALL_DIR/scripts/cloud/cloud_config.sh"
@@ -114,7 +114,8 @@ export CHROMIUM_BIN="$CHROMIUM_BIN"
 export TV_PROJECT_DIR="$INSTALL_DIR"
 export TV_CDP_PORT="9222"
 export TV_DISPLAY=":99"
-export TV_PROFILE_DIR="/home/ubuntu/.config/chromium-trading"
+# snap confinement on Ubuntu 24.04 blocks ~/.config — the profile MUST live in the snap's writable area.
+export TV_PROFILE_DIR="/home/ubuntu/snap/chromium/common/cdp-profile"
 EOF
 chown ubuntu:ubuntu "$CONFIG_FILE"
 echo "      Config written to: $CONFIG_FILE"

@@ -120,7 +120,7 @@ Keep this terminal open (it's an SSH tunnel).
 
 **Back on the VM terminal — press ENTER** to close VNC.
 
-Your login is now saved in the Chromium profile at `/home/ubuntu/.config/chromium-trading`.
+Your login is now saved in the Chromium profile at `/home/ubuntu/snap/chromium/common/cdp-profile`.
 
 ---
 

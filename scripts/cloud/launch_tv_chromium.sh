@@ -20,7 +20,8 @@ else
     TV_PROJECT_DIR="${TV_PROJECT_DIR:-/home/ubuntu/tradingview-autopilot}"
     TV_CDP_PORT="${TV_CDP_PORT:-9222}"
     TV_DISPLAY="${TV_DISPLAY:-:99}"
-    TV_PROFILE_DIR="${TV_PROFILE_DIR:-/home/ubuntu/.config/chromium-trading}"
+    # snap confinement on Ubuntu 24.04 blocks ~/.config — the profile MUST live in the snap's writable area.
+    TV_PROFILE_DIR="${TV_PROFILE_DIR:-/home/ubuntu/snap/chromium/common/cdp-profile}"
 fi
 
 LOG_DIR="$TV_PROJECT_DIR/data/trade_log/scheduler_logs"

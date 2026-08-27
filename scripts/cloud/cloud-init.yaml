@@ -107,7 +107,8 @@ write_files:
       export TV_PROJECT_DIR="/home/ubuntu/tradingview-autopilot"
       export TV_CDP_PORT="9222"
       export TV_DISPLAY=":99"
-      export TV_PROFILE_DIR="/home/ubuntu/.config/chromium-trading"
+      # snap confinement on Ubuntu 24.04 blocks ~/.config — the profile MUST live in the snap's writable area.
+      export TV_PROFILE_DIR="/home/ubuntu/snap/chromium/common/cdp-profile"
 
   # ---------------------------------------------------------------------------
   #  Launch script — starts Xvfb then Chromium pointing at TradingView
@@ -300,9 +301,9 @@ runcmd:
   - mkdir -p /home/ubuntu/tradingview-autopilot/data/knowledge_base
   - mkdir -p /home/ubuntu/tradingview-autopilot/screenshots
   - mkdir -p /home/ubuntu/tradingview-autopilot/strategies
-  - mkdir -p /home/ubuntu/.config/chromium-trading
+  - mkdir -p /home/ubuntu/snap/chromium/common/cdp-profile
   - chown -R ubuntu:ubuntu /home/ubuntu/tradingview-autopilot
-  - chown -R ubuntu:ubuntu /home/ubuntu/.config/chromium-trading
+  - chown -R ubuntu:ubuntu /home/ubuntu/snap/chromium/common
 
   # ---------------------------------------------------------------------------
   #  4. Clone project repo (EDIT URL OR REMOVE THIS BLOCK)
