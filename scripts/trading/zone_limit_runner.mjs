@@ -34,6 +34,8 @@
  */
 import { getTrendbars, connect, placeOrder, cancelOrder, getOpenVolumeForSymbol, getEquity } from './broker_ctrader.mjs';
 import { loadPlan } from './daily_plan_gate.mjs';
+import { calcLots } from './lib/sizing.mjs';
+import { inTradeWindow } from './lib/clock.mjs';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const LIVE  = process.argv.includes('--live');
@@ -65,14 +67,6 @@ function params() {
 function atr14(bars){ const o=new Array(bars.length).fill(null); let pc=null,a=null; const t=[];
   for(let i=0;i<bars.length;i++){ const b=bars[i]; const tr=pc==null?b.h-b.l:Math.max(b.h-b.l,Math.abs(b.h-pc),Math.abs(b.l-pc)); pc=b.c;
     if(i<14){t.push(tr); if(i===13){a=t.reduce((s,x)=>s+x,0)/14;o[i]=a;}} else {a=(a*13+tr)/14;o[i]=a;} } return o; }
-
-function calcLots(sym, riskPct, equity, entry, sl){ const MIN=0.01,STEP=0.01,MAX=10; const riskAmt=equity*riskPct/100, slDist=Math.abs(entry-sl); if(slDist<=0)return MIN;
-  const s=sym.toUpperCase(), q=l=>Math.min(Math.max(Math.floor(l/STEP)*STEP,MIN),MAX);
-  if(/XAU|GOLD/.test(s)) return q(riskAmt/(100*slDist));
-  if(/US30|NAS100|SPX500|GER|UK100|JP225|AUS200|DOW/.test(s)) return q(riskAmt/slDist);
-  if(/BTC|ETH|SOL|ADA|XRP|LTC|BNB/.test(s)) return q(riskAmt/slDist);
-  if(/JPY/.test(s)) return q(riskAmt/(6.5*(slDist/0.01)));
-  return q(riskAmt/(10*(slDist/0.0001))); }
 
 /**
  * Today's tradeable plan zones, flattened to one record per (symbol, direction).
@@ -196,6 +190,11 @@ async function main(){
   let total = Object.keys(state.orders).length;
   if (utcHour >= CFG.eodCutoffUTC) {
     log(`  past ${CFG.eodCutoffUTC}:00 UTC — not resting new orders into the EOD flatten`);
+  } else if ((process.env.PLAN_GATE ?? 'on') !== 'off' && !inTradeWindow()) {
+    // assertOrderSafety's plan gate rejects placements outside the trade windows, so
+    // asking anyway only logged a REJECTED line every 15 min all evening. Orders placed
+    // in-window keep resting; the cancel pass above still runs.
+    log('  outside trade windows — no new orders this tick');
   } else {
     for (const z of zones) {
       if (total >= CFG.maxTotal) break;

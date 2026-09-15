@@ -13,13 +13,16 @@
  * SCORING: max = 8, threshold = 6.
  * Minimum 2:1 R:R enforced — one loss never overshadows 2-3 winning trades.
  */
-import CDP from '/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js';
+// chrome-remote-interface is loaded lazily in _getScannerClient: a static import of this
+// VM-only path stopped the scoring engine loading anywhere else (tests, scanner_confluence).
+const CRI_PATH = '/home/ubuntu/tradingview-mcp-jackson/node_modules/chrome-remote-interface/index.js';
 import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { detectChartPatterns } from './bulkowski_patterns.mjs';
 import { applyBlockExpiry } from './params_blocks.mjs';
+import { instrumentClass, isCrypto, CORE_UNIVERSE } from './lib/instruments.mjs';
 
 // ── Load tunable config (auto-updated weekly by weekly_review_agent) ──────────
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -122,6 +125,7 @@ async function _getScannerClient() {
   const mainTab  = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
   if (!mainTab) throw new Error('TradingView chart tab not found on port 9222');
 
+  const { default: CDP } = await import(CRI_PATH);
   _scannerClient = await withTimeout(
     CDP({ host: CDP_HOST, port: CDP_PORT, target: mainTab.id }),
     'CDP connect'
@@ -202,7 +206,7 @@ const ALL_TFS = ['1', '5', '15', '30', '60', '240', 'D', 'W'];
 // 250 candles on every timeframe — one uniform recent-focused window. getBars
 // reads from the newest bar backwards, so req:250 = the latest 250 candles.
 // (Backtests — orb_backtest, backtest*.mjs — keep their own deeper fetches.)
-const PER_TF_BARS = {
+export const PER_TF_BARS = {
   '1':   { req: 250, min: 150 },
   '5':   { req: 250, min: 200 },
   '15':  { req: 250, min: 200 },
@@ -866,10 +870,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   // blind: 24% of signal-bars emitted long AND short simultaneously. The
   // mean-reversion / pattern-in-a-vacuum votes are what fire both ways; the
   // movement votes (trend, breakout, trendline, volume, zone-verdict Z) don't.
-  const _cls = /NAS100|US30|SPX500|GER40|UK100|AUS200|JP225|HK50/.test(label) ? 'index'
-             : /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/.test(label)        ? 'crypto'
-             : /XAU|XAG|XPT|COPPER/.test(label)                                ? 'metal'
-             : /WTI|BRENT/.test(label)                                         ? 'oil' : 'fx';
+  const _cls = instrumentClass(label).toLowerCase();
   const _drop  = new Set([...DIS, ...(CLASS_DROP[_cls] || [])]);
   const voteOn = c => !_drop.has(c);
 
@@ -1518,6 +1519,270 @@ export function loadDailyWatchlist(maxAgeDays = +(process.env.WATCHLIST_MAX_AGE_
   } catch (_) { return null; }
 }
 
+// ── Pass 1, one timeframe (pure) ─────────────────────────────────────────────
+// Scores each allowed direction; those clearing minScore become MTF candidates.
+// Shared by scanForSetups and the scanner_confluence strategy module.
+export function scoreTimeframe(bars, inst, tf, utcHour, minScore) {
+  const results = [];
+  for (const dir of ['long', ...(inst.autoShort ? ['short'] : [])]) {
+    const { score, reasons, strategies, rsi } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
+    results.push({ dir, score, passed: score >= minScore, candidate: { tf, dir, score, reasons, strategies, rsi } });
+  }
+  return { results, candidates: results.filter(r => r.passed).map(r => r.candidate) };
+}
+
+// ── Pass 2 (pure) ────────────────────────────────────────────────────────────
+// Group pass-1 candidates by direction, apply the 15M alignment gate and MTF bonus,
+// build SL/TP from H1 structure and enforce 2:1. Returns ordered events — { note }
+// log lines and { setup, tfList } results — so scanForSetups prints and acts on them
+// in the original order, and scanner_confluence reuses exactly the same logic.
+export function buildSetups({ inst, candidates, bars15, bars60, utcHour, now = new Date() }) {
+  const events = [];
+  const byDir = {};
+  for (const c of candidates) {
+    if (!byDir[c.dir]) byDir[c.dir] = [];
+    byDir[c.dir].push(c);
+  }
+
+  for (const [dir, cands] of Object.entries(byDir)) {
+    if (!bars15) {
+      events.push({ note: `\n  → 15M fetch failed for ${inst.label}\n` });
+      continue;
+    }
+
+    // ── 15M alignment gate ──────────────────────────────────────────────────
+    // Higher TFs confirmed the trend — now verify the 15M chart is also trending
+    // in the SAME direction before entering. If the 15M is ranging or pointing
+    // the other way, the trade is counter-trend on the entry TF — skip it.
+    // Require: SmartTrail (A) OR EMA stack (B) aligned on 15M.
+    const check15 = runAllStrategies(bars15, dir, utcHour, inst.label, '15');
+    const is15mAligned = ['A', 'B', 'T', 'L'].some(s => check15.strategies.includes(s));
+    if (!is15mAligned) {
+      events.push({ note: `\n  ⏭ ${inst.label} ${dir.toUpperCase()} — 15M not aligned (score=${check15.score}), waiting\n` });
+      continue;
+    }
+
+    const tfList      = [...new Set(cands.map(c => TF_LABEL[c.tf] || c.tf))].join('+');
+    const maxScore    = Math.max(...cands.map(c => c.score));
+    const totalWeight = cands.reduce((s, c) => s + (TF_WEIGHT[c.tf] || 1), 0);
+    // Higher TF confluence earns bigger bonus: W+D = 7pts → +3; D+4H = 5.5pts → +3; 1H alone = +1
+    const mtfTiers  = MTFC.length > 0 ? MTFC : [
+      { min_weight: 5, bonus: 3 }, { min_weight: 3, bonus: 2 },
+      { min_weight: 1.5, bonus: 1 }, { min_weight: 0, bonus: 0 }
+    ];
+    const mtfBonus  = (mtfTiers.find(t => totalWeight >= t.min_weight) || { bonus: 0 }).bonus;
+    const finalScore = maxScore + mtfBonus;
+
+    const allStrats  = [...new Set([...cands.flatMap(c => c.strategies), ...check15.strategies])];
+    const allReasons = [`MTF(${tfList}) + 15M aligned`, ...[...new Set(cands.flatMap(c => c.reasons))]].slice(0, 8);
+    const avgRsi     = Math.round(cands.reduce((s, c) => s + c.rsi, 0) / cands.length);
+
+    if (!bars60) {
+      events.push({ note: `\n  → 1H fetch failed for ${inst.label} (needed for SL/TP geometry)\n` });
+      continue;
+    }
+
+    const n15    = bars15.length - 1;
+    const entry  = bars15[n15].c;          // entry precision from the 15M trigger
+
+    // Risk geometry from H1: ATR + S/R zones drive every SL/TP multiple below.
+    const atr60  = calcATR(bars60);
+    const atrVal = atr60[bars60.length - 1];
+    const srGeom = buildSRZones(bars60, atr60);
+    const slBuf  = atrVal * 0.10;   // 10% ATR buffer outside the zone
+
+    // EOD-aware TP cap — FRIDAY-ONLY since 2026-07-07. On Mon–Thu the daily
+    // 20:00 UTC EOD now closes only LOSERS (confirm_eod_close carries
+    // bracketed winners overnight), so H1 targets get days to play out and a
+    // time-budget cap would just amputate them. Friday keeps the cap: the
+    // friday-cutoff still flattens everything non-crypto regardless of
+    // profit (cTrader queues closes for shut markets to Monday — a carried
+    // FX/index winner would be unmanageable over the weekend). Crypto is
+    // exempt from the Friday flatten, so it is never capped.
+    // 2.0 = trend-drift factor over bare √N (random-walk typical move):
+    // with 2√N, a 2R target on a 1.5×ATR stop fits while ≥2.25h remain.
+    const _nowH   = now;
+    const hoursLeft = 20 - (_nowH.getUTCHours() + _nowH.getUTCMinutes() / 60);
+    const _isCrypto = isCrypto(inst.label);
+    const eodCapDist = (_nowH.getUTCDay() === 5 && !_isCrypto && hoursLeft > 0 && hoursLeft < 12)
+      ? atrVal * 2.0 * Math.sqrt(hoursLeft) : Infinity;
+
+    // ── Per-instrument SL/TP strategy ────────────────────────────────────────────
+    const prof = INST_CFG[inst.label] || INST_PROFILE[inst.label] || DEFAULT_PROFILE;
+    // Profiles were tuned when atrVal was 15M ATR; it is now H1 ATR (≈2× the
+    // unit) and the old sub-ATR multiples (DEFAULT maxSlAtr 0.30!) were the
+    // true source of the collapsed sub-floor stops (0.3×ATR ≈ 3 pips on
+    // GBPNZD, SL==entry on EURGBP). Enforce H1-sane floors; explicitly wider
+    // profiles (metals 2.0×) keep their tuning. Side effect: the 15M-FVG SL
+    // branches below can no longer produce a stop tighter than 0.5×ATR_H1.
+    const slMode   = prof.slMode;
+    const minSlAtr = Math.max(prof.minSlAtr ?? 0.5, 0.5);
+    const maxSlAtr = Math.max(prof.maxSlAtr ?? 1.5, 1.5);
+    const tpCap    = Math.max(prof.tpCap    ?? 3.0, 3.0);
+    const tp3Cap   = Math.max(prof.tp3Cap   ?? 5.0, 5.0);
+    const minSlAbs = prof.minSlAbs ?? 0;   // absolute $ floor on SL distance (WTI = 0.50)
+
+    // ── SL placement ─────────────────────────────────────────────────────────────
+    let sl;
+
+    if (slMode === 'fvg_sr') {
+      // 1. FVG boundary (tightest structural SL — institutions defend these)
+      if (check15.activeFVG) {
+        const fvg    = check15.activeFVG;
+        const fvgSL  = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
+        const fvgDist = Math.abs(entry - fvgSL);
+        if (fvgDist >= atrVal * minSlAtr && fvgDist <= atrVal * maxSlAtr) sl = fvgSL;
+      }
+      // 2. Nearest S&R zone (if FVG not available or out of range)
+      if (sl === undefined) {
+        if (dir === 'long') {
+          const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
+            && (entry - z.wickTip) >= atrVal * minSlAtr
+            && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
+          sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
+        } else {
+          const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+            && (z.wickTip - entry) >= atrVal * minSlAtr
+            && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
+          sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
+        }
+      }
+
+    } else if (slMode === 'atr') {
+      // Pure ATR — indices gap through zones at session opens, no zone snapping
+      sl = dir === 'long' ? entry - atrVal * maxSlAtr : entry + atrVal * maxSlAtr;
+
+    } else {
+      // 'sr' — S&R zone primary, FVG secondary, ATR fallback (forex + JPY pairs)
+      if (dir === 'long') {
+        const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
+          && (entry - z.wickTip) >= atrVal * minSlAtr
+          && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
+        sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
+      } else {
+        const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+          && (z.wickTip - entry) >= atrVal * minSlAtr
+          && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
+        sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
+      }
+      // Secondary: FVG tighter override (only if valid and tighter than current SL)
+      if (check15.activeFVG) {
+        const fvg    = check15.activeFVG;
+        const fvgSL  = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
+        const fvgDist = Math.abs(entry - fvgSL);
+        const curDist = Math.abs(entry - sl);
+        if (fvgDist < curDist && fvgDist >= atrVal * minSlAtr) sl = fvgSL;
+      }
+    }
+
+    // Hard cap at maxSlAtr regardless of mode
+    if (dir === 'long'  && entry - sl > atrVal * maxSlAtr) sl = entry - atrVal * maxSlAtr;
+    if (dir === 'short' && sl - entry > atrVal * maxSlAtr) sl = entry + atrVal * maxSlAtr;
+
+    // Absolute $ floor on SL distance (per-instrument override). For WTI:
+    // ATR-based floor of 1.5×ATR can land at $0.30 in ASIAN session, but
+    // 15M wicks routinely run $0.20–0.40 against trend — minSlAbs=0.50
+    // ensures we always give the SL real breathing room.
+    if (minSlAbs > 0 && Math.abs(entry - sl) < minSlAbs) {
+      sl = dir === 'long' ? entry - minSlAbs : entry + minSlAbs;
+    }
+
+    // TP ceilings: per-instrument ATR cap, tightened by the EOD time budget.
+    const tpMaxDist  = Math.min(atrVal * tpCap,  eodCapDist);
+    const tp3MaxDist = Math.min(atrVal * tp3Cap, eodCapDist);
+
+    const slDist = Math.abs(entry - sl);
+
+    // ── TP1 (tp2): nearest opposing S/R zone within tpCap × ATR ─────────────────
+    let tp2;
+    if (dir === 'long') {
+      const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
+        && (z.wickTip - entry) >= slDist * 0.5
+        && (z.wickTip - entry) <= tpMaxDist).sort((a, b) => a.wickTip - b.wickTip);
+      tp2 = z.length > 0 ? z[0].wickTip : entry + slDist;
+    } else {
+      const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
+        && (entry - z.wickTip) >= slDist * 0.5
+        && (entry - z.wickTip) <= tpMaxDist).sort((a, b) => b.wickTip - a.wickTip);
+      tp2 = z.length > 0 ? z[0].wickTip : entry - slDist;
+    }
+    if (dir === 'long'  && tp2 - entry  > tpMaxDist) tp2 = entry + tpMaxDist;
+    if (dir === 'short' && entry  - tp2  > tpMaxDist) tp2 = entry - tpMaxDist;
+
+    // ── TP2 (tp3): runner beyond tp2, capped at tp3Cap × ATR ────────────────────
+    let tp3;
+    if (dir === 'long') {
+      const z = srGeom.active.filter(z => z.type === 'resistance'
+        && z.wickTip > tp2 + slDist * 0.3
+        && z.wickTip - entry <= tp3MaxDist).sort((a, b) => a.wickTip - b.wickTip);
+      tp3 = z.length > 0 ? z[0].wickTip : Math.min(entry + slDist * 3.0, entry + tp3MaxDist);
+    } else {
+      const z = srGeom.active.filter(z => z.type === 'support'
+        && z.wickTip < tp2 - slDist * 0.3
+        && entry - z.wickTip <= tp3MaxDist).sort((a, b) => b.wickTip - a.wickTip);
+      tp3 = z.length > 0 ? z[0].wickTip : Math.max(entry - slDist * 3.0, entry - tp3MaxDist);
+    }
+
+    // ── 2:1 R:R enforcement ──────────────────────────────────────────────────────
+    let actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
+    if (actualRR < 2.0) {
+      const minTP    = dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0;
+      const minTPDist = Math.abs(minTP - entry);
+      tp2 = minTPDist <= tpMaxDist
+        ? minTP
+        : (dir === 'long' ? entry + tpMaxDist : entry - tpMaxDist);
+      actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
+      if (actualRR < 2.0) {
+        events.push({ note: `\n  ⏭ ${inst.label} ${dir.toUpperCase()} — R:R ${actualRR.toFixed(1)} < 2.0, no viable TP, skipping\n` });
+        continue;
+      }
+    }
+
+    const setup = {
+      sym:        inst.sym,
+      label:      inst.label,
+      tf:         '15',
+      dir,
+      score:      finalScore,
+      reasons:    allReasons,
+      strategies: allStrats,
+      profile:    prof,                       // per-instrument profile (read by inline_trader gates)
+      entry:      Math.round(entry   * 10000) / 10000,
+      sl:         Math.round(sl      * 10000) / 10000,
+      tpQuick:    Math.round((dir === 'long' ? entry + slDist * 0.5 : entry - slDist * 0.5) * 10000) / 10000,
+      // tp1 = 1R take-profit for the near scalp leg of the 3-leg ladder.
+      // Snaps to the nearest opposing zone within 1.5R if one exists; else exactly 1R.
+      tp1:        (function(){
+        // Per-instrument TP1 floor (multiple of SL distance). Default 1R; WTI
+        // uses 1.5R so grazed-then-SL outcomes turn flat instead of -R.
+        const floorR = prof.tp1FloorR ?? 1.0;
+        const r1 = dir === 'long' ? entry + slDist * floorR : entry - slDist * floorR;
+        // Snap to nearest opposing zone in the window [floor, floor+1R] — never
+        // closer than the floor.
+        const winMax = slDist * (floorR + 1.0);
+        const nearby = srGeom.active.filter(z =>
+          (dir === 'long'  && z.type === 'resistance' && z.wickTip - entry >= slDist * floorR && z.wickTip - entry <= winMax) ||
+          (dir === 'short' && z.type === 'support'    && entry - z.wickTip >= slDist * floorR && entry - z.wickTip <= winMax)
+        );
+        if (nearby.length) {
+          nearby.sort((a,b) => dir === 'long' ? a.wickTip - b.wickTip : b.wickTip - a.wickTip);
+          return Math.round(nearby[0].wickTip * 10000) / 10000;
+        }
+        return Math.round(r1 * 10000) / 10000;
+      })(),
+      tp2:        Math.round(tp2     * 10000) / 10000,
+      tp3:        Math.round(tp3     * 10000) / 10000,
+      rr:         actualRR,
+      rsi:        avgRsi,
+      tier:       inst.tier,
+      mtfTFs:     cands.map(c => c.tf),
+    };
+
+    events.push({ setup, tfList });
+  }
+  return events;
+}
+
 export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = null) {
   const utcHour  = new Date().getUTCHours();
   const priority = sessionSymbols(utcHour);
@@ -1543,7 +1808,7 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
   // has no plan, so inline_trader's plan gate would refuse it anyway — scanning it
   // just burns chart switches. Kill switch: CORE_ONLY=off.
   if ((process.env.CORE_ONLY ?? 'on') !== 'off') {
-    const CORE = new Set(['XAUUSD', 'NAS100', 'US30', 'GER40', 'EURUSD', 'GBPUSD', 'USDJPY', 'BTCUSD']);
+    const CORE = new Set(CORE_UNIVERSE);
     const before = scanList.length;
     scanList = scanList.filter(i => CORE.has(i.label));
     if (scanList.length !== before) console.log(`  [core-only] ${before} → ${scanList.length} instruments (${scanList.map(i => i.label).join(', ') || 'none'})`);
@@ -1622,28 +1887,14 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       const dcSnap = buildDailyContext(bars);
       if (dcSnap) logDailyContext(inst.label, tf, dcSnap);
 
-      const directions = ['long', ...(inst.autoShort ? ['short'] : [])];
-      for (const dir of directions) {
-        const { score, reasons, strategies, rsi } = runAllStrategies(bars, dir, utcHour, inst.label, tf);
-        if (score >= minScore) {
-          candidates.push({ tf, dir, score, reasons, strategies, rsi });
-          process.stdout.write(`✓ `);
-        } else {
-          process.stdout.write(`${score} `);
-        }
-      }
+      const scored = scoreTimeframe(bars, inst, tf, utcHour, minScore);
+      for (const r of scored.results) process.stdout.write(r.passed ? `✓ ` : `${r.score} `);
+      candidates.push(...scored.candidates);
     }
 
     if (candidates.length === 0) {
       process.stdout.write(`→ no setup\n`);
       continue;
-    }
-
-    // ── Pass 2: group by direction, fetch 15M once, emit one setup per dir ──
-    const byDir = {};
-    for (const c of candidates) {
-      if (!byDir[c.dir]) byDir[c.dir] = [];
-      byDir[c.dir].push(c);
     }
 
     // Pass-2 15M entry calc — same per-TF profile as the scan loop, same
@@ -1668,242 +1919,11 @@ export async function scanForSetups(minScore = 6, slAtrMult = 1.5, onSetup = nul
       continue;
     }
 
-    for (const [dir, cands] of Object.entries(byDir)) {
-      if (!bars15) {
-        process.stdout.write(`\n  → 15M fetch failed for ${inst.label}\n`);
-        continue;
-      }
-
-      // ── 15M alignment gate ──────────────────────────────────────────────────
-      // Higher TFs confirmed the trend — now verify the 15M chart is also trending
-      // in the SAME direction before entering. If the 15M is ranging or pointing
-      // the other way, the trade is counter-trend on the entry TF — skip it.
-      // Require: SmartTrail (A) OR EMA stack (B) aligned on 15M.
-      const check15 = runAllStrategies(bars15, dir, utcHour, inst.label, '15');
-      const is15mAligned = ['A', 'B', 'T', 'L'].some(s => check15.strategies.includes(s));
-      if (!is15mAligned) {
-        process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — 15M not aligned (score=${check15.score}), waiting\n`);
-        continue;
-      }
-
-      const tfList      = [...new Set(cands.map(c => TF_LABEL[c.tf] || c.tf))].join('+');
-      const maxScore    = Math.max(...cands.map(c => c.score));
-      const totalWeight = cands.reduce((s, c) => s + (TF_WEIGHT[c.tf] || 1), 0);
-      // Higher TF confluence earns bigger bonus: W+D = 7pts → +3; D+4H = 5.5pts → +3; 1H alone = +1
-      const mtfTiers  = MTFC.length > 0 ? MTFC : [
-        { min_weight: 5, bonus: 3 }, { min_weight: 3, bonus: 2 },
-        { min_weight: 1.5, bonus: 1 }, { min_weight: 0, bonus: 0 }
-      ];
-      const mtfBonus  = (mtfTiers.find(t => totalWeight >= t.min_weight) || { bonus: 0 }).bonus;
-      const finalScore = maxScore + mtfBonus;
-
-      const allStrats  = [...new Set([...cands.flatMap(c => c.strategies), ...check15.strategies])];
-      const allReasons = [`MTF(${tfList}) + 15M aligned`, ...[...new Set(cands.flatMap(c => c.reasons))]].slice(0, 8);
-      const avgRsi     = Math.round(cands.reduce((s, c) => s + c.rsi, 0) / cands.length);
-
-      if (!bars60) {
-        process.stdout.write(`\n  → 1H fetch failed for ${inst.label} (needed for SL/TP geometry)\n`);
-        continue;
-      }
-
-      const n15    = bars15.length - 1;
-      const entry  = bars15[n15].c;          // entry precision from the 15M trigger
-
-      // Risk geometry from H1: ATR + S/R zones drive every SL/TP multiple below.
-      const atr60  = calcATR(bars60);
-      const atrVal = atr60[bars60.length - 1];
-      const srGeom = buildSRZones(bars60, atr60);
-      const slBuf  = atrVal * 0.10;   // 10% ATR buffer outside the zone
-
-      // EOD-aware TP cap — FRIDAY-ONLY since 2026-07-07. On Mon–Thu the daily
-      // 20:00 UTC EOD now closes only LOSERS (confirm_eod_close carries
-      // bracketed winners overnight), so H1 targets get days to play out and a
-      // time-budget cap would just amputate them. Friday keeps the cap: the
-      // friday-cutoff still flattens everything non-crypto regardless of
-      // profit (cTrader queues closes for shut markets to Monday — a carried
-      // FX/index winner would be unmanageable over the weekend). Crypto is
-      // exempt from the Friday flatten, so it is never capped.
-      // 2.0 = trend-drift factor over bare √N (random-walk typical move):
-      // with 2√N, a 2R target on a 1.5×ATR stop fits while ≥2.25h remain.
-      const _nowH   = new Date();
-      const hoursLeft = 20 - (_nowH.getUTCHours() + _nowH.getUTCMinutes() / 60);
-      const _isCrypto = /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(inst.label);
-      const eodCapDist = (_nowH.getUTCDay() === 5 && !_isCrypto && hoursLeft > 0 && hoursLeft < 12)
-        ? atrVal * 2.0 * Math.sqrt(hoursLeft) : Infinity;
-
-      // ── Per-instrument SL/TP strategy ────────────────────────────────────────────
-      const prof = INST_CFG[inst.label] || INST_PROFILE[inst.label] || DEFAULT_PROFILE;
-      // Profiles were tuned when atrVal was 15M ATR; it is now H1 ATR (≈2× the
-      // unit) and the old sub-ATR multiples (DEFAULT maxSlAtr 0.30!) were the
-      // true source of the collapsed sub-floor stops (0.3×ATR ≈ 3 pips on
-      // GBPNZD, SL==entry on EURGBP). Enforce H1-sane floors; explicitly wider
-      // profiles (metals 2.0×) keep their tuning. Side effect: the 15M-FVG SL
-      // branches below can no longer produce a stop tighter than 0.5×ATR_H1.
-      const slMode   = prof.slMode;
-      const minSlAtr = Math.max(prof.minSlAtr ?? 0.5, 0.5);
-      const maxSlAtr = Math.max(prof.maxSlAtr ?? 1.5, 1.5);
-      const tpCap    = Math.max(prof.tpCap    ?? 3.0, 3.0);
-      const tp3Cap   = Math.max(prof.tp3Cap   ?? 5.0, 5.0);
-      const minSlAbs = prof.minSlAbs ?? 0;   // absolute $ floor on SL distance (WTI = 0.50)
-
-      // ── SL placement ─────────────────────────────────────────────────────────────
-      let sl;
-
-      if (slMode === 'fvg_sr') {
-        // 1. FVG boundary (tightest structural SL — institutions defend these)
-        if (check15.activeFVG) {
-          const fvg    = check15.activeFVG;
-          const fvgSL  = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
-          const fvgDist = Math.abs(entry - fvgSL);
-          if (fvgDist >= atrVal * minSlAtr && fvgDist <= atrVal * maxSlAtr) sl = fvgSL;
-        }
-        // 2. Nearest S&R zone (if FVG not available or out of range)
-        if (sl === undefined) {
-          if (dir === 'long') {
-            const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
-              && (entry - z.wickTip) >= atrVal * minSlAtr
-              && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
-            sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
-          } else {
-            const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
-              && (z.wickTip - entry) >= atrVal * minSlAtr
-              && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
-            sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
-          }
-        }
-
-      } else if (slMode === 'atr') {
-        // Pure ATR — indices gap through zones at session opens, no zone snapping
-        sl = dir === 'long' ? entry - atrVal * maxSlAtr : entry + atrVal * maxSlAtr;
-
-      } else {
-        // 'sr' — S&R zone primary, FVG secondary, ATR fallback (forex + JPY pairs)
-        if (dir === 'long') {
-          const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
-            && (entry - z.wickTip) >= atrVal * minSlAtr
-            && (entry - z.wickTip) <= atrVal * maxSlAtr).sort((a, b) => b.wickTip - a.wickTip);
-          sl = z.length > 0 ? z[0].wickTip - slBuf : entry - atrVal * maxSlAtr;
-        } else {
-          const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
-            && (z.wickTip - entry) >= atrVal * minSlAtr
-            && (z.wickTip - entry) <= atrVal * maxSlAtr).sort((a, b) => a.wickTip - b.wickTip);
-          sl = z.length > 0 ? z[0].wickTip + slBuf : entry + atrVal * maxSlAtr;
-        }
-        // Secondary: FVG tighter override (only if valid and tighter than current SL)
-        if (check15.activeFVG) {
-          const fvg    = check15.activeFVG;
-          const fvgSL  = dir === 'long' ? fvg.bottom - slBuf : fvg.top + slBuf;
-          const fvgDist = Math.abs(entry - fvgSL);
-          const curDist = Math.abs(entry - sl);
-          if (fvgDist < curDist && fvgDist >= atrVal * minSlAtr) sl = fvgSL;
-        }
-      }
-
-      // Hard cap at maxSlAtr regardless of mode
-      if (dir === 'long'  && entry - sl > atrVal * maxSlAtr) sl = entry - atrVal * maxSlAtr;
-      if (dir === 'short' && sl - entry > atrVal * maxSlAtr) sl = entry + atrVal * maxSlAtr;
-
-      // Absolute $ floor on SL distance (per-instrument override). For WTI:
-      // ATR-based floor of 1.5×ATR can land at $0.30 in ASIAN session, but
-      // 15M wicks routinely run $0.20–0.40 against trend — minSlAbs=0.50
-      // ensures we always give the SL real breathing room.
-      if (minSlAbs > 0 && Math.abs(entry - sl) < minSlAbs) {
-        sl = dir === 'long' ? entry - minSlAbs : entry + minSlAbs;
-      }
-
-      // TP ceilings: per-instrument ATR cap, tightened by the EOD time budget.
-      const tpMaxDist  = Math.min(atrVal * tpCap,  eodCapDist);
-      const tp3MaxDist = Math.min(atrVal * tp3Cap, eodCapDist);
-
-      const slDist = Math.abs(entry - sl);
-
-      // ── TP1 (tp2): nearest opposing S/R zone within tpCap × ATR ─────────────────
-      let tp2;
-      if (dir === 'long') {
-        const z = srGeom.active.filter(z => z.type === 'resistance' && z.wickTip > entry
-          && (z.wickTip - entry) >= slDist * 0.5
-          && (z.wickTip - entry) <= tpMaxDist).sort((a, b) => a.wickTip - b.wickTip);
-        tp2 = z.length > 0 ? z[0].wickTip : entry + slDist;
-      } else {
-        const z = srGeom.active.filter(z => z.type === 'support' && z.wickTip < entry
-          && (entry - z.wickTip) >= slDist * 0.5
-          && (entry - z.wickTip) <= tpMaxDist).sort((a, b) => b.wickTip - a.wickTip);
-        tp2 = z.length > 0 ? z[0].wickTip : entry - slDist;
-      }
-      if (dir === 'long'  && tp2 - entry  > tpMaxDist) tp2 = entry + tpMaxDist;
-      if (dir === 'short' && entry  - tp2  > tpMaxDist) tp2 = entry - tpMaxDist;
-
-      // ── TP2 (tp3): runner beyond tp2, capped at tp3Cap × ATR ────────────────────
-      let tp3;
-      if (dir === 'long') {
-        const z = srGeom.active.filter(z => z.type === 'resistance'
-          && z.wickTip > tp2 + slDist * 0.3
-          && z.wickTip - entry <= tp3MaxDist).sort((a, b) => a.wickTip - b.wickTip);
-        tp3 = z.length > 0 ? z[0].wickTip : Math.min(entry + slDist * 3.0, entry + tp3MaxDist);
-      } else {
-        const z = srGeom.active.filter(z => z.type === 'support'
-          && z.wickTip < tp2 - slDist * 0.3
-          && entry - z.wickTip <= tp3MaxDist).sort((a, b) => b.wickTip - a.wickTip);
-        tp3 = z.length > 0 ? z[0].wickTip : Math.max(entry - slDist * 3.0, entry - tp3MaxDist);
-      }
-
-      // ── 2:1 R:R enforcement ──────────────────────────────────────────────────────
-      let actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
-      if (actualRR < 2.0) {
-        const minTP    = dir === 'long' ? entry + slDist * 2.0 : entry - slDist * 2.0;
-        const minTPDist = Math.abs(minTP - entry);
-        tp2 = minTPDist <= tpMaxDist
-          ? minTP
-          : (dir === 'long' ? entry + tpMaxDist : entry - tpMaxDist);
-        actualRR = Math.round((Math.abs(tp2 - entry) / slDist) * 10) / 10;
-        if (actualRR < 2.0) {
-          process.stdout.write(`\n  ⏭ ${inst.label} ${dir.toUpperCase()} — R:R ${actualRR.toFixed(1)} < 2.0, no viable TP, skipping\n`);
-          continue;
-        }
-      }
-
-      const setup = {
-        sym:        inst.sym,
-        label:      inst.label,
-        tf:         '15',
-        dir,
-        score:      finalScore,
-        reasons:    allReasons,
-        strategies: allStrats,
-        profile:    prof,                       // per-instrument profile (read by inline_trader gates)
-        entry:      Math.round(entry   * 10000) / 10000,
-        sl:         Math.round(sl      * 10000) / 10000,
-        tpQuick:    Math.round((dir === 'long' ? entry + slDist * 0.5 : entry - slDist * 0.5) * 10000) / 10000,
-        // tp1 = 1R take-profit for the near scalp leg of the 3-leg ladder.
-        // Snaps to the nearest opposing zone within 1.5R if one exists; else exactly 1R.
-        tp1:        (function(){
-          // Per-instrument TP1 floor (multiple of SL distance). Default 1R; WTI
-          // uses 1.5R so grazed-then-SL outcomes turn flat instead of -R.
-          const floorR = prof.tp1FloorR ?? 1.0;
-          const r1 = dir === 'long' ? entry + slDist * floorR : entry - slDist * floorR;
-          // Snap to nearest opposing zone in the window [floor, floor+1R] — never
-          // closer than the floor.
-          const winMax = slDist * (floorR + 1.0);
-          const nearby = srGeom.active.filter(z =>
-            (dir === 'long'  && z.type === 'resistance' && z.wickTip - entry >= slDist * floorR && z.wickTip - entry <= winMax) ||
-            (dir === 'short' && z.type === 'support'    && entry - z.wickTip >= slDist * floorR && entry - z.wickTip <= winMax)
-          );
-          if (nearby.length) {
-            nearby.sort((a,b) => dir === 'long' ? a.wickTip - b.wickTip : b.wickTip - a.wickTip);
-            return Math.round(nearby[0].wickTip * 10000) / 10000;
-          }
-          return Math.round(r1 * 10000) / 10000;
-        })(),
-        tp2:        Math.round(tp2     * 10000) / 10000,
-        tp3:        Math.round(tp3     * 10000) / 10000,
-        rr:         actualRR,
-        rsi:        avgRsi,
-        tier:       inst.tier,
-        mtfTFs:     cands.map(c => c.tf),
-      };
-
+    for (const ev of buildSetups({ inst, candidates, bars15, bars60, utcHour })) {
+      if (ev.note) { process.stdout.write(ev.note); continue; }
+      const { setup, tfList } = ev;
       results.push(setup);
-      process.stdout.write(`\n  ✅ ${inst.label} 15M ${dir.toUpperCase()} [${finalScore}] | MTF:${tfList} | Entry:${setup.entry} SL:${setup.sl} TP:${setup.tp2}\n`);
+      process.stdout.write(`\n  ✅ ${inst.label} 15M ${setup.dir.toUpperCase()} [${setup.score}] | MTF:${tfList} | Entry:${setup.entry} SL:${setup.sl} TP:${setup.tp2}\n`);
 
       // Inline trade callback — scanner pauses here while the trade is placed,
       // then continues to the next instrument without waiting for the position to close.

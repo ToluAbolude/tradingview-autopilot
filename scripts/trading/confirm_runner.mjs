@@ -47,6 +47,10 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { fetchHighImpactNews, filterForSymbol } from './news_checker.mjs';
+import { calcLots } from './lib/sizing.mjs';
+import { isCrypto } from './lib/instruments.mjs';
+import { isCalendarWeekend, weekendCryptoOn } from './lib/clock.mjs';
+import { signalErrors } from './lib/contracts.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IS_LINUX  = os.platform() === 'linux';
@@ -127,22 +131,6 @@ function saveState(s) {
   writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
 }
 
-// Lot sizing — identical formula to orb_runner.mjs / inline_trader.mjs.
-function calcLots(symbol, riskPct, equity, entry, sl) {
-  const MIN_LOT = 0.01, LOT_STEP = 0.01, MAX_LOTS = 10;
-  const riskAmt = equity * (riskPct / 100);
-  const slDist  = Math.abs(entry - sl);
-  if (slDist === 0) return MIN_LOT;
-  const sym = symbol.toUpperCase();
-  const q = lots => Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
-  if (/XAU|GOLD/.test(sym))                                   return q(riskAmt / (100 * slDist));
-  if (/NAS100|NAS|NDX|NQ|US30|DOW|YM/.test(sym))              return q(riskAmt / slDist);
-  if (/BTC|ETH|XRP|SOL|LTC/.test(sym))                        return q(riskAmt / slDist);   // 1 lot = 1 coin → $1/pt
-  if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) return q(riskAmt / slDist);
-  if (/JPY/.test(sym))                                        return q(riskAmt / (6.50 * (slDist / 0.01)));
-  return q(riskAmt / (10.0 * (slDist / 0.0001)));   // standard forex (incl. fx crosses)
-}
-
 // ── Filtered-variant gates (Chart Fanatics playbook filters) ──────────────────
 // NTZ: the most recent prior UTC day's high/low from the bars (skips weekend gaps).
 function priorDayHL(bars, refTs) {
@@ -189,14 +177,12 @@ async function loadStrategies() {
 
 async function main() {
   const now = new Date();
-  const dow = now.getUTCDay();
-  const isWeekend = (dow === 0 || dow === 6);
+  const isWeekend = isCalendarWeekend(now);
   // Weekend policy: FX/metals/indices are closed (the broker queues orders to the
   // illiquid Sunday open — the 2026-06-06 blowup), but CRYPTO trades 24/7 with a
   // live feed. So on the weekend run CRYPTO combos ONLY; idle on everything else.
   // Kill switch: WEEKEND_CRYPTO=off restores the old weekend-idle behaviour.
-  const WEEKEND_CRYPTO = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off';
-  if (isWeekend && !WEEKEND_CRYPTO) { log('Weekend — confirm runner idle.'); return; }
+  if (isWeekend && !weekendCryptoOn()) { log('Weekend — confirm runner idle.'); return; }
 
   log(`═══ CONFIRM RUNNER (${LIVE ? 'LIVE/DEMO' : 'DRY-RUN'}) risk=${CONFIRM_RISK_PCT}%${isWeekend ? ' — WEEKEND crypto-only' : ''} ═══`);
 
@@ -245,7 +231,7 @@ async function main() {
   for (const combo of COMBOS) {
     const { strategy, symbol, tf } = combo;
     // Weekend: only CRYPTO combos (BTCUSD/ETHUSD) may fire — FX/metals/indices are closed.
-    if (isWeekend && !/BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(symbol)) continue;
+    if (isWeekend && !isCrypto(symbol)) continue;
     const label = combo.label || strategy;        // attribution name (variant or base)
     const period = TF_PERIOD[tf], tfMs = TF_MS[tf];
     const strat = strategies[strategy];            // generateSignals comes from the BASE module
@@ -284,8 +270,9 @@ async function main() {
       if (!newsRecent(newsEvents || [], symbol, nowMs)) { log(`  ${tag} [news]: no recent high-impact ${symbol} news — skip`); continue; }
     }
 
+    const invalid = signalErrors({ strategyId: label, symbol, tf, dir: sig.dir, ts: sig.ts, entry: sig.entry, sl: sig.sl });
+    if (invalid.length) { log(`  ${tag}: invalid signal — ${invalid.join('; ')} — skip`); continue; }
     const risk = Math.abs(sig.entry - sig.sl);
-    if (risk <= 0) { log(`  ${tag}: zero-risk signal — skip`); continue; }
     // A strategy may supply its own TP (e.g. jadecap targets opposite session
     // liquidity, not a fixed R multiple); it must be on the profit side.
     const ownTp = sig.tp != null && (sig.dir === 'long' ? sig.tp > sig.entry : sig.tp < sig.entry);

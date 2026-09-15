@@ -30,6 +30,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { fibVetoState, checkFibVeto } from './fib_veto.mjs';
+import { instrumentClass as _instrumentClass, MIN_SL_FRAC } from './lib/instruments.mjs';
+import { isSundayReopen } from './lib/clock.mjs';
 const require = createRequire(import.meta.url);
 const protobuf = require('protobufjs');
 
@@ -362,28 +364,19 @@ async function _symbolMetaFor(name) {
 }
 
 // ── Order safety gate ──────────────────────────────────────────────────────────
-// Every entry from every runner (inline_trader, session_runner, orb_runner,
-// kurisko_flag_runner) passes through placeOrder/placeMultiTpPosition, so this
+// Every entry from every runner (inline_trader, zone_limit_runner, orb_runner,
+// confirm_runner, kurisko_flag_runner) passes through placeOrder/placeMultiTpPosition, so this
 // is the one chokepoint that can make the historical blowup classes structurally
 // impossible (2026-04-30 USDJPY −$3.9k, 2026-05-20 XAGUSD −$4.9k, 2026-06-06
 // USDCHF −$5.7k — all: oversized lots off a collapsed SL distance, stacked
 // re-entries on a frozen chart signal, entries priced off a dead data feed).
 // Throws Error('ORDER_SAFETY_REJECT …') — callers already log placement errors.
 
-function _instrumentClass(sym) {
-  const s = String(sym).toUpperCase();
-  if (/XAU|GOLD|XAG|SILVER|COPPER/.test(s)) return 'METAL';
-  if (/WTI|USOIL|CRUDE|BRENT|UKOIL|NGAS/.test(s)) return 'OIL';
-  if (/NAS100|US30|SPX500|UK100|GER40|GER30|JP225|AUS200|HK50|EUSTX50|DAX|FTSE/.test(s)) return 'INDEX';
-  if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/.test(s)) return 'CRYPTO';
-  return 'FX';
-}
-
 const _SAFETY = {
   // Min SL distance as a fraction of entry price. The June 6 USDCHF signal had a
   // 1-pip SL (0.013%) off a frozen ATR, which exploded risk-based sizing to the
   // 10-lot cap. FX floor 0.08% ≈ 6–8 pips on majors.
-  minSlFrac: { FX: 0.0008, METAL: 0.0012, OIL: 0.004, INDEX: 0.0015, CRYPTO: 0.003 },
+  minSlFrac: MIN_SL_FRAC,
   // Absolute per-order lot caps — a backstop for sizing bugs, not a tuning knob.
   // 3 FX lots = $300k notional; the old cap of 10 allowed $1M on a $7k account.
   maxLots: { FX: 3, METAL: 2, OIL: 5, INDEX: 30, CRYPTO: 3 },
@@ -437,8 +430,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   // entries placed into this window. Crypto is exempt (trades 24/7, no weekend
   // gap). Kill switch: SUNDAY_REOPEN_BLOCK=off.
   if ((process.env.SUNDAY_REOPEN_BLOCK || 'on') !== 'off' && cls !== 'CRYPTO') {
-    const now = new Date();
-    if (now.getUTCDay() === 0 && now.getUTCHours() >= 21) {
+    if (isSundayReopen()) {
       throw new Error(`ORDER_SAFETY_REJECT ${symbol}: Sunday-reopen window (21:00–24:00Z) — no new entries`);
     }
   }
@@ -453,9 +445,9 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   }
 
   // Daily-plan gate (2026-07-30) — the broker-level backstop for the hard cutover.
-  // inline_trader checks the plan too, but THREE other paths reach the broker without
-  // ever touching it: zone_limit_runner (resting limits), session_runner (session-open
-  // entries) and orb_runner's cTrader leg. Gating only inline_trader would have left
+  // inline_trader checks the plan too, but other paths reach the broker without ever
+  // touching it: zone_limit_runner (resting limits) and orb_runner's cTrader leg (and
+  // session_runner, until it was retired). Gating only inline_trader would have left
   // the cutover full of holes while looking complete. assertOrderSafety is the one
   // chokepoint every entry funnels through, and it is entry-only — closePosition,
   // closeAllPositions, modifyPosition, cancelOrder and cancelOrphanLimits all bypass
