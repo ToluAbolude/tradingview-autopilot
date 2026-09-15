@@ -221,7 +221,7 @@ async function main() {
 
       if (LIVE) {
         try {
-          const res = await bridge.placeOrder({ symbol, direction: r.dir, units: lots, entry: r.entry, tpPrice: tp, slPrice: r.sl });
+          const res = await bridge.placeOrder({ symbol, direction: r.dir, units: lots, entry: r.entry, tpPrice: tp, slPrice: r.sl, label: 'orb_sessions' });
           signal.placed = true; signal.positionId = res?.positionId ?? null;
           log(`  ✅ LIVE ${pairing.session} ${symbol} ${r.dir} ${lots}lots entry~${signal.entry} SL ${signal.sl} TP ${signal.tp}`);
         } catch (e) {

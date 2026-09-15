@@ -11,7 +11,7 @@
  *   SCAN-CONFLUENCE  — the whole scanner voting stack (market_scanner --scan-only +
  *                      signal_executor + inline_trader), acct 2118552.
  *                      One entrant: the votes A–Z are not independently executable.
- *   EXP/<combo>      — each confirm_runner combo on acct 2131377 (independent,
+ *   EXP/<combo>      — each strategy_runner strategy × instrument on acct 2131377 (independent,
  *                      per-strategy-tagged trades; bracketed===true only, the same
  *                      validity rule as confirm_report / the weekly review).
  *   ORB-SESSIONS     — orb_runner dry-run forward-test, outcomes replayed from real

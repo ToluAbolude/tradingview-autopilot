@@ -33,6 +33,12 @@ const BE_AT_R    = Number(process.env.RUNNER_BE_R ?? 1.0);
 const TRAIL_AT_R = Number(process.env.RUNNER_TRAIL_R ?? 2.0);
 const CHAND_ATR  = Number(process.env.RUNNER_CHANDELIER_ATR ?? 2.0);
 
+// Owner scoping (2026-09-15): trail only positions opened by a strategy that uses the
+// runner exit. Other strategies on this account (plan zone limits, ORB) were validated
+// with fixed brackets. Unlabeled positions predate order labels or were opened by hand,
+// and keep the old behaviour (trailed). Comma-separated strategy ids: TRAIL_OWNERS.
+const TRAIL_OWNERS = new Set((process.env.TRAIL_OWNERS ?? 'scanner_confluence').split(',').map(s => s.trim()).filter(Boolean));
+
 const log = m => console.log(`[${new Date().toISOString()}] ${m}`);
 
 export function atr14(bars) {
@@ -118,6 +124,7 @@ for (const pos of positions) {
   const symbol = await bridge.getSymbolNameById(pos.symbolId).catch(() => null);
   if (!symbol) continue;
   if (!pos.stopLoss) { log(`  ${symbol} #${pos.positionId}: no SL — confirm_naked_guard's problem, skipping`); continue; }
+  if (pos.label && !TRAIL_OWNERS.has(pos.label)) { log(`  ${symbol} #${pos.positionId}: owned by ${pos.label}, which doesn't use the runner exit — skipping`); continue; }
 
   // First sighting anchors the ORIGINAL risk; later SL moves must not shrink R math.
   if (!state[pos.positionId]) state[pos.positionId] = { initialSl: pos.stopLoss, symbol };

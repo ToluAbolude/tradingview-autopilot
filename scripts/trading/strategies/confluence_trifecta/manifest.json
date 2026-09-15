@@ -1,0 +1,15 @@
+{
+  "id": "confluence_trifecta",
+  "description": "Trend + level + signal confluence on EURUSD H1. 90-day backtest: PF 1.87, n=37.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "confluence_trifecta" },
+  "instruments": ["EURUSD"],
+  "timeframe": "60",
+  "history_days": 20,
+  "params": {},
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

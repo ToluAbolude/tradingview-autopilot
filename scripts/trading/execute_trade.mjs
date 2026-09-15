@@ -423,6 +423,7 @@ export async function placeOrder({
   minRR = 2.0, // minimum R:R at actual fill price — rejects if market has moved adversely
   reanchorTpAtMinRR = false, // if true and R:R has degraded, recompute TP from current fill instead of rejecting
   screenshot = false,
+  label = '',  // owning strategy id — forwarded to the cTrader order
 }) {
   if (!tpPrice || !slPrice) throw new Error('tpPrice and slPrice are required for every trade.');
 
@@ -433,7 +434,7 @@ export async function placeOrder({
   if (process.env.BROKER_PROVIDER === 'ctrader') {
     try {
       const m = await import('./broker_ctrader.mjs');
-      const res = await m.placeOrder({ symbol, direction, units, entry, tpPrice, slPrice });
+      const res = await m.placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, label });
       const posId = res?.position?.positionId;
       console.log(`  ✓ cTrader: ${direction.toUpperCase()} ${units} ${symbol} | TP:${tpPrice} SL:${slPrice} | positionId=${posId}`);
       return { provider: 'ctrader', positionId: posId, raw: res };

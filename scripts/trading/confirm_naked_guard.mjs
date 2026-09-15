@@ -6,7 +6,7 @@
  * is closed immediately (the account holds only confirm trades, so close is the
  * safe, unambiguous action). Pure cTrader Open API — NO Chrome/CDP, runs headless.
  *
- * Cron: every ~5 min (staggered from confirm_runner). Demo-only by env.
+ * Cron: every ~5 min (staggered from strategy_runner). Demo-only by env.
  */
 import { appendFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';

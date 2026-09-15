@@ -97,7 +97,9 @@ const updated = { ...current };
 // This is the chokepoint every recommendation funnels through (LLM and static
 // fallback alike), so one guard here covers both paths. Recommendations are still
 // printed — the reasoning stays visible, it just no longer binds.
-const FROZEN = new Set(['scoreThreshold', 'pass1MinScore', 'planScoreFloor', 'planScoreRelief', 'riskPct']);
+// exposure (2026-09-15) decides how many strategies may hold one symbol — an operator
+// risk decision, never a nightly tuning knob.
+const FROZEN = new Set(['scoreThreshold', 'pass1MinScore', 'planScoreFloor', 'planScoreRelief', 'riskPct', 'exposure']);
 
 // Apply all recs (last write per param wins)
 for (const r of recs) {

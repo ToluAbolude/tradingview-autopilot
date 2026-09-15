@@ -257,7 +257,7 @@ async function screenshotTrade(t) {
     } catch {}
     if (!framed) await new Promise(r2 => setTimeout(r2, 2000));
   }
-  // most likely cause: confirm_runner's 5-min chart sweep fighting us for the chart —
+  // most likely cause: strategy_runner's (formerly confirm_runner's) 5-min chart sweep fighting us for the chart —
   // throw a retryable error so the caller defers to the next (quieter) cron tick
   if (!framed) throw new Error('framing-not-applied (chart contention?) — will retry next tick');
   await new Promise(r => setTimeout(r, 900));

@@ -281,6 +281,7 @@ function isBrokerBlocked(symbol) {
 export async function attemptInlineTrade(setup) {
   const tag = `[inline_trader][${setup.label}]`;
   const log  = msg => process.stdout.write(`  ${tag} ${msg}\n`);
+  const strategyId = setup.strategyId || 'scanner_confluence';   // order label: which strategy owns the position
 
   const PARAMS = loadParams();
   const MAX_CONCURRENT = PARAMS.maxConcurrent || 4;
@@ -585,25 +586,23 @@ export async function attemptInlineTrade(setup) {
     log(`Entry ${setup.entry} outside expected range [${priceRange[0]}–${priceRange[1]}] — corrupt signal. Skip.`); return;
   }
 
-  // ── 12. Already-open position ──────────────────────────────────────────────
-  // cTrader is a NETTING account: a 2nd order on a symbol that already has an
-  // open position collapses into ONE net position and ORPHANS the per-leg SL/TP
-  // limit orders → naked position (the 2026-05-29 NZDCAD incident). The DOM
-  // scrape lags the broker, so for cTrader we use the API (source of truth) to
-  // hard-block ANY new order while the symbol has open volume.
+  // ── 12. Exposure on the symbol ─────────────────────────────────────────────
+  // The same policy assertOrderSafety enforces (lib/exposure.mjs), checked here too so
+  // a blocked setup is skipped before it counts toward caps and cooldowns. The default
+  // is one position per symbol account-wide (the old rule). The accounts are HEDGING,
+  // not netting (verified 2026-09-15), so this is policy, not a broker limit.
   const openSymbols = await getOpenSymbols();
-  let symbolAlreadyOpen = openSymbols.has(setup.label);
+  let exposureBlock = openSymbols.has(setup.label) ? `${setup.label} already has an open position` : null;
   if (process.env.BROKER_PROVIDER === 'ctrader') {
     try {
       const bridge = await import('./broker_ctrader.mjs');
-      symbolAlreadyOpen = (await bridge.getOpenVolumeForSymbol(setup.label)) > 0;
+      const verdict = await bridge.checkExposure({ symbol: setup.label, direction: setup.dir, label: strategyId });
+      exposureBlock = verdict.ok ? null : `${setup.label}: ${verdict.reason}`;
     } catch (e) {
-      log(`cTrader open-volume check failed (${e.message}) — using DOM result (${symbolAlreadyOpen}).`);
+      log(`cTrader exposure check failed (${e.message}) — using the DOM result.`);
     }
   }
-  if (symbolAlreadyOpen) {
-    log(`${setup.label} already has an open position. Skip (avoids netting into a naked position).`); return;
-  }
+  if (exposureBlock) { log(`${exposureBlock}. Skip.`); return; }
   if (groupIdx !== -1) {
     const correlatedOpen = [...openSymbols].find(sym => CORRELATED_GROUPS[groupIdx].includes(sym));
     if (correlatedOpen) {
@@ -724,6 +723,7 @@ export async function attemptInlineTrade(setup) {
         entry:     setup.entry,
         slPrice:   setup.sl,
         tpPrices:  validTps,
+        label:     strategyId,
       });
       placed = validTps.length - r.failedTps.length;
       log(`✓ cTrader Approach B: position ${r.positionId} (${totalUnits} lots, SL=${setup.sl}) + ${r.tpOrderIds.length}/${validTps.length} TP limits placed at ${validTps.join(', ')}`);
@@ -750,7 +750,7 @@ export async function attemptInlineTrade(setup) {
         const legUnits   = legLots.slice(0, validTps.length);
         const r = await bridge.placeMultiTpPosition({
           symbol: setup.label, direction: setup.dir, totalUnits, legUnits,
-          entry: setup.entry, slPrice: setup.sl, tpPrices: validTps,
+          entry: setup.entry, slPrice: setup.sl, tpPrices: validTps, label: strategyId,
         });
         placed = validTps.length - r.failedTps.length;
         log(`✓ cTrader Approach B (after reconnect): position ${r.positionId} + ${r.tpOrderIds.length}/${validTps.length} TP limits`);
@@ -778,6 +778,7 @@ export async function attemptInlineTrade(setup) {
           tpPrice: leg.tp, slPrice: setup.sl,
           minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
           screenshot: leg.screenshot,
+          label: strategyId,
         });
         log(`✓ ${leg.name} placed (${legUnits} lots, TP=${leg.tp} SL=${setup.sl})`);
         placed++;
@@ -791,6 +792,7 @@ export async function attemptInlineTrade(setup) {
             tpPrice: leg.tp, slPrice: setup.sl,
             minRR: leg.minRR, reanchorTpAtMinRR: leg.reanchor,
             screenshot: false,
+            label: strategyId,
           });
           log(`✓ ${leg.name} placed on retry (TP=${leg.tp} SL=${setup.sl})`);
           placed++;

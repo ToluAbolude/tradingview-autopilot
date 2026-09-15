@@ -1,0 +1,15 @@
+{
+  "id": "amd_ote_newsgated",
+  "description": "A/B variant of amd_ote on USDJPY H1: only trades 5-180 minutes after a high-impact USD/JPY event (Chart Fanatics trade-after-the-news filter).",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "amd_ote" },
+  "instruments": ["USDJPY"],
+  "timeframe": "60",
+  "history_days": 20,
+  "params": {},
+  "filters": ["news_recent"],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

@@ -19,7 +19,7 @@ A strategy is plugged in as a JavaScript module, as JSON rules, or as a Pine scr
 | Fact | Evidence | Consequence |
 |---|---|---|
 | Both cTrader accounts are **hedging** (2118552 scanner, 2131377 experiment) | `ProtoOATraderReq` returns `accountType = HEDGED`, explicitly set | The broker allows several positions per symbol. Only the system's own one-position-per-symbol rule prevents it. The "NETTING account" comment at inline_trader step 12 is wrong. |
-| Orders carry no strategy tag | No `label`, `comment` or `clientOrderId` on any `ProtoOANewOrderReq`; the proto supports all three and returns `label` on positions | No broker position knows which strategy opened it. `trail_runner` and `confirm_eod_close` act on every position on the account. |
+| Orders carried no strategy tag until 2026-09-15 | No `label` on any `ProtoOANewOrderReq`; the proto supports it and returns it on positions | Fixed on `feat/strategy-plugins`: every order now carries its strategy id as `label`, `getPositions()` returns it, and `trail_runner` only trails its own strategy's positions. Positions opened before the change stay unlabeled. |
 | The 15M alignment gate still requires removed votes | `buildSetups` in `setup_finder.mjs`: `['A', 'B', 'T', 'L']`; A, B and T have not been emitted since 2026-08-21 | 90–210 setups/day rejected as "15M not aligned" against 0–4 emitted signals (VM log, Sep 4–15). **Still open**: this branch preserves behaviour exactly. |
 | The Tradovate prop account nets positions per contract | `broker_tradovate` reports `netPos` | Keep one strategy per contract there unless virtual positions are built. |
 
@@ -44,7 +44,7 @@ Market data ─► Context (bias, plan) ─► Strategy ─► Signal store
 | # | Service | Job | Code today | Next |
 |---|---|---|---|---|
 | 1 | Market data | Bars for any symbol and timeframe, from any source | `broker_ctrader.getTrendbars`; `setup_finder.fetchBarsResilient` (chart, then broker fallback); `chart_lock.mjs`; `src/core/data.js`; most runners fetch their own | One bars API. Timestamps in ms everywhere (chart bars are seconds). Frozen-feed detection here rather than in the safety gate. |
-| 2 | Instrument registry | Asset class, contract, aliases, universe, stop floor | **`lib/instruments.mjs`**: `instrumentClass`, `isCrypto`, `CORE_UNIVERSE`, `MIN_SL_FRAC` | Still local: `PRICE_RANGES` and `CORRELATED_GROUPS` (inline_trader), `INST_PROFILE` (setup_finder), `INSTRUMENTS` (confirm_runner), broker aliases (daily_plan) |
+| 2 | Instrument registry | Asset class, contract, aliases, universe, stop floor | **`lib/instruments.mjs`**: `instrumentClass`, `isCrypto`, `CORE_UNIVERSE`, `MIN_SL_FRAC` | Still local: `PRICE_RANGES` and `CORRELATED_GROUPS` (inline_trader), `INST_PROFILE` (setup_finder), broker aliases (daily_plan) |
 | 3 | Clock & sessions | Weekends, Sunday reopen, trade windows, entry cutoffs, sessions | **`lib/clock.mjs`**: `isCalendarWeekend`, `isFxWeekend`, `isSundayReopen`, `inTradeWindow`, `entryCutoff`, `currentSession`, `weekendCryptoOn`, `cryptoLateOn` | Still local: `sessionSymbols` (setup_finder), ORB session windows, zone_limit's 19:00 cutoff, EOD close hours |
 | 4 | News & events | Economic calendar and blackout windows | `news_checker.mjs`; daily_plan, daily_brief and weekly_outlook each read their own calendar cache | One cached calendar |
 | 5 | Config | Every setting, typed and versioned, with rules on who changes what | `trading_params.json` (frozen keys in `apply_params.mjs`), `params_blocks.mjs`, `scanner_config.json`, 15+ env kill switches, constants (`COMBOS`, zone_limit `CFG`) | Per-strategy settings move into manifests |
@@ -61,24 +61,24 @@ Market data ─► Context (bias, plan) ─► Strategy ─► Signal store
 
 | # | Service | Job | Code today | Next |
 |---|---|---|---|---|
-| 9 | Strategies (plug-ins) | Bars + context → Signals | Module-shaped: `confirm/strategies/*.mjs`, including **`scanner_confluence.mjs`**; `institutional/smorb.mjs`, `trendpb.mjs`. Built into their runners: `orb_runner`, `kurisko_flag_runner`, `zone_limit_runner` | Wrap the built-in ones behind the same `generateSignals` contract |
+| 9 | Strategies (plug-ins) | Bars + context → Signals | **`strategies/<id>/manifest.json`** + logic modules in `confirm/strategies/*.mjs`, run by **`strategy_runner.mjs`** (registry: **`lib/strategies.mjs`**). Also module-shaped: `scanner_confluence.mjs`, `institutional/smorb.mjs`, `trendpb.mjs`. Still built into their runners: `orb_runner`, `kurisko_flag_runner`, `zone_limit_runner` | Move the built-in ones into manifests |
 | 10 | Signal store | Where strategies publish and executors consume: expiry, dedup, one attempt per signal | `live_signals.json` + `signal_executor_state.json` for the scanner (records now carry `strategyId`); private state files elsewhere (`confirm_state.json`, `orb_state.json`, `ia_paper_signals.jsonl`) | One store for every strategy |
 
 ### Layer 4 — Trade decision & risk
 
 | # | Service | Job | Code today | Next |
 |---|---|---|---|---|
-| 11 | Entry policy | Ordered veto filters, each returning ok or a reason | 23 checks in `inline_trader.attemptInlineTrade`; `daily_plan_gate.checkPlan`; `fib_veto.mjs`; confirm_runner NTZ and news filters | Strategy-specific checks (score, Trifecta, MTF depth) belong inside the confluence strategy. `applyPlanLevels` changes the trade from inside a filter — make that an explicit output. |
-| 12 | Trade construction | Signal → bracket: stop, targets, R:R, exit legs | Seven recipes: `buildSetups` H1 geometry, `applyPlanLevels`, inline_trader stop-floor widening and `RUNNER_EXIT` legs, `zone_limit_runner.decideOrder` (zone midpoint, ≥2R, tested), confirm_runner fixed 2R, ORB opposite boundary | Output `TradeIntent`; the recipe is chosen per manifest |
-| 13 | Position sizing | Lots from risk %, equity, stop distance and contract size | **`lib/sizing.mjs`**: `calcLots`, `splitLegs`, used by inline_trader, confirm_runner, zone_limit_runner, orb_runner, kurisko_flag_runner (six hand copies removed) | Still separate: `trade_notion_sync` risk maths, `broker_tradovate.sizeContracts` (futures) |
-| 14 | Account risk | Limits shared by every strategy on one account | inline_trader steps 5b–5d, 9, 10, 12; confirm_runner and ORB kill switches; zone_limit `maxTotal`; anti-stack and twin guard in the safety gate | One per-account budget every strategy draws from |
+| 11 | Entry policy | Ordered veto filters, each returning ok or a reason | 23 checks in `inline_trader.attemptInlineTrade`; `daily_plan_gate.checkPlan`; `fib_veto.mjs`; manifest filters `prior_day_range` / `news_recent` (strategy_runner) | Strategy-specific checks (score, Trifecta, MTF depth) belong inside the confluence strategy. `applyPlanLevels` changes the trade from inside a filter — make that an explicit output. |
+| 12 | Trade construction | Signal → bracket: stop, targets, R:R, exit legs | Seven recipes: `buildSetups` H1 geometry, `applyPlanLevels`, inline_trader stop-floor widening and `RUNNER_EXIT` legs, `zone_limit_runner.decideOrder` (zone midpoint, ≥2R, tested), strategy_runner `target.r` (or the signal's own TP), ORB opposite boundary | Output `TradeIntent`; the recipe is chosen per manifest |
+| 13 | Position sizing | Lots from risk %, equity, stop distance and contract size | **`lib/sizing.mjs`**: `calcLots`, `splitLegs`, used by inline_trader, strategy_runner, zone_limit_runner, orb_runner, kurisko_flag_runner (six hand copies removed) | Still separate: `trade_notion_sync` risk maths, `broker_tradovate.sizeContracts` (futures) |
+| 14 | Account risk | Limits shared by every strategy on one account | **`lib/exposure.mjs`** (positions per symbol, per strategy, opposite directions; `trading_params.exposure`, default = the old one-per-symbol rule), enforced in the safety gate, inline_trader step 12 and zone_limit_runner; daily loss kill switches in inline_trader, strategy_runner and ORB; zone_limit `maxTotal` | Per-strategy daily loss budget |
 | 15 | Safety gate | Rules no strategy can override: stop present and on the right side, minimum stop distance, lot caps, stale price, Sunday reopen, chart layer down | `broker_ctrader.assertOrderSafety` | It also holds the plan gate and fib veto (policy inside the broker adapter). Move them into the policy chain only once every runner uses the same pipeline. |
 
 ### Layer 5 — Execution
 
 | # | Service | Job | Code today | Next |
 |---|---|---|---|---|
-| 16 | Order management | Submit, modify, cancel; bracket attach and verify; multi-TP legs; resting limits; retry; recovering a lost position ID | `broker_ctrader.placeOrder` / `placeMultiTpPosition` / `cancelOrphanLimits`; inline_trader retry block; confirm_runner bracket-verify loop; zone_limit_runner resting-order state | `OrderRequest {clientOrderId, strategyId, …}` → `OrderResult {orderId, positionId, bracketed}` |
+| 16 | Order management | Submit, modify, cancel; bracket attach and verify; multi-TP legs; resting limits; retry; recovering a lost position ID | `broker_ctrader.placeOrder` / `placeMultiTpPosition` / `cancelOrphanLimits`; inline_trader retry block; strategy_runner bracket-verify loop; zone_limit_runner resting-order state | `OrderRequest {clientOrderId, strategyId, …}` → `OrderResult {orderId, positionId, bracketed}` |
 | 17 | Broker adapters | One interface per broker | `broker_ctrader.mjs` (1,269 lines: socket, protobuf, safety, orders, history, bars), `broker_tradovate.mjs`, legacy TradingView-DOM `execute_trade.mjs`; chosen by `BROKER_PROVIDER` | Split transport from orders, history and bars |
 | 18 | Accounts & credentials | Which account a job trades; secrets; token rotation | env files + wrappers (`run_scanner_job.sh` → 2118552, `run_confirm_job.sh` → 2131377); `ctrader_refresh.mjs`; `PLAN_GATE_ACCOUNT` defaulting to 2118552 | Account config: broker, credentials, risk budget, strategies |
 
@@ -86,9 +86,9 @@ Market data ─► Context (bias, plan) ─► Strategy ─► Signal store
 
 | # | Service | Job | Code today | Next |
 |---|---|---|---|---|
-| 19 | Position management | Breakeven, trailing, partials, EOD carry-or-close, weekend flatten | `trail_runner.mjs` (`trailDecision` is pure), `confirm_eod_close.mjs` (both accounts), `tvo_eod_flatten.sh`, `position_monitor.mjs` | Manage only positions the job owns, using the owner's exit settings |
+| 19 | Position management | Breakeven, trailing, partials, EOD carry-or-close, weekend flatten | `trail_runner.mjs` (trails only `TRAIL_OWNERS`, default `scanner_confluence`, plus unlabeled positions), `confirm_eod_close.mjs` (both accounts; logs each position's owner), `tvo_eod_flatten.sh`, `position_monitor.mjs` | Exit settings in the manifest instead of per-job env and account policy |
 | 20 | Integrity guard | No position without both stop and target | `confirm_naked_guard.mjs`, both accounts every 5 min | Stays account-wide on purpose, so it runs even when management logic breaks |
-| 21 | Ledger & attribution | Broker deal → position → strategy, signal and plan zone → realised R | cTrader deals; `confirm_signals.jsonl` (experiment); `trades.csv` (scanner, known unreliable); `orb_signals.jsonl`; reconcile/pnl scripts | `strategyId` on every order |
+| 21 | Ledger & attribution | Broker deal → position → strategy, signal and plan zone → realised R | Positions carry the owning strategy id as `label`; `confirm_signals.jsonl` (experiment); `trades.csv` (scanner, known unreliable); `orb_signals.jsonl`; reconcile/pnl scripts | Reports read ownership from the label instead of side logs |
 
 ### Layer 7 — Feedback
 
@@ -112,12 +112,12 @@ Each account is one choice per service. A new trading approach should be a new c
 | Service | Scanner (2118552) | Experiment (2131377) |
 |---|---|---|
 | Context | selector bias + daily plan | none |
-| Strategies | scanner_confluence, plan zone limits, ORB | 10 combos from 7 modules |
+| Strategies | scanner_confluence, plan zone limits, ORB | 9 manifests (10 strategy × instrument pairs) run by `strategy_runner` |
 | Entry policy | plan gate + 23 inline checks | per-combo filters |
 | Construction | H1 structure + plan levels; zone midpoint for limits | strategy's stop; 2R or the strategy's own target |
 | Sizing | 5 / 3.5 / 2.5% tiers (crypto capped at 1%) | fixed 0.25% |
 | Exits | 1/3 at 2R + trailed runner, EOD carry | bracket only, weekend flatten |
-| Attribution | `trades.csv` (unreliable) | `strategyId` per position |
+| Attribution | order `label` (`scanner_confluence`, `plan_zone_limit`, `orb_sessions`) | order `label` = manifest id |
 
 ## Contracts
 
@@ -125,10 +125,11 @@ The services only decouple if the messages between them are fixed.
 
 | Contract | Where | Status |
 |---|---|---|
-| `Bar`, `Signal`, `TradeIntent` | `lib/contracts.mjs` (JSDoc + `signalErrors`) | Defined. `signalErrors` runs in confirm_runner (every strategy signal) and market_scanner (every setup before it reaches `live_signals.json`). |
+| `Bar`, `Signal`, `TradeIntent` | `lib/contracts.mjs` (JSDoc + `signalErrors`) | Defined. `signalErrors` runs in strategy_runner (every strategy signal) and market_scanner (every setup before it reaches `live_signals.json`). |
 | `Plan` | `daily_plan.json` | Exists; produced by `daily_plan.mjs`, read by `daily_plan_gate` and `zone_limit_runner` |
-| `Manifest` | this document (below) | Target format; built with the generic runner |
-| `OrderRequest` / `OrderResult`, `Position` (with owner), `Trade` (ledger row) | — | To define with the generic runner and order tagging |
+| `Manifest` | `lib/strategies.mjs` (`manifestErrors`, `loadStrategies`); fields in `scripts/trading/strategies/README.md` | Defined and used by `strategy_runner.mjs` |
+| `Position` owner | `getPositions()` → `label` | Defined |
+| `OrderRequest` / `OrderResult`, `Trade` (ledger row) | — | Still to define |
 
 A `Signal` is a view, not an order: `{strategyId, symbol, tf, dir, ts, entry, sl, targets?, entryType?, score?, reasons?}`. No sizing and no broker fields — later services add those.
 
@@ -142,27 +143,27 @@ strategies/orb_nas_ny/
   logic.mjs       what it decides   (or rules.json, or a Pine script converted to JavaScript)
 ```
 
+The format as built (full field list in `scripts/trading/strategies/README.md`):
+
 ```json
 {
   "id": "orb_nas_ny",
-  "version": "1.0.0",
+  "description": "Opening range breakout on the NY open.",
   "enabled": true,
-  "stage": "paper",
-  "account": "experiment",
-  "logic": { "type": "module", "file": "logic.mjs" },
+  "mode": "paper",
+  "account": "2131377",
+  "logic": { "file": "logic.mjs" },
   "instruments": ["NAS100", "US30"],
   "timeframe": "15",
-  "evaluate": "bar_close",
-  "sessions": ["NY"],
+  "history_days": 20,
   "params": { "orMinutes": 30, "withTrend": true },
-  "entry": { "type": "market" },
-  "stops": { "sl": "from_signal", "tp": { "r": 2 }, "minRR": 2 },
-  "exits": { "breakevenAtR": 1, "trail": "none", "eod": "flatten_friday" },
-  "risk": { "perTradePct": 0.5, "maxOpenPerSymbol": 1, "maxDailyLossPct": 2 }
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
 }
 ```
 
-The logic file only produces signals. Sizing, order placement, stop attachment and safety checks are shared services; the manifest picks from the options they offer, such as `"trail": "chandelier"` or `"tp": "from_signal"`.
+The logic file only produces signals. Sizing, order placement, stop attachment and safety checks are shared services. Still to come: exit settings (`exits`: trailing, EOD) and per-strategy daily loss budgets in the manifest.
 
 ### Logic formats
 
@@ -215,9 +216,9 @@ One general-purpose runner replaces `confirm_runner`, `orb_runner`, `kurisko_fla
 | 2 | Shared instrument registry, clock and sizing | **Done** — `lib/instruments.mjs`, `lib/clock.mjs`, `lib/sizing.mjs`; tests in `lib/lib.test.mjs` |
 | 3 | Scanner as a Signal-emitting strategy module | **Done** — `confirm/strategies/scanner_confluence.mjs` over `scoreTimeframe` + `buildSetups`, the functions the live scan runs |
 | 4 | Retire dead runners and their installers | This branch — see below |
-| 5 | Manifest schema + generic runner grown from `confirm_runner`; move the experiment's combos into manifests first | Next |
-| 6 | Strategy ID on every order + owner-scoped exit jobs | Next — required before two strategies share an account |
-| 7 | Replace one-position-per-symbol with per-strategy and per-account exposure rules | |
+| 5 | Manifest schema + generic runner grown from `confirm_runner`; move the experiment's combos into manifests first | **Done** — `lib/strategies.mjs`, `strategy_runner.mjs`, 9 manifests in `scripts/trading/strategies/` reproducing the 10 old combos |
+| 6 | Strategy ID on every order + owner-scoped exit jobs | **Done** for orders (`label` from every runner) and `trail_runner`. `confirm_eod_close` still applies one account policy to every position (it logs the owner) |
+| 7 | Replace one-position-per-symbol with per-strategy and per-account exposure rules | **Done** — `lib/exposure.mjs`; default reproduces the old rule, `trading_params.exposure` raises it per account |
 | 8 | Wrap cfs detectors, institutional functions, ORB and kurisko as modules | |
 | 9 | JSON rules compiler | |
 | 10 | Pine conversion + automatic trade-matching check | |
@@ -234,7 +235,7 @@ The refactor is behaviour-preserving except for these, all deliberate:
 - **zone_limit_runner sizes crypto with the 1% risk cap** that inline_trader and orb_runner already applied. BTCUSD zone limits previously risked the full `riskPct[0]` (5%). Every other runner produces identical lots (checked against every old copy at the lot size the broker receives).
 - **zone_limit_runner places nothing outside the trade windows** instead of sending orders the plan gate rejects every 15 minutes.
 - **Asset class is now consistent for non-core symbols.** Platinum/copper classify as METAL, NGAS as OIL, DOT/AVAX/DOGE as CRYPTO, and NDX/NQ/YM/DOW/USTEC/DJ30/DE40/GER30 as INDEX — in sizing and in the safety gate's stop floors and lot caps. No core-universe symbol changes class.
-- **Invalid signals stop earlier.** confirm_runner skips a signal whose stop is on the wrong side before trying to place it; market_scanner leaves an invalid setup out of `live_signals.json`.
+- **Invalid signals stop earlier.** The experiment runner (now strategy_runner) skips a signal whose stop is on the wrong side before trying to place it; market_scanner leaves an invalid setup out of `live_signals.json`.
 - **`setup_finder.mjs` no longer imports chrome-remote-interface at load time**, so the scoring engine imports on any machine; the chart client still loads on first use.
 
 ### Loose ends found while retiring

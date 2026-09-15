@@ -1,0 +1,15 @@
+{
+  "id": "wor_break_retest_ntz",
+  "description": "A/B variant of wor_break_retest on GBPJPY H1: only takes entries outside the prior day's range (Chart Fanatics no-trade-zone filter).",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "wor_break_retest" },
+  "instruments": ["GBPJPY"],
+  "timeframe": "60",
+  "history_days": 20,
+  "params": {},
+  "filters": ["prior_day_range"],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

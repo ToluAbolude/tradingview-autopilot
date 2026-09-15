@@ -32,6 +32,7 @@ import { createRequire } from 'module';
 import { fibVetoState, checkFibVeto } from './fib_veto.mjs';
 import { instrumentClass as _instrumentClass, MIN_SL_FRAC } from './lib/instruments.mjs';
 import { isSundayReopen } from './lib/clock.mjs';
+import { exposurePolicy, exposureVerdict } from './lib/exposure.mjs';
 const require = createRequire(import.meta.url);
 const protobuf = require('protobufjs');
 
@@ -365,7 +366,7 @@ async function _symbolMetaFor(name) {
 
 // ── Order safety gate ──────────────────────────────────────────────────────────
 // Every entry from every runner (inline_trader, zone_limit_runner, orb_runner,
-// confirm_runner, kurisko_flag_runner) passes through placeOrder/placeMultiTpPosition, so this
+// strategy_runner, kurisko_flag_runner) passes through placeOrder/placeMultiTpPosition, so this
 // is the one chokepoint that can make the historical blowup classes structurally
 // impossible (2026-04-30 USDJPY −$3.9k, 2026-05-20 XAGUSD −$4.9k, 2026-06-06
 // USDCHF −$5.7k — all: oversized lots off a collapsed SL distance, stacked
@@ -417,7 +418,33 @@ async function _chartLayerUp() {
   return up;
 }
 
-export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false }) {
+// trading_params.json, read per call so an exposure edit lands without a restart.
+function _readParams() {
+  const dir = process.env.TRADING_DATA_DIR || '/home/ubuntu/trading-data';
+  try { return JSON.parse(fs.readFileSync(path.join(dir, 'trading_params.json'), 'utf8')); } catch { return {}; }
+}
+
+/**
+ * Exposure check for a new `direction` position owned by `label` on `symbol`, against
+ * the positions open right now (lib/exposure.mjs). Used by assertOrderSafety and by
+ * runners that want to skip before building an order. Fails OPEN on a broker read
+ * error, like the open-volume check it replaces.
+ */
+export async function checkExposure({ symbol, direction, label = '', policy }) {
+  const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
+  let positions;
+  try {
+    await connect();
+    const meta = await _symbolMetaFor(symbol);
+    positions = (await getPositions()).filter(p => p.symbolId === meta.id);
+  } catch (e) {
+    console.error(`[cTrader] exposure check skipped for ${symbol}: ${e.message}`);
+    return { ok: true };
+  }
+  return exposureVerdict({ positions, dir, label, policy: policy ?? exposurePolicy(_readParams(), process.env.CTRADER_ACCOUNT_ID) });
+}
+
+export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false, label = '' }) {
   const cls = _instrumentClass(symbol);
   const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
 
@@ -483,14 +510,15 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
     throw new Error(`ORDER_SAFETY_REJECT ${symbol}: ${units} lots > hard cap ${_SAFETY.maxLots[cls]} for ${cls}`);
   }
 
-  // Anti-stacking: one position per symbol across ALL runners. The June 6 loop
-  // re-fired the same signal 11 times because VOID-marked attempts never hit
-  // the daily caps.
+  // Exposure (2026-09-15; was "one position per symbol across ALL runners"). The accounts
+  // are hedging, so this is system policy, not a broker limit — see lib/exposure.mjs. The
+  // default policy IS the old rule; trading_params.exposure can raise it per account so
+  // several strategies share a symbol. The per-strategy cap still stops the June 6 loop
+  // (one signal re-fired 11 times).
+  const exposure = exposurePolicy(_readParams(), process.env.CTRADER_ACCOUNT_ID);
   if (!allowStack) {
-    const openVol = await getOpenVolumeForSymbol(symbol).catch(() => 0);
-    if (openVol > 0) {
-      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: existing open volume ${openVol} — no stacking`);
-    }
+    const verdict = await checkExposure({ symbol, direction: dir, label, policy: exposure });
+    if (!verdict.ok) throw new Error(`ORDER_SAFETY_REJECT ${symbol}: ${verdict.reason} — exposure policy`);
   }
 
   // Twin guard (2026-07-20 GBPCAD double-fill, positions 32981536/7): two
@@ -501,7 +529,10 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   // symbol with a long and a short limit in one cycle).
   if (!allowStack && !isLimit) {
     const lockDir = process.env.TRADING_DATA_DIR || '/home/ubuntu/trading-data';
-    const lock = path.join(lockDir, `.entry_cooldown_${String(symbol).replace(/[^A-Za-z0-9]/g, '')}`);
+    // Keyed per symbol while only one position may exist; per strategy + symbol once the
+    // exposure policy lets several strategies share it (they must not block each other).
+    const twinKey = exposure.maxPositionsPerSymbol > 1 && label ? `${label}_${symbol}` : String(symbol);
+    const lock = path.join(lockDir, `.entry_cooldown_${twinKey.replace(/[^A-Za-z0-9_]/g, '')}`);
     let recentMs = null;
     try { recentMs = Date.now() - fs.statSync(lock).mtimeMs; } catch { /* no lock yet */ }
     if (recentMs != null && recentMs < 60_000) {
@@ -563,7 +594,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
  *   tpPrice, slPrice = absolute price targets matching the existing
  *                      execute_trade.placeOrder API.
  */
-export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null }) {
+export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null, label = '' }) {
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
   // Clamp to the per-class lot cap instead of letting assertOrderSafety REJECT the
@@ -578,7 +609,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   // For a LIMIT, safety checks use the limit price as the reference (its SL must be
   // valid vs the limit), and the frozen-chart deviation check is skipped (a limit
   // rests away from live by design).
-  await assertOrderSafety({ symbol, direction, units, entry: limitPrice != null ? limitPrice : entry, slPrice, isLimit: limitPrice != null });
+  await assertOrderSafety({ symbol, direction, units, entry: limitPrice != null ? limitPrice : entry, slPrice, isLimit: limitPrice != null, label });
   const meta = await _symbolMetaFor(symbol);
   const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
   // Quantize to broker step + enforce min volume
@@ -586,6 +617,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
   const rawVol = Math.round(units * meta.lotSize);
   const volume = Math.max(minV, Math.floor(rawVol / step) * step);
+  const owner = label ? { label: String(label).slice(0, 100) } : {};   // which strategy opened it (cTrader max 100)
 
   // ── LIMIT entry: rest a pending order AT the level (S&R zone), bracket relative
   //    to the limit price. GOOD_TILL_CANCEL — it waits until price reaches it. ──
@@ -597,6 +629,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
       orderType: 2,                                  // LIMIT
       tradeSide, volume, limitPrice,
       stopLoss: slPrice, takeProfit: tpPrice,        // absolute prices
+      ...owner,
       timeInForce: 1,                                // GOOD_TILL_CANCEL
     });
   }
@@ -608,6 +641,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
     tradeSide,
     volume,
     timeInForce: 3,                                  // IMMEDIATE_OR_CANCEL
+    ...owner,
   };
 
   if (entry != null) {
@@ -675,11 +709,12 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
  *
  * Returns: { positionId, openRes, tpOrderIds: [N], failedTps: [...] }
  */
-export async function placeMultiTpPosition({ symbol, direction, totalUnits, legUnits, entry, slPrice, tpPrices }) {
+export async function placeMultiTpPosition({ symbol, direction, totalUnits, legUnits, entry, slPrice, tpPrices, label = '' }) {
   await connect();
   if (!slPrice) throw new Error('slPrice required.');
   if (!Array.isArray(tpPrices) || tpPrices.length === 0) throw new Error('tpPrices must be a non-empty array.');
-  await assertOrderSafety({ symbol, direction, units: totalUnits, entry, slPrice });
+  await assertOrderSafety({ symbol, direction, units: totalUnits, entry, slPrice, label });
+  const owner = label ? { label: String(label).slice(0, 100) } : {};   // which strategy opened it
 
   const meta = await _symbolMetaFor(symbol);
   const tradeSide  = (direction === 'long' || direction === 'buy') ? 1 : 2;  // BUY | SELL
@@ -731,6 +766,7 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
     relativeStopLoss:   slDist,
     relativeTakeProfit: tpDist,
     timeInForce: 3,                   // IMMEDIATE_OR_CANCEL
+    ...owner,
   }, { timeoutMs: 25_000 });
   const positionId = _toNum(openRes?.position?.positionId);
   if (!positionId) throw new Error(`placeMultiTpPosition: open did not return positionId — ${JSON.stringify(openRes).slice(0,200)}`);
@@ -749,6 +785,7 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
         limitPrice:  tpPrices[i],
         positionId,                       // ← links exit to parent position
         timeInForce: 1,                   // GOOD_TILL_CANCEL
+        ...owner,
       });
       tpOrderIds.push(_toNum(r?.order?.orderId));
     } catch (e) {
@@ -933,6 +970,7 @@ export async function getPositions() {
     swap:        _toNum(p.swap),
     commission:  _toNum(p.commission),
     openTimestamp: _toNum(p.tradeData?.openTimestamp),   // unix ms — for anchoring the chart screenshot at the real entry candle
+    label:       p.tradeData?.label || '',   // owning strategy id (orders carry it since 2026-09-15; '' = unlabeled)
   }));
 }
 

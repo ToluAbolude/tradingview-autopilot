@@ -1,0 +1,15 @@
+{
+  "id": "jadecap_fvg",
+  "description": "JadeCap session raid, FVG retrace, hold to the opposite session's liquidity (the logic sets its own target), on BTCUSD H1. Chart Fanatics batch-1 graduate with a weak edge (~0.04R/trade net); 45 days of history feed its EMA(500) bias.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "jadecap_fvg" },
+  "instruments": ["BTCUSD"],
+  "timeframe": "60",
+  "history_days": 45,
+  "params": {},
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}
