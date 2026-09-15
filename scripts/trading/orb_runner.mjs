@@ -40,6 +40,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
+import { calcLots } from './lib/sizing.mjs';
+import { isCalendarWeekend } from './lib/clock.mjs';
 
 const IS_LINUX  = os.platform() === 'linux';
 const DATA_ROOT = IS_LINUX
@@ -81,33 +83,6 @@ function loadState() {
   try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return {}; }
 }
 function saveState(s) { writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
-
-// ── Lot sizing — identical formula to inline_trader.mjs / session_runner.mjs ──
-function calcLots(symbol, riskPct, equity, entry, sl) {
-  const MIN_LOT = 0.01, LOT_STEP = 0.01, MAX_LOTS = 10;
-  const riskAmt = equity * (riskPct / 100);
-  const slDist  = Math.abs(entry - sl);
-  if (slDist === 0) return MIN_LOT;
-  const sym = symbol.toUpperCase();
-  const q = lots => Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_LOTS);
-
-  if (/XAU|GOLD/.test(sym))                                   return q(riskAmt / (100 * slDist));
-  if (/NAS100|NAS|NDX|NQ|US30|DOW|YM/.test(sym))              return q(riskAmt / slDist);
-  if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC/.test(sym)) {
-    const maxLots = Math.floor(((equity * 0.01) / slDist) / LOT_STEP) * LOT_STEP;
-    return q(Math.min(riskAmt / slDist, maxLots));
-  }
-  if (/WTI|OIL|BRENT|USOIL|UKOIL/.test(sym)) {
-    const OIL_MIN = 3.0, OIL_STEP = 1.0;
-    const slPips = slDist / 0.01;
-    let lots = Math.floor((riskAmt / (10.0 * slPips)) / OIL_STEP) * OIL_STEP;
-    return Math.min(Math.max(lots, OIL_MIN), MAX_LOTS);
-  }
-  if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) return q(riskAmt / slDist);
-  if (/JPY/.test(sym))   return q(riskAmt / (6.50 * (slDist / 0.01)));
-  if (/XAG|SILVER/.test(sym)) return q(riskAmt / (5000 * slDist));
-  return q(riskAmt / (10.0 * (slDist / 0.0001)));   // standard forex
-}
 
 // ── Session window math (for today, UTC) ─────────────────────────────────────
 function sessionWindow(openUTC, now) {
@@ -155,8 +130,7 @@ function detectBreakout(bars, start, orEnd, nowMs, withTrend = true) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   const now = new Date();
-  const dow = now.getUTCDay();
-  if (dow === 0 || dow === 6) { log('Weekend — ORB idle.'); return; }
+  if (isCalendarWeekend(now)) { log('Weekend — ORB idle.'); return; }
 
   log(`═══ ORB RUNNER (${LIVE ? 'LIVE' : 'DRY-RUN'}${TVO_LIVE ? ' + TVO-LIVE' : ''}) ═══`);
 

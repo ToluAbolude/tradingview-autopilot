@@ -20,6 +20,8 @@
 import { scanForSetups } from './setup_finder.mjs';
 import { acquireChartLock, releaseChartLock } from './chart_lock.mjs';
 import { attemptInlineTrade, resetCycleState } from './inline_trader.mjs';
+import { STRATEGY_ID, toSignal } from './confirm/strategies/scanner_confluence.mjs';
+import { signalErrors } from './lib/contracts.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
@@ -116,12 +118,15 @@ async function runScan(state) {
   for (const s of fresh) {
     const id = sigId(s);
     if (liveIds.has(id)) continue;
+    const invalid = signalErrors(toSignal(s));
+    if (invalid.length) { console.log(`  ✗ INVALID ${s.label} ${s.tf}M ${s.dir}: ${invalid.join('; ')}`); continue; }
 
     const ttl     = TTL[s.tf] ?? DEFAULT_TTL;
     const expires = new Date(now + ttl).toISOString();
 
     const record = {
       id,
+      strategyId: STRATEGY_ID,
       ts:         scanTs,
       expires,
       label:      s.label,

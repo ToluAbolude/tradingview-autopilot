@@ -4,7 +4,7 @@
  * Applies all trading guards and places the order without waiting for the
  * current scan cycle to finish — eliminating the signal-staleness gap.
  *
- * Guards applied (same as session_runner.mjs):
+ * Guards applied:
  *   - Time gates: Sunday, EOD, last-entry cutoff, Friday cutoff
  *   - Session block (blockedSessions param)
  *   - News safety (global + per-symbol)
@@ -25,6 +25,9 @@ import { trifectaCount, describeConfluence, hasTrifecta } from './confluence.mjs
 import { verifyOrderLanded } from './broker_history.mjs';
 import { checkPlan, applyPlanLevels } from './daily_plan_gate.mjs';
 import { applyBlockExpiry } from './params_blocks.mjs';
+import { calcLots, splitLegs } from './lib/sizing.mjs';
+import { instrumentClass, isCrypto as isCryptoSymbol, MIN_SL_FRAC } from './lib/instruments.mjs';
+import { isFxWeekend, entryCutoff, currentSession, weekendCryptoOn, cryptoLateOn } from './lib/clock.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -65,7 +68,6 @@ const CORRELATED_GROUPS = [
   ['GER40', 'UK100'],
 ];
 
-const CRYPTO_SYMBOLS       = ['BTCUSD', 'ETHUSD', 'SOLUSD', 'ADAUSD', 'XRPUSD', 'BNBUSD', 'LTCUSD'];
 const CRYPTO_ASIAN_MIN_SCORE = 10;
 
 // Order-of-magnitude corruption guards (e.g. NAS prices written into WTI) —
@@ -112,18 +114,6 @@ function loadParams() {
   // applyBlockExpiry: a block whose 30-day cooloff has passed stops binding. Nothing
   // else in the stack ever lifted one, so blocks accumulated permanently.
   return applyBlockExpiry(JSON.parse(readFileSync(PARAMS_FILE, 'utf8')));
-}
-
-// ── Session helper ─────────────────────────────────────────────────────────────
-function currentSession() {
-  const h   = new Date().getUTCHours();
-  const day = new Date().getUTCDay();
-  if (day === 0 && h >= 22) return 'ASIAN';
-  if (h >= 12 && h < 16) return 'LONDON-NY-OVERLAP';
-  if (h >= 7  && h < 12) return 'LONDON';
-  if (h >= 16 && h < 20) return 'NY';
-  if (h >= 0  && h < 7)  return 'ASIAN';
-  return 'DEAD-ZONE';
 }
 
 // ── Loss cooldown — 60 min per symbol (both directions blocked after any loss) ──
@@ -232,81 +222,6 @@ function logTrade(entry) {
   return ts;
 }
 
-// ── Lot sizing — identical to session_runner.mjs ───────────────────────────────
-function calcLots(symbol, riskPct, accountEquity, entryPrice, slPrice) {
-  const MIN_LOT  = 0.01;
-  const LOT_STEP = 0.01;
-  // Per-class hard caps (mirrors broker_ctrader assertOrderSafety). The old flat
-  // cap of 10 let a collapsed-SL signal size to $1M FX notional on a $7k account.
-  const MAX_FX     = 3;
-  const MAX_METAL  = 2;
-  const MAX_OIL    = 5;
-  const MAX_INDEX  = 10;
-  const MAX_CRYPTO = 3;
-  const riskAmt  = accountEquity * (riskPct / 100);
-  const slDist   = Math.abs(entryPrice - slPrice);
-  if (slDist === 0) return MIN_LOT;
-  const sym = symbol.toUpperCase();
-
-  if (/XAU|GOLD/.test(sym)) {
-    let lots = riskAmt / (100 * slDist);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_METAL);
-  } else if (/NAS100|NAS|NDX|NQ/.test(sym) || /US30|DOW|YM/.test(sym)) {
-    let lots = riskAmt / slDist;
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_INDEX);
-  } else if (/BTC|ETH|SOL|ADA|XRP|BNB|LTC/.test(sym)) {
-    let lots = riskAmt / slDist;
-    // Crypto risk cap at 1%
-    const maxRisk = accountEquity * 0.01;
-    const maxLots = Math.floor((maxRisk / slDist) / LOT_STEP) * LOT_STEP;
-    lots = Math.min(lots, maxLots);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_CRYPTO);
-  } else if (/WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym)) {
-    // BlackBull oil: whole-integer lots only, min 1.0 per leg. We run 3 legs so
-    // total must be ≥3, but the total itself can be any integer (3,4,5,…); legs
-    // are split unevenly via splitLegs() — e.g. 5 → [1,2,2], 10 → [3,3,4].
-    const OIL_MIN_TOTAL_LOTS = 3.0;
-    const OIL_STEP           = 1.0;
-    const slPips = slDist / 0.01;
-    let lots = riskAmt / (10.0 * slPips);
-    lots = Math.floor(lots / OIL_STEP) * OIL_STEP;
-    return Math.min(Math.max(lots, OIL_MIN_TOTAL_LOTS), MAX_OIL);
-  } else if (/GER40|UK100|DAX|FTSE|SPX500|AUS200|JP225|HK50|EUSTX50/.test(sym)) {
-    let lots = riskAmt / slDist;
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_INDEX);
-  } else if (/JPY/.test(sym)) {
-    const slPips = slDist / 0.01;
-    let lots = riskAmt / (6.50 * slPips);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_FX);
-  } else if (/XAG|SILVER/.test(sym)) {
-    // XAGUSD: 1 lot = 5000 oz
-    let lots = riskAmt / (5000 * slDist);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_METAL);
-  } else {
-    // Standard forex
-    const slPips = slDist / 0.0001;
-    let lots = riskAmt / (10.0 * slPips);
-    return Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), MAX_FX);
-  }
-}
-
-// Split a total lot count into N legs, each ≥ minLeg, in `step` increments,
-// distributing any remainder to the tail legs. Returns null if N legs at minLeg
-// can't fit (caller should fall back to fewer legs).
-//   splitLegs(5, 3, 1, 1)     → [1, 2, 2]
-//   splitLegs(10, 3, 1, 1)    → [3, 3, 4]
-//   splitLegs(0.06, 3, 0.01, 0.01) → [0.02, 0.02, 0.02]
-function splitLegs(totalLots, n, minLeg, step) {
-  const totalUnits = Math.round(totalLots / step);
-  const minUnits   = Math.round(minLeg / step);
-  if (totalUnits < minUnits * n) return null;
-  const base = Math.floor(totalUnits / n);
-  const legs = Array(n).fill(base);
-  let rem = totalUnits - base * n;
-  for (let i = n - 1; i >= 0 && rem > 0; i--, rem--) legs[i] += 1;
-  return legs.map(u => Number((u * step).toFixed(4)));
-}
-
 // ── Per-scan-cycle state — tracks which correlated groups were traded this cycle ─
 // Reset by market_scanner at the start of each scan cycle via resetCycleState().
 let _cycleUsedGroups  = new Set();
@@ -370,39 +285,31 @@ export async function attemptInlineTrade(setup) {
   const PARAMS = loadParams();
   const MAX_CONCURRENT = PARAMS.maxConcurrent || 4;
 
-  // ── 1. Time gates ──────────────────────────────────────────────────────────
-  const now     = new Date();
-  const h       = now.getUTCHours();
-  const day     = now.getUTCDay();
-  const utcMins = h * 60 + now.getUTCMinutes();
+  // ── 1. Time gates (lib/clock.mjs) ──────────────────────────────────────────
+  const now = new Date();
+  const h   = now.getUTCHours();
 
   // Weekend = Saturday all day + Sunday before ~22:00 UTC. FX/metals/indices are
   // closed then and cTrader QUEUES market orders to the illiquid Sunday open (the
   // 2026-06-06 USDCHF frozen-chart fills were swept for −$5,659 this way). CRYPTO
   // trades 24/7 with a live feed, so it is exempt from the weekend block.
   // Kill switch: WEEKEND_CRYPTO=off blocks crypto on weekends too.
-  const isCrypto  = /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX|DOGE/i.test(setup.label || setup.symbol || '');
-  const cryptoOK  = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off' && isCrypto;
-  const isWeekend = day === 6 || (day === 0 && h < 22);
-
-  // Crypto late entries (2026-07-07): the 19:30/20:00/Friday cutoffs existed for
-  // the daily forced flatten + FX rollover spread spike — neither applies to
-  // crypto (24/7 feed, no rollover; EOD carry now judges a fresh late entry at
-  // the NEXT day's EOD, not 30 min after birth). Non-crypto keeps all cutoffs:
-  // post-NY thinning + edge_replay says late/Asian entries bleed.
-  // Kill switch: CRYPTO_LATE=off restores the cutoffs for crypto.
-  const cryptoLate = (process.env.CRYPTO_LATE ?? 'on') !== 'off' && isCrypto;
-
-  if (isWeekend) {
-    if (!cryptoOK) { log('Weekend — markets closed (crypto-only). Skip.'); return; }
-  } else if (!cryptoLate) {
-    if (h >= 20 && day !== 0) { log('Past 20:00 UTC EOD cutoff. Skip.'); return; }
-    if (day !== 0 && h === 19 && now.getUTCMinutes() >= 30) { log('Past 19:30 last-entry cutoff. Skip.'); return; }
-    if (day === 5 && utcMins >= 21 * 60) { log('Friday 21:00 UTC cutoff. Skip.'); return; }
+  //
+  // Crypto late entries (2026-07-07): the 19:30/20:00/Friday cutoffs exist for the
+  // daily forced flatten + FX rollover spread spike — neither applies to crypto
+  // (24/7 feed, no rollover; EOD carry judges a fresh late entry at the NEXT day's
+  // EOD). Non-crypto keeps all cutoffs: post-NY thinning + edge_replay says
+  // late/Asian entries bleed. Kill switch: CRYPTO_LATE=off.
+  const isCrypto = isCryptoSymbol(setup.label || setup.symbol || '');
+  if (isFxWeekend(now)) {
+    if (!(weekendCryptoOn() && isCrypto)) { log('Weekend — markets closed (crypto-only). Skip.'); return; }
+  } else if (!(cryptoLateOn() && isCrypto)) {
+    const cutoff = entryCutoff(now);
+    if (cutoff) { log(`${cutoff}. Skip.`); return; }
   }
 
   // ── 2. Session block ───────────────────────────────────────────────────────
-  const session = currentSession();
+  const session = currentSession(now);
   if (PARAMS.blockedSessions?.includes(session)) {
     log(`Session '${session}' is blocked. Skip.`); return;
   }
@@ -657,7 +564,7 @@ export async function attemptInlineTrade(setup) {
   }
 
   // ── 8. Crypto Asian gate ───────────────────────────────────────────────────
-  if (session === 'ASIAN' && CRYPTO_SYMBOLS.includes(setup.label) && setup.score < CRYPTO_ASIAN_MIN_SCORE) {
+  if (session === 'ASIAN' && isCryptoSymbol(setup.label) && setup.score < CRYPTO_ASIAN_MIN_SCORE) {
     log(`Crypto score ${setup.score} < ${CRYPTO_ASIAN_MIN_SCORE} required in Asian. Skip.`); return;
   }
 
@@ -720,18 +627,14 @@ export async function attemptInlineTrade(setup) {
   // everything else accepts 0.01 micro. A leg below its min is silently rejected,
   // so we round UP to the floor rather than down.
   const sym = setup.label.toUpperCase();
-  const perLegMin = /WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym) ? 1.0 : 0.01;
+  const perLegMin = instrumentClass(sym) === 'OIL' ? 1.0 : 0.01;
   const legStep   = perLegMin;
 
   // ── Pre-submit SL sanity (also enforced broker-side in broker_ctrader's
   // assertOrderSafety; duplicated here so the TV-DOM fallback path is covered).
   // A collapsed SL distance (frozen ATR) explodes risk-based sizing — the
   // 2026-06-06 USDCHF signal had a 1-pip SL → 10 lots → −$5,659.
-  const _minSlFrac =
-    /XAU|GOLD|XAG|SILVER|COPPER/.test(sym) ? 0.0012 :
-    /WTI|USOIL|CRUDE|BRENT|UKOIL/.test(sym) ? 0.004 :
-    /NAS100|US30|SPX500|UK100|GER40|JP225|AUS200|HK50|DAX|FTSE/.test(sym) ? 0.0015 :
-    /BTC|ETH|SOL|ADA|XRP|BNB|LTC|DOT|AVAX/.test(sym) ? 0.003 : 0.0008;
+  const _minSlFrac = MIN_SL_FRAC[instrumentClass(sym)];
   const _slFrac = Math.abs(setup.entry - setup.sl) / setup.entry;
   if (!Number.isFinite(_slFrac)) {
     log(`REJECT: SL distance is not finite (entry=${setup.entry} sl=${setup.sl}). Skip.`);

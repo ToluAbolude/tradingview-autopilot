@@ -126,23 +126,13 @@ Your login is now saved in the Chromium profile at `/home/ubuntu/snap/chromium/c
 
 ## Step 8 — Install cron jobs (trading schedule)
 
-```bash
-bash scripts/cloud/install_cron_linux.sh
-```
+The job set is installed by hand. [CLAUDE.md](../../CLAUDE.md) → "Services on the VM" lists every job. Each one runs through an account-binding wrapper — `run_scanner_job.sh` for the scanner account, `run_confirm_job.sh` for the experiment account — which sources the matching `~/.ctrader*.env`.
+
+The old five-session `session_runner` schedule (`install_cron_linux.sh`) was retired on 2026-09-15. Do not reinstall it.
 
 Verify:
 ```bash
 crontab -l
-```
-
-Expected output:
-```
-# TradingMCP — automated trading sessions (Europe/London time)
-7 1 * * *    ...  # Asian Open
-7 9 * * 1-5  ...  # London Open
-7 14 * * 1-5 ...  # NY Open
-3 18 * * 1-5 ...  # London Close
-3 4 * * 0    ...  # Research
 ```
 
 ---
@@ -153,12 +143,14 @@ Expected output:
 # Check browser is running and CDP is live
 curl http://localhost:9222/json/version
 
-# Do a manual test run of the session runner
+# Shared trading logic: unit tests
 cd ~/tradingview-autopilot
-node scripts/trading/session_runner.mjs
-```
+node --test scripts/trading/lib/
 
-Watch the output — it should go through: news check → scan → setup found → trade placed.
+# Broker connection (read-only): list open positions
+set -a; . ~/.ctrader.env; set +a
+node scripts/trading/broker_ctrader.mjs --positions
+```
 
 ---
 

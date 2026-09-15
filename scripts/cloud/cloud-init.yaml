@@ -11,7 +11,7 @@
 #    2. Installs Node.js 20, Chromium, Xvfb, x11vnc, fluxbox, git, curl
 #    3. Writes all TradingMCP scripts + systemd service to disk
 #    4. Enables tv_browser.service (auto-starts Chromium on boot)
-#    5. Installs all 5 trading session cron jobs
+#    5. Leaves the trading cron to be installed by hand (CLAUDE.md "Services on the VM")
 #    6. Clones the project repo (if REPO_URL is set below)
 #    7. Writes init log to /var/log/tradingmcp_init.log
 #
@@ -225,42 +225,6 @@ write_files:
       systemctl is-active tv_browser && echo "Service RUNNING" || echo "Check: journalctl -u tv_browser -n 30"
 
   # ---------------------------------------------------------------------------
-  #  Cron management helpers
-  # ---------------------------------------------------------------------------
-  - path: /home/ubuntu/tradingview-autopilot/scripts/cloud/install_cron_linux.sh
-    owner: ubuntu:ubuntu
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      PROJECT_DIR="/home/ubuntu/tradingview-autopilot"
-      NODE_BIN="$(command -v node)"
-      LOG_DIR="$PROJECT_DIR/data/trade_log/scheduler_logs"
-      SCRIPT="$PROJECT_DIR/scripts/trading/session_runner.mjs"
-      mkdir -p "$LOG_DIR"
-      CMD="cd $PROJECT_DIR && $NODE_BIN $SCRIPT >> $LOG_DIR/session_\$(date +\%Y\%m\%d_\%H\%M).log 2>&1"
-      BLOCK="# TradingMCP sessions (Europe/London time)
-      SHELL=/bin/bash
-      PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-      7 1 * * *   $CMD
-      7 9 * * 1-5 $CMD
-      7 14 * * 1-5 $CMD
-      3 18 * * 1-5 $CMD
-      3 4 * * 0   $CMD
-      # END TradingMCP"
-      CURRENT=$(crontab -l 2>/dev/null | grep -v "TradingMCP\|session_runner" || true)
-      (echo "$CURRENT"; echo ""; echo "$BLOCK") | crontab -
-      echo "Cron jobs installed:"; crontab -l | grep -E "TradingMCP|session_runner|Asian|London|NY|Research" || true
-
-  - path: /home/ubuntu/tradingview-autopilot/scripts/cloud/remove_cron_linux.sh
-    owner: ubuntu:ubuntu
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      CLEANED=$(crontab -l 2>/dev/null | grep -v "TradingMCP\|session_runner" || true)
-      echo "$CLEANED" | crontab -
-      echo "TradingMCP cron jobs removed."
-
-  # ---------------------------------------------------------------------------
   #  Startup marker — confirms cloud-init completed
   # ---------------------------------------------------------------------------
   - path: /etc/tradingmcp_cloud_init_complete
@@ -336,26 +300,12 @@ runcmd:
   - echo "[5/7] Service enabled (will start on boot and after npm install)"
 
   # ---------------------------------------------------------------------------
-  #  6. Install cron jobs
+  #  6. Cron jobs — installed by hand, not here
   # ---------------------------------------------------------------------------
-  - echo "[6/7] Installing cron jobs..."
-  - |
-    PROJECT_DIR="/home/ubuntu/tradingview-autopilot"
-    NODE_BIN="/usr/bin/node"
-    LOG_DIR="$PROJECT_DIR/data/trade_log/scheduler_logs"
-    SCRIPT="$PROJECT_DIR/scripts/trading/session_runner.mjs"
-    CMD="cd $PROJECT_DIR && $NODE_BIN $SCRIPT >> $LOG_DIR/session_\$(date +\%Y\%m\%d_\%H\%M).log 2>&1"
-    CRON_BLOCK="# TradingMCP sessions (Europe/London time)
-    SHELL=/bin/bash
-    PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-    7 1 * * *    $CMD
-    7 9 * * 1-5  $CMD
-    7 14 * * 1-5 $CMD
-    3 18 * * 1-5 $CMD
-    3 4 * * 0    $CMD
-    # END TradingMCP"
-    echo "$CRON_BLOCK" | crontab -u ubuntu -
-    echo "[6/7] Cron jobs installed for user ubuntu"
+  #  The live job set is listed in CLAUDE.md "Services on the VM" and runs through the
+  #  account-binding wrappers run_scanner_job.sh / run_confirm_job.sh. The five-session
+  #  session_runner schedule this step used to install was retired on 2026-09-15.
+  - echo "[6/7] No trading cron installed automatically — see CLAUDE.md 'Services on the VM'"
 
   # ---------------------------------------------------------------------------
   #  7. Summary
@@ -379,8 +329,8 @@ runcmd:
   - echo "  Log in to TradingView (ONE TIME ONLY):"
   - echo "    bash scripts/cloud/setup_login_vnc.sh"
   - echo ""
-  - echo "  Verify a session run:"
-  - echo "    node scripts/trading/session_runner.mjs"
+  - echo "  Run the trading unit tests:"
+  - echo "    node --test scripts/trading/lib/"
   - echo ""
   - echo "  Check cron:"
   - echo "    crontab -l"

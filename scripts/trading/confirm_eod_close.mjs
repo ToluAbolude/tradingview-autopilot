@@ -26,6 +26,7 @@ import { join } from 'path';
 import os from 'os';
 import { autoTrendline as autoTrendlineTrend } from './auto_trendline.mjs';
 import { fibVetoState, pContinue, VETO_DEPTH } from './fib_veto.mjs';
+import { isCalendarWeekend, weekendCryptoOn } from './lib/clock.mjs';
 
 const DATA_ROOT = os.platform() === 'linux'
   ? '/home/ubuntu/trading-data'
@@ -100,7 +101,7 @@ export async function thesisIntact(b, name, p, cur) {
 function shouldClose(now) {
   const dow = now.getUTCDay();          // 0=Sun .. 6=Sat
   const hr  = now.getUTCHours();
-  if (dow === 0 || dow === 6) return 'weekend';
+  if (isCalendarWeekend(now)) return 'weekend';
   if (dow === 5 && hr >= FRIDAY_CLOSE_UTC) return 'friday-cutoff';
   if (DAILY_EOD_UTC != null && hr >= DAILY_EOD_UTC) return 'daily-eod';
   return null;
@@ -117,8 +118,7 @@ async function main() {
   // flatten against. Keep CRYPTO open through the weekend and the Friday cutoff
   // (it rides its own SL/TP bracket); still flatten crypto on a weekday daily-eod.
   // Kill switch: WEEKEND_CRYPTO=off restores the full flatten.
-  const WEEKEND_CRYPTO = (process.env.WEEKEND_CRYPTO ?? 'on') !== 'off';
-  const keepClasses = (WEEKEND_CRYPTO && (reason === 'weekend' || reason === 'friday-cutoff')) ? ['CRYPTO'] : [];
+  const keepClasses = (weekendCryptoOn() && (reason === 'weekend' || reason === 'friday-cutoff')) ? ['CRYPTO'] : [];
 
   const b = await import('./broker_ctrader.mjs');
   await b.connect();

@@ -117,7 +117,7 @@ log(`${positions.length} open position(s)${LIVE ? '' : ' [DRY-RUN]'}`);
 for (const pos of positions) {
   const symbol = await bridge.getSymbolNameById(pos.symbolId).catch(() => null);
   if (!symbol) continue;
-  if (!pos.stopLoss) { log(`  ${symbol} #${pos.positionId}: no SL — naked_position_guard's problem, skipping`); continue; }
+  if (!pos.stopLoss) { log(`  ${symbol} #${pos.positionId}: no SL — confirm_naked_guard's problem, skipping`); continue; }
 
   // First sighting anchors the ORIGINAL risk; later SL moves must not shrink R math.
   if (!state[pos.positionId]) state[pos.positionId] = { initialSl: pos.stopLoss, symbol };

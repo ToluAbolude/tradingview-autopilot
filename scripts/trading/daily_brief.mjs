@@ -5,9 +5,10 @@
  *      against / invalidated, which entry zones are live and how far away),
  *   2. pulls TODAY's high/medium-impact events (Forex Factory feed),
  *   3. has Claude write the day plan,
- *   4. writes trading-data/daily_context/YYYY-MM-DD.json — the file session_runner
- *      ALREADY reads (skip_today / score_threshold_override / instruments_to_avoid_today),
- *      so the scanner trades WITH the weekly view instead of against it,
+ *   4. writes trading-data/daily_context/YYYY-MM-DD.json (skip_today /
+ *      score_threshold_override / instruments_to_avoid_today). NOTHING reads this file
+ *      since session_runner was retired (2026-09-15), and the live scanner path
+ *      (signal_executor → inline_trader) never did — wire it in or stop writing it,
  *   5. appends the daily check to the week's Notion outlook page.
  *
  * Cron: 06:15 UTC Mon–Fri (before daily_selector 06:30 and the London/NY sessions).
@@ -353,7 +354,7 @@ async function main() {
   const favored = brief.instruments.filter(i => i.favored_today).map(i => i.symbol.toUpperCase());
   if (brief.skip_today) log(`⚠ SKIP TODAY: ${brief.skip_reason || 'no reason'}`);
 
-  // 1) the file session_runner already consumes
+  // 1) daily_context/<date>.json — no reader since session_runner was retired (see header)
   mkdirSync(CTX_DIR, { recursive: true });
   const ctx = {
     generated: new Date().toISOString(), source: 'daily_brief (weekly-outlook confirmation)',

@@ -12,7 +12,7 @@ if [ -z "$1" ]; then
   echo "Examples:"
   echo "  ./run.sh scripts/weekly_review.mjs"
   echo "  ./run.sh scripts/trading/setup_finder.mjs"
-  echo "  ./run.sh scripts/trading/eod_close.mjs"
+  echo "  ./run.sh scripts/trading/confirm_report.mjs --days 30"
   exit 1
 fi
 

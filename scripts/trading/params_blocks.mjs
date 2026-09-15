@@ -21,7 +21,7 @@
  *   - clampBlockExpiry() on write (apply_params.mjs, the chokepoint every recommendation
  *     funnels through) backfills a missing expiry and truncates an over-long one, so a
  *     30-day block cannot enter the file no matter what the nightly agent proposes;
- *   - applyBlockExpiry() on read (inline_trader, session_runner) so a passed expiry stops
+ *   - applyBlockExpiry() on read (inline_trader, setup_finder) so a passed expiry stops
  *     binding the same day, whether or not the nightly agent ran.
  *
  * A block with NO expiry does not bind. Under this policy every block carries a

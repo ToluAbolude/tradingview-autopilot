@@ -9,7 +9,7 @@
  *
  * Entrants:
  *   SCAN-CONFLUENCE  — the whole scanner voting stack (market_scanner --scan-only +
- *                      signal_executor + inline_trader + session_runner), acct 2118552.
+ *                      signal_executor + inline_trader), acct 2118552.
  *                      One entrant: the votes A–Z are not independently executable.
  *   EXP/<combo>      — each confirm_runner combo on acct 2131377 (independent,
  *                      per-strategy-tagged trades; bracketed===true only, the same

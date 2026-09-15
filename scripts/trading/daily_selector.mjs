@@ -16,7 +16,7 @@
  *          S/R zone on the entry side of the bias, in ATRs — ≤1.0 ATR = +2,
  *          ≤1.75 ATR = +1 on rankScore. "Close to an area of interest" outranks
  *          "trending but mid-air"; biasScore itself stays pure confluence.
- * Phase 3: Write data/daily_watchlist.json — consumed by setup_finder + session_runner.
+ * Phase 3: Write data/daily_watchlist.json — consumed by setup_finder + inline_trader.
  *
  * The full 7-TF deep scan (market_scanner) runs only on these instruments throughout the day,
  * giving complete coverage of all BlackBull markets in <5 min per cycle.
@@ -28,6 +28,7 @@ import {
   setChart, getBars, waitForBars, runAllStrategies, autoTrendlineTrend,
   buildSRZones, calcATR, fetchBarsResilient,
 } from './setup_finder.mjs';
+import { CORE_UNIVERSE } from './lib/instruments.mjs';
 import { acquireChartLock, releaseChartLock } from './chart_lock.mjs';
 
 const IS_LINUX   = os.platform() === 'linux';
@@ -174,7 +175,6 @@ const INSTRUMENT_UNIVERSE = [
 // runtime, which shrinks the 06:10 selector/scanner shared-tab overlap window.
 //
 // Kill switch: CORE_ONLY=off restores the full universe.
-const CORE_UNIVERSE = ['XAUUSD', 'NAS100', 'US30', 'GER40', 'EURUSD', 'GBPUSD', 'USDJPY', 'BTCUSD'];
 const SCAN_LIST = (process.env.CORE_ONLY ?? 'on') === 'off'
   ? INSTRUMENT_UNIVERSE
   : INSTRUMENT_UNIVERSE.filter(i => CORE_UNIVERSE.includes(i.label));

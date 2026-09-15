@@ -29,6 +29,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
+import { calcLots } from './lib/sizing.mjs';
+import { isCalendarWeekend } from './lib/clock.mjs';
 
 const IS_LINUX  = os.platform() === 'linux';
 const DATA_ROOT = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
@@ -96,22 +98,9 @@ function structuralStop(bars,atr,i,dir){
   return {sl,risk};
 }
 
-// ── Lot sizing — same formula as orb_runner / inline_trader (indices+metals only here) ──
-function calcLots(symbol, riskPct, equity, entry, sl){
-  const MIN_LOT=0.01, LOT_STEP=0.01, MAX_LOTS=10;
-  const riskAmt=equity*(riskPct/100); const slDist=Math.abs(entry-sl);
-  if(slDist===0) return MIN_LOT;
-  const sym=symbol.toUpperCase();
-  const q=lots=>Math.min(Math.max(Math.floor(lots/LOT_STEP)*LOT_STEP,MIN_LOT),MAX_LOTS);
-  if(/XAU|GOLD/.test(sym)) return q(riskAmt/(100*slDist));
-  if(/XAG|SILVER/.test(sym)) return q(riskAmt/(5000*slDist));
-  if(/NAS100|NAS|NDX|NQ|US30|DOW|YM|SPX500|SPX|ES/.test(sym)) return q(riskAmt/slDist);
-  return q(riskAmt/slDist);   // indices fallback (all symbols here are indices/metals)
-}
-
 async function main(){
-  const now=new Date(), dow=now.getUTCDay(), hourUTC=now.getUTCHours(), nowMs=now.getTime();
-  if(dow===0||dow===6){ log('Weekend — Kurisko flag idle.'); return; }
+  const now=new Date(), hourUTC=now.getUTCHours(), nowMs=now.getTime();
+  if(isCalendarWeekend(now)){ log('Weekend — Kurisko flag idle.'); return; }
   log(`═══ KURISKO 20/20 FLAG RUNNER (${LIVE?'LIVE':'DRY-RUN'}) ═══`);
   if(hourUTC<SESSION_START_H || hourUTC>=SESSION_END_H){ log(`Outside active session ${SESSION_START_H}-${SESSION_END_H} UTC (now ${hourUTC}:xx) — idle.`); return; }
 

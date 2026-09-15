@@ -3,7 +3,7 @@
  * Polls open positions every 60s. When a position closes (TP or SL hit),
  * updates trades.csv with result (W/L) and pnl.
  *
- * Spawned by session_runner.mjs after a trade is placed (detached, logs to file).
+ * Spawned by inline_trader.mjs after a trade is placed (detached, logs to file).
  */
 import { evaluate } from '../../src/connection.js';
 import { closeAllPositions } from './execute_trade.mjs';

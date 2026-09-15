@@ -1,5 +1,5 @@
 /**
- * confluence.mjs — Trifecta family mapper shared by decision_runner + inline_trader.
+ * confluence.mjs — Trifecta family mapper (copy for the confirm strategy modules).
  *
  * The setup_finder emits strategies as single-letter codes (A, T, C, U, F, …).
  * For a decision-making algorithm to reason about confluence the same way a
