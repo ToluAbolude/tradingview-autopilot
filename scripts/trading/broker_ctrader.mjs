@@ -958,7 +958,7 @@ export async function getOpenVolumeForSymbol(symbolName) {
 
 /**
  * Return open positions missing a stop-loss or take-profit, with symbolId
- * resolved back to the scanner/TradingView name. Used by naked_position_guard
+ * resolved back to the scanner/TradingView name. Used by confirm_naked_guard
  * to repair (modifyPosition) or close via the cTrader API — the DOM path lags
  * and closes netted positions piecemeal.
  */
