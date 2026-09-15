@@ -32,7 +32,8 @@
  *
  * Usage (VM): node scripts/trading/zone_limit_runner.mjs   [--live]
  */
-import { getTrendbars, connect, placeOrder, cancelOrder, getOpenVolumeForSymbol, getEquity } from './broker_ctrader.mjs';
+import { getTrendbars, connect, placeOrder, cancelOrder, getPositions, getSymbolMeta, getEquity } from './broker_ctrader.mjs';
+import { exposurePolicy, exposureVerdict } from './lib/exposure.mjs';
 import { loadPlan } from './daily_plan_gate.mjs';
 import { calcLots } from './lib/sizing.mjs';
 import { inTradeWindow } from './lib/clock.mjs';
@@ -53,6 +54,7 @@ const CFG = {
   eodCutoffUTC: 19,  // stop resting orders before the 20:00 EOD flatten
 };
 const TF = 'H1';
+const STRATEGY_ID = 'plan_zone_limit';   // cTrader order label: which strategy owns the position
 
 function log(m) { const line = `[${new Date().toISOString()}] ${m}`; process.stdout.write(line + '\n'); }
 const load = () => { try { return JSON.parse(readFileSync(STATE, 'utf8')); } catch { return { orders: {} }; } };
@@ -158,11 +160,17 @@ async function main(){
 
   // Symbols we need market data for: everything planned plus everything resting.
   const syms = [...new Set([...zones.map(z => z.sym), ...Object.values(state.orders).map(o => o.sym)])];
-  const openVol = {}, bars = {};
+  // Open positions per symbol, judged by the exposure policy (lib/exposure.mjs). A read
+  // failure means "none", like the old open-volume check (fail open).
+  let allPositions = [];
+  try { allPositions = await getPositions(); } catch (e) { log(`  positions read failed (${e.message}) — treating as none`); }
+  const exposure = exposurePolicy(P, process.env.CTRADER_ACCOUNT_ID);
+  const onSymbol = {}, bars = {};
   for (const s of syms) {
-    try { openVol[s] = await getOpenVolumeForSymbol(s).catch(() => 0); } catch { openVol[s] = 0; }
+    try { const id = (await getSymbolMeta(s)).id; onSymbol[s] = allPositions.filter(p => p.symbolId === id); } catch { onSymbol[s] = []; }
     try { bars[s] = await getTrendbars(s, { period: TF, fromMs: Date.now() - 60 * 86400000, windowDays: 20 }); } catch { bars[s] = null; }
   }
+  const blocked = (sym, dir) => !exposureVerdict({ positions: onSymbol[sym] || [], dir, label: STRATEGY_ID, policy: exposure }).ok;
 
   // ── 1. CANCEL pass ──
   for (const [key, o] of Object.entries(state.orders)) {
@@ -174,7 +182,7 @@ async function main(){
     const dayRolled = o.planDate !== today;
     const invalid   = px != null && Number.isFinite(o.sl) && (o.dir === 'long' ? px < o.sl : px > o.sl);
     const far       = px != null && a > 0 && Math.abs(px - o.entry) > CFG.reachATR * a;
-    const hasPos    = (openVol[o.sym] || 0) > 0;
+    const hasPos    = blocked(o.sym, o.dir);   // exposure policy (default: any open position)
     const preEod    = utcHour >= CFG.eodCutoffUTC;
 
     if (gone || dayRolled || invalid || far || hasPos || preEod) {
@@ -200,7 +208,7 @@ async function main(){
       if (total >= CFG.maxTotal) break;
       const key = `${z.sym}:${z.dir}`;
       if (state.orders[key]) continue;                    // already resting for this symbol+dir
-      if ((openVol[z.sym] || 0) > 0) continue;            // anti-stack
+      if (blocked(z.sym, z.dir)) continue;                // exposure policy (default: any open position)
       const b = bars[z.sym]; if (!b || b.length < 30) { log(`  SKIP ${z.sym} — no bars`); continue; }
       const a = atr14(b).slice(-1)[0] || 0, px = b[b.length - 1].c;
 
@@ -215,7 +223,7 @@ async function main(){
       log(`  PLACE ${z.sym} ${z.dir.toUpperCase()} LIMIT @${rec.entry} SL ${rec.sl} TP ${rec.tp} ${lots}lots  (${d.distATR}·ATR away, ${rnd(Math.abs(d.tp-d.entry)/d.risk,10)}R)`);
       if (LIVE) {
         try {
-          const res = await placeOrder({ symbol: z.sym, direction: z.dir, units: lots, tpPrice: rec.tp, slPrice: rec.sl, limitPrice: rec.entry });
+          const res = await placeOrder({ symbol: z.sym, direction: z.dir, units: lots, tpPrice: rec.tp, slPrice: rec.sl, limitPrice: rec.entry, label: STRATEGY_ID });
           rec.orderId = Number(res?.order?.orderId) || null;
           log(`   placed orderId=${rec.orderId}`);
         } catch (e) { log(`   place REJECTED: ${e.message}`); continue; }

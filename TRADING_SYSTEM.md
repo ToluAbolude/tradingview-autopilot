@@ -85,14 +85,17 @@ paths; run them on the VM.
   `ssh -i ~/.ssh/id_rsa_oracle -L 5900:localhost:5900 ubuntu@145.241.220.213 -N`, then point
   RealVNC at `localhost:5900`.
 
-### Per-strategy experiment (`scripts/trading/confirm_runner.mjs`)
+### Per-strategy experiment (`scripts/trading/strategy_runner.mjs`)
 
 Voting/confluence is **dropped** here — each strategy trades **independently** on a dedicated
 demo so we can see which one actually earns, then concentrate capital on the winners.
 
-- **Account:** cTrader demo **2131377** (isolated from the scanner's 2118552). Risk
-  `CONFIRM_RISK_PCT = 0.1%`, one shot per bar, hard demo-only gate + daily kill-switch.
-- **Combos** (best of the strategy-lab 90-day matrix):
+- **Account:** cTrader demo **2131377** (isolated from the scanner's 2118552). Risk 0.1% per
+  trade, set in each manifest (`risk.per_trade_pct`), one shot per bar, hard demo-only gate +
+  daily kill-switch. Every order carries its strategy id as the cTrader `label`.
+- **Strategies** — one folder each in `scripts/trading/strategies/<id>/manifest.json`, loaded by
+  `strategy_runner.mjs` (replaced the hardcoded `confirm_runner.mjs` roster on 2026-09-15; how to
+  add one: `scripts/trading/strategies/README.md`). Best of the strategy-lab 90-day matrix:
 
   | Strategy | Symbol | TF | Notes |
   |---|---|---|---|
@@ -234,7 +237,7 @@ flowchart TB
 
     subgraph DECIDE["Decision layer (cron + persistent)"]
       SCAN["market_scanner.mjs<br/>acct 2118552"]
-      CONFIRM["confirm_runner.mjs<br/>per-strategy experiment · acct 2131377"]
+      CONFIRM["strategy_runner.mjs<br/>plugged-in strategies · acct 2131377"]
       SELECT["daily_selector · setup_finder<br/>AutoTL bias · S/R zones · patterns"]
       ORB["orb_runner.mjs"]
       VALID["institutional/validate_strategy.mjs<br/>Sharpe · Monte Carlo · edge significance"]

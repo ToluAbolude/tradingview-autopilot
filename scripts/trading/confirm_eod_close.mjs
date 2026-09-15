@@ -158,7 +158,7 @@ async function main() {
           thesisWhy = await thesisIntact(b, name, p, cur);
           if (thesisWhy) carry = true;
         }
-        why = `${name} ${p.direction} entry=${p.entryPrice} cur=${cur ?? 'unpriceable'} — ` +
+        why = `${name} ${p.direction} [${p.label || 'unlabeled'}] entry=${p.entryPrice} cur=${cur ?? 'unpriceable'} — ` +
               (!bracketed ? 'NAKED (no SL/TP)'
                : bornInWindow ? 'fresh late entry — judged at next EOD'
                : inProfit ? 'in profit + bracketed'

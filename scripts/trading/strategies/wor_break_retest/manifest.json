@@ -1,0 +1,15 @@
+{
+  "id": "wor_break_retest",
+  "description": "Break-and-retest on AUDUSD H1. Best 1h combo of the 90-day strategy-lab matrix: PF 2.53, n=25.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "wor_break_retest" },
+  "instruments": ["AUDUSD"],
+  "timeframe": "60",
+  "history_days": 20,
+  "params": {},
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

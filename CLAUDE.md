@@ -136,7 +136,7 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 
 > **Live status:** see the **Current Operational Status (2026-08-27)** section at the top of [TRADING_SYSTEM.md](TRADING_SYSTEM.md) for the VM, the per-strategy experiment (cTrader demo 2131377), the Notion trade journal (Phases 1–3), VNC, params, blocks, and automations. Order execution is via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`); TradingView/CDP is chart-reading only.
 
-> **Refactor reference:** [docs/SERVICE_MAP.md](docs/SERVICE_MAP.md) maps the system into services, the strategy plug-in design and the build order. Shared logic lives in `scripts/trading/lib/`: `contracts` (Signal), `instruments` (asset class, core universe, SL floors), `clock` (weekends, trade windows, cutoffs), `sizing` (lots). Import from there — never re-type a class regex, time rule or lot formula inside a runner.
+> **Refactor reference:** [docs/SERVICE_MAP.md](docs/SERVICE_MAP.md) maps the system into services, the strategy plug-in design and the build order. Shared logic lives in `scripts/trading/lib/`: `contracts` (Signal), `instruments` (asset class, core universe, SL floors), `clock` (weekends, trade windows, cutoffs), `sizing` (lots). Import from there — never re-type a class regex, time rule or lot formula inside a runner. Strategies plug in as folders — `scripts/trading/strategies/<id>/manifest.json`, loaded by `strategy_runner.mjs`; how to add one is in `scripts/trading/strategies/README.md`. Every order carries its strategy id as the cTrader `label`, and how many positions may share a symbol is `trading_params.json` → `exposure` (`lib/exposure.mjs`; default one per symbol).
 
 ### Services on the VM
 
@@ -147,7 +147,7 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 | `cdp_watchdog.sh` (cron) | Restarts `tv_browser` only after **3 consecutive** CDP failures |
 | `market_scanner.mjs` | Node.js scanner (acct 2118552) |
 | `daily_plan_cron.sh` (cron, 06:00 UTC daily) | **Pre-market analyst** — writes the day's plan (bias, entry zones, invalidation, targets, ADR budget) for the 8 core instruments; the plan gate enforces it all day. Fails loud: no plan = nothing trades |
-| `confirm_runner.mjs` (cron) | Per-strategy experiment, acct 2131377 (4×H1 + ORB/M15) |
+| `strategy_runner.mjs` (cron) | Runs every plugged-in strategy (`scripts/trading/strategies/<id>/manifest.json`) for its account — today the per-strategy experiment, acct 2131377. Replaced `confirm_runner.mjs` |
 | `trade_notion_sync.mjs` (cron, 10 min) | Logs every trade to Notion with a screenshot |
 | `confirm_weekly_review.mjs` (cron, Fri 21:00) | Per-strategy PASS/WATCH/CUT review → Notion |
 | `ctrader_refresh_cron.sh` (cron, Sun 03:10) | Rotates cTrader OAuth tokens into BOTH env files (~30d expiry, single-use refresh tokens — never rotate one file alone) |

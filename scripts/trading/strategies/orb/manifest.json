@@ -1,0 +1,15 @@
+{
+  "id": "orb",
+  "description": "Opening range breakout on NZDCAD M15; the logic gates itself to the session-open windows. 90-day backtest: PF 1.81, n=103, +27.3R.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "orb" },
+  "instruments": ["NZDCAD"],
+  "timeframe": "15",
+  "history_days": 20,
+  "params": {},
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

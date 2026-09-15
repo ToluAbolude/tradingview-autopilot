@@ -1,0 +1,15 @@
+{
+  "id": "amd_ote",
+  "description": "ICT AMD: liquidity sweep + CHoCH reclaim at OTE in the kill zones, on GBPUSD H1. 90-day backtest: PF 1.71, n=43.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "amd_ote" },
+  "instruments": ["GBPUSD"],
+  "timeframe": "60",
+  "history_days": 20,
+  "params": {},
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

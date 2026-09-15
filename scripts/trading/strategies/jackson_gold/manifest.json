@@ -1,0 +1,15 @@
+{
+  "id": "jackson_gold",
+  "description": "Jackson gold setups on XAUUSD H1. 90-day backtest: PF 2.19, win rate 75%.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "jackson_gold" },
+  "instruments": ["XAUUSD"],
+  "timeframe": "60",
+  "history_days": 20,
+  "params": {},
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

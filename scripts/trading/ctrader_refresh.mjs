@@ -12,7 +12,7 @@
  * dies with ACCESS_DENIED at its next refresh (how the confirm env broke).
  *
  * cTrader access tokens live ~30 days; when one expires every consumer
- * (confirm_runner, naked guards, notion sync, EOD report...) dies with
+ * (strategy_runner, naked guards, notion sync, EOD report...) dies with
  * CH_ACCESS_TOKEN_INVALID (2026-07-19..21 outage). Refresh tokens are
  * SINGLE-USE: this call consumes the old one, so the new pair MUST be written
  * back atomically — if the write is lost, recovery is the full browser OAuth

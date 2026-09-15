@@ -161,7 +161,7 @@ async function main(){
 
       if(LIVE){
         try{
-          const res=await bridge.placeOrder({ symbol, direction:dir, units:lots, entry:entry, tpPrice:tp, slPrice:sl });
+          const res=await bridge.placeOrder({ symbol, direction:dir, units:lots, entry:entry, tpPrice:tp, slPrice:sl, label:'kurisko_2020_flag' });
           signal.placed=true; signal.positionId=res?.positionId??null;
           log(`  ✅ LIVE ${symbol} ${dir} ${lots}lots entry~${signal.entry} SL ${signal.sl} TP ${signal.tp}`);
         }catch(e){ signal.placed=false; signal.error=e.message; log(`  ✗ LIVE place failed ${symbol}: ${e.message}`); }

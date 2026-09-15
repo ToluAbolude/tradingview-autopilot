@@ -1,0 +1,15 @@
+{
+  "id": "stage_s2",
+  "description": "Ted Zhang Stage Analysis: Stage-2 daily breakout on US30 and ETHUSD. Chart Fanatics batch-2 graduate, positive in both out-of-sample halves; about 1-2 trades a year per symbol. 420 days of history.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "module": "stage_s2" },
+  "instruments": ["US30", "ETHUSD"],
+  "timeframe": "D",
+  "history_days": 420,
+  "params": {},
+  "filters": [],
+  "target": { "r": 2 },
+  "risk": { "per_trade_pct": 0.1 }
+}

@@ -77,5 +77,5 @@ strategies can inform ideas only.
 - Robustness gauntlet **every strategy must pass before demo deployment**: netPF>1 after costs,
   positive net−top3 (fragility), maxDD sane, and **OOS regime split** (the filter that killed the
   TL+S&R fusion). High WR alone ≠ edge (break-even at 85.7% WR with 0.17R wins — proven).
-- Winners → new combo slots in `confirm_runner.mjs` on demo acct 2131377 (swap out losers), then
+- Winners → new strategy folders (`scripts/trading/strategies/<id>/manifest.json`) on demo acct 2131377 (swap out losers), then
   scanner strategy vote after forward-test survival.
