@@ -136,6 +136,8 @@ The trading system runs on an Oracle Cloud **A1.Flex (Ampere ARM, 4 OCPU / 24 GB
 
 > **Live status:** see the **Current Operational Status (2026-08-27)** section at the top of [TRADING_SYSTEM.md](TRADING_SYSTEM.md) for the VM, the per-strategy experiment (cTrader demo 2131377), the Notion trade journal (Phases 1–3), VNC, params, blocks, and automations. Order execution is via the **cTrader Open API** (`scripts/trading/broker_ctrader.mjs`); TradingView/CDP is chart-reading only.
 
+> **Refactor reference:** [docs/SERVICE_MAP.md](docs/SERVICE_MAP.md) maps the system into services, the strategy plug-in design and the build order. Shared logic lives in `scripts/trading/lib/`: `contracts` (Signal), `instruments` (asset class, core universe, SL floors), `clock` (weekends, trade windows, cutoffs), `sizing` (lots). Import from there — never re-type a class regex, time rule or lot formula inside a runner.
+
 ### Services on the VM
 
 | Service | Purpose |
@@ -161,7 +163,7 @@ The scanner account no longer originates trades from signals. Causality is now *
 
 1. `daily_plan.mjs` (06:00 UTC) commits to a written plan for **8 core instruments** — XAUUSD, NAS100, US30, GER40, EURUSD, GBPUSD, USDJPY, BTCUSD. Per instrument: bias, expected path, entry **zones** (bands), invalidation, targets, and the **ADR volatility budget** (range used vs remaining). Deterministic levels + Claude analyst; every zone re-validated in code (≥2R vs invalidation, reachable inside remaining ADR, direction matches bias). Rejected zones get one repair pass, then stay in the plan marked `tradeable: false`.
 2. `daily_plan_gate.mjs` enforces it. The instrument must be in the plan, direction must match the bias, and price must be **at** a planned zone. Plan invalidation replaces the signal SL when it is wider (widen-only); plan targets replace the TPs.
-3. Wired in **two** places: `inline_trader.attemptInlineTrade` (gate 2c) and — because `zone_limit_runner`, `session_runner` and `orb_runner`'s cTrader leg reach the broker without touching inline_trader — `broker_ctrader.assertOrderSafety`, the one chokepoint every entry funnels through. That call is **entry-only**; closes/modifies/cancels bypass it, so it can never trap a position.
+3. Wired in **two** places: `inline_trader.attemptInlineTrade` (gate 2c) and — because `zone_limit_runner` and `orb_runner`'s cTrader leg reach the broker without touching inline_trader — `broker_ctrader.assertOrderSafety`, the one chokepoint every entry funnels through. That call is **entry-only**; closes/modifies/cancels bypass it, so it can never trap a position.
 
 4. `zone_limit_runner.mjs` (every 15 min, `--live` since 2026-08-27) is the plan's **execution arm**. Steps 2–3 could only ever *veto*: nothing in the system originated from the plan, so a morning of validated zones produced no trades unless the momentum scanner independently fired on the same instrument at the same price — which it rarely does, because plan zones are reversion levels where momentum confluence is absent by construction. The runner now rests a limit at each tradeable zone's **midpoint** (the price the plan costed its own `rr_to_t1` at), SL = plan invalidation, TP = plan target, only while price is still *outside* the zone (inside = a market entry, `inline_trader`'s job), refusing anything under 2R. Cancels on plan-rolled / zone-left-plan / invalidation-breached / price-ran-away / position-open / past 19:00 UTC. Placements still funnel through `assertOrderSafety`, so the gate re-checks them.
 
