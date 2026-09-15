@@ -1,7 +1,5 @@
 # TradingView MCP Jackson
 
-If you found this from the YouTube video — welcome. This is the improved fork. Everything you need is below.
-
 Built on top of the original [tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp) by [@tradesdontlie](https://github.com/tradesdontlie). Full credit to them for the foundation. This fork adds a morning brief workflow, a rules config, and fixes the launch bug on TradingView Desktop v2.14+.
 
 > [!WARNING]
