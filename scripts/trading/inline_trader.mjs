@@ -25,7 +25,7 @@ import { trifectaCount, describeConfluence, hasTrifecta } from './confluence.mjs
 import { verifyOrderLanded } from './broker_history.mjs';
 import { checkPlan, applyPlanLevels } from './daily_plan_gate.mjs';
 import { applyBlockExpiry } from './params_blocks.mjs';
-import { calcLots, splitLegs } from './lib/sizing.mjs';
+import { calcLots, splitLegs, backstopPrice } from './lib/sizing.mjs';
 import { instrumentClass, isCrypto as isCryptoSymbol, MIN_SL_FRAC } from './lib/instruments.mjs';
 import { isFxWeekend, entryCutoff, currentSession, weekendCryptoOn, cryptoLateOn } from './lib/clock.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync } from 'fs';
@@ -700,7 +700,17 @@ export async function attemptInlineTrade(setup) {
         { name: 'O2', tp: setup.tp2, minRR: 2.0, reanchor: true,  screenshot: false },
         { name: 'O3', tp: setup.tp3, minRR: 2.0, reanchor: true,  screenshot: true  },
       ];
-  if (RUNNER_EXIT) log(`Runner exit: 1/3 TP @2R (${setup.tp2}), 2/3 trails via trail_runner (SL ${setup.sl})`);
+  // The runner still needs a broker TP: confirm_naked_guard closes any position
+  // missing an SL or a TP, on both accounts, every 5 minutes — so a truly TP-less
+  // runner is auto-closed within 5 minutes. Instead the 2/3 rides behind a BACKSTOP
+  // far enough out that the chandelier trail, not the target, ends the trade.
+  // Without it the position TP defaults to the only TP passed (tp2 = 2R) and the
+  // whole trade caps at 2R — the exact cap this exit model exists to remove.
+  const RUNNER_BACKSTOP_R = Number(process.env.RUNNER_BACKSTOP_R ?? 6);
+  const runnerBackstop = RUNNER_EXIT
+    ? backstopPrice(setup.dir, setup.entry, setup.sl, RUNNER_BACKSTOP_R)
+    : null;
+  if (RUNNER_EXIT) log(`Runner exit: 1/3 TP @2R (${setup.tp2}), 2/3 trails via trail_runner (SL ${setup.sl}, backstop TP ${runnerBackstop} = ${RUNNER_BACKSTOP_R}R)`);
 
   let placed = 0;
 
@@ -723,6 +733,7 @@ export async function attemptInlineTrade(setup) {
         entry:     setup.entry,
         slPrice:   setup.sl,
         tpPrices:  validTps,
+        parentTp:  runnerBackstop,
         label:     strategyId,
       });
       placed = validTps.length - r.failedTps.length;
@@ -750,7 +761,8 @@ export async function attemptInlineTrade(setup) {
         const legUnits   = legLots.slice(0, validTps.length);
         const r = await bridge.placeMultiTpPosition({
           symbol: setup.label, direction: setup.dir, totalUnits, legUnits,
-          entry: setup.entry, slPrice: setup.sl, tpPrices: validTps, label: strategyId,
+          entry: setup.entry, slPrice: setup.sl, tpPrices: validTps,
+          parentTp: runnerBackstop, label: strategyId,
         });
         placed = validTps.length - r.failedTps.length;
         log(`✓ cTrader Approach B (after reconnect): position ${r.positionId} + ${r.tpOrderIds.length}/${validTps.length} TP limits`);

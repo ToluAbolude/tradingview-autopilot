@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { instrumentClass, isCrypto, CORE_UNIVERSE } from './instruments.mjs';
 import { isCalendarWeekend, isFxWeekend, isSundayReopen, inTradeWindow, entryCutoff, currentSession } from './clock.mjs';
-import { calcLots, splitLegs } from './sizing.mjs';
+import { calcLots, splitLegs, legVolumes, backstopPrice } from './sizing.mjs';
 import { signalErrors } from './contracts.mjs';
 
 const utc = s => new Date(`${s}Z`);                 // 2026-09-13 is a Sunday
@@ -59,6 +59,29 @@ test('splitLegs spreads remainders onto the tail legs', () => {
   assert.deepEqual(splitLegs(10, 3, 1, 1), [3, 3, 4]);
   assert.deepEqual(splitLegs(0.06, 3, 0.01, 0.01), [0.02, 0.02, 0.02]);
   assert.equal(splitLegs(0.02, 3, 0.01, 0.01), null);
+});
+
+test('the runner backstop sits far out, on the right side of entry', () => {
+  near(backstopPrice('long',  1.1000, 1.0950, 6), 1.13);
+  near(backstopPrice('short', 1.1000, 1.1050, 6), 1.07);   // BELOW entry, or it fills instantly
+  near(backstopPrice('buy',   1.1000, 1.0950, 2), 1.11);   // 2R is where the old cap sat
+  assert.ok(backstopPrice('short', 100, 101, 6) < 100, 'a short backstop must be below entry');
+});
+
+test('leg volumes leave a deliberate partial partial (the runner exit)', () => {
+  const p = { totalVol: 300, lotSize: 100, step: 1, minV: 1 };   // 3 lots, 1 lot = 100 cents
+  // The runner exit: ONE leg covering 1/3 of a 3-lot position stays 1 lot. If the
+  // remainder were reconciled here it would close all 3 lots at the 2R target.
+  assert.deepEqual(legVolumes({ ...p, totalUnits: 3, legUnits: [1], n: 1 }), [100]);
+  // A 3-leg split that IS meant to cover the position still reconciles.
+  assert.deepEqual(legVolumes({ ...p, totalUnits: 3, legUnits: [1, 1, 1], n: 3 }), [100, 100, 100]);
+  // Oil's uneven whole-lot split survives untouched.
+  assert.deepEqual(legVolumes({ totalVol: 5, lotSize: 1, step: 1, minV: 1, totalUnits: 5, legUnits: [1, 2, 2], n: 3 }), [1, 2, 2]);
+  // No legUnits: divide evenly in step units.
+  assert.deepEqual(legVolumes({ ...p, totalUnits: 3, legUnits: null, n: 3 }), [100, 100, 100]);
+  // Closing legs never add up to more than the position.
+  const over = legVolumes({ ...p, totalUnits: 3, legUnits: [2, 2], n: 2 });
+  assert.ok(over.reduce((a, b) => a + b, 0) <= 300, `${over} exceeds the position`);
 });
 
 test('scanner_confluence emits valid Signals, and nothing without bars', async () => {
