@@ -33,6 +33,7 @@ import { fibVetoState, checkFibVeto } from './fib_veto.mjs';
 import { instrumentClass as _instrumentClass, MIN_SL_FRAC } from './lib/instruments.mjs';
 import { isSundayReopen } from './lib/clock.mjs';
 import { exposurePolicy, exposureVerdict } from './lib/exposure.mjs';
+import { legVolumes } from './lib/sizing.mjs';
 const require = createRequire(import.meta.url);
 const protobuf = require('protobufjs');
 
@@ -706,10 +707,13 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
  *   entry        — expected entry price (for relative SL)
  *   slPrice      — absolute SL price
  *   tpPrices     — array of N absolute TP prices, ordered nearest→furthest
+ *   parentTp     — optional absolute TP for the POSITION itself (default: the
+ *                  furthest tpPrices entry). The runner exit passes a far backstop
+ *                  so the trailed stop, not the nearest target, ends the trade.
  *
  * Returns: { positionId, openRes, tpOrderIds: [N], failedTps: [...] }
  */
-export async function placeMultiTpPosition({ symbol, direction, totalUnits, legUnits, entry, slPrice, tpPrices, label = '' }) {
+export async function placeMultiTpPosition({ symbol, direction, totalUnits, legUnits, entry, slPrice, tpPrices, parentTp = null, label = '' }) {
   await connect();
   if (!slPrice) throw new Error('slPrice required.');
   if (!Array.isArray(tpPrices) || tpPrices.length === 0) throw new Error('tpPrices must be a non-empty array.');
@@ -726,36 +730,24 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
   const _quantize = (v) => Math.max(minV, Math.floor(v / step) * step);
   const totalVol   = _quantize(Math.round(totalUnits * meta.lotSize));
 
-  // Per-leg volume. If caller supplied legUnits (used for oil's uneven int split
-  // e.g. 5 → [1,2,2]), honor it but quantize each leg to the step. Otherwise
-  // divide totalVol evenly across N legs in step units.
+  // Per-leg volume. Honors a caller's legUnits (oil's uneven int split, e.g.
+  // 5 → [1,2,2]) and, crucially, leaves a DELIBERATE partial partial — see
+  // lib/sizing.legVolumes.
   const N = tpPrices.length;
-  let legVols;
-  if (Array.isArray(legUnits) && legUnits.length === N) {
-    legVols = legUnits.map(u => _quantize(Math.round(u * meta.lotSize)));
-    // After per-leg quantization the sum can drift below totalVol. Push the
-    // remainder onto the last leg (still in step units) so totals reconcile.
-    const sum = legVols.reduce((a, b) => a + b, 0);
-    if (sum !== totalVol) legVols[N - 1] = Math.max(minV, legVols[N - 1] + (totalVol - sum));
-  } else {
-    // Divide in step-multiple chunks so each leg is broker-legal
-    const totalSteps = Math.floor(totalVol / step);
-    const baseSteps  = Math.floor(totalSteps / N);
-    const remSteps   = totalSteps - baseSteps * N;
-    legVols = Array(N).fill(baseSteps * step);
-    legVols[N - 1] += remSteps * step;
-    legVols = legVols.map(v => Math.max(minV, v));
-  }
+  const legVols = legVolumes({ totalVol, totalUnits, legUnits, n: N, lotSize: meta.lotSize, step, minV });
 
   // ── 1. Open the parent position ──
-  // MARKET order with relativeStopLoss AND relativeTakeProfit at TP3 (the final
-  // target). The intermediate TP1/TP2 partial fills happen via the linked LIMIT
-  // close orders placed below. Setting position-level TP at TP3 ensures every
-  // position visibly shows SL + TP in the broker UI (no "naked TP=0" appearance)
-  // and acts as a safety-net close if price runs through all targets before any
-  // of the LIMITs fill (e.g. on a gap or fast move).
+  // MARKET order with relativeStopLoss AND relativeTakeProfit at the final target.
+  // The intermediate partial fills happen via the linked LIMIT close orders placed
+  // below. A position-level TP means every position visibly shows SL + TP in the
+  // broker UI (no "naked TP=0" appearance — confirm_naked_guard closes those) and
+  // acts as a safety net if price runs through all targets before any LIMIT fills.
+  //
+  // `parentTp` overrides it. The runner exit passes ONE nearby TP (2R) but must not
+  // let that become the position's own TP, or the whole trade exits at 2R and the
+  // runner it exists to create never rides.
   const slDist  = Math.round(Math.abs(entry  - slPrice)              * 100_000);
-  const tpFinal = tpPrices[tpPrices.length - 1];
+  const tpFinal = parentTp ?? tpPrices[tpPrices.length - 1];
   const tpDist  = Math.round(Math.abs(tpFinal - entry)               * 100_000);
   const openRes = await send('ProtoOANewOrderReq', {
     ctidTraderAccountId: _accountId,

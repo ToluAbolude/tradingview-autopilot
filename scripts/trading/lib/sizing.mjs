@@ -64,3 +64,44 @@ export function splitLegs(totalLots, n, minLeg, step) {
   for (let i = n - 1; i >= 0 && rem > 0; i--, rem--) legs[i] += 1;
   return legs.map(u => Number((u * step).toFixed(4)));
 }
+
+// Where the runner's safety-net TP sits: `r` times the trade's own risk beyond
+// entry. The runner cannot go TP-less — confirm_naked_guard closes any position
+// missing an SL or a TP, on both accounts, every 5 minutes — so it rides behind a
+// target far enough out that the trailed stop ends the trade first. The sign
+// matters: a short's backstop must sit BELOW entry or the broker fills it at once.
+export function backstopPrice(dir, entry, sl, r) {
+  const dist = r * Math.abs(entry - sl);
+  const long = dir === 'long' || dir === 'buy';
+  return Number((long ? entry + dist : entry - dist).toFixed(5));
+}
+
+// Per-leg broker volumes (in cents) for a multi-TP position: quantized down to the
+// symbol's step, floored at its minimum.
+//
+// `legUnits` may deliberately cover only PART of the position — the runner exit
+// takes profit on ~1/3 at the 2R target and leaves the rest riding behind the stop.
+// So the quantization remainder is pushed onto the last leg ONLY when the caller's
+// legs were meant to cover the whole position. Reconciling it unconditionally is
+// what silently inflated that 1/3 partial back to full size, closing the entire
+// trade at 2R and deleting the runner (live 2026-09-15 → 09-18, never fired).
+export function legVolumes({ totalVol, totalUnits, legUnits, n, lotSize, step, minV }) {
+  const quantize = v => Math.max(minV, Math.floor(v / step) * step);
+  let vols;
+  if (Array.isArray(legUnits) && legUnits.length === n) {
+    vols = legUnits.map(u => quantize(Math.round(u * lotSize)));
+    const coversAll = legUnits.reduce((a, b) => a + b, 0) >= totalUnits - 1e-9;
+    const sum = vols.reduce((a, b) => a + b, 0);
+    if (coversAll && sum !== totalVol) vols[n - 1] = Math.max(minV, vols[n - 1] + (totalVol - sum));
+  } else {
+    const totalSteps = Math.floor(totalVol / step);
+    const baseSteps  = Math.floor(totalSteps / n);
+    vols = Array(n).fill(baseSteps * step);
+    vols[n - 1] += (totalSteps - baseSteps * n) * step;
+    vols = vols.map(v => Math.max(minV, v));
+  }
+  // Closing legs can never add up to more than the position they close.
+  const over = vols.reduce((a, b) => a + b, 0) - totalVol;
+  if (over > 0) vols[n - 1] = Math.max(minV, vols[n - 1] - over);
+  return vols;
+}
