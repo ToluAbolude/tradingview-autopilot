@@ -878,6 +878,10 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   const reasons = [];
   const strats  = [];
   let activeFVG = null;
+  // Trend facts that are NOT votes (A/B/T stopped scoring 2026-08-21) but still decide
+  // the 15M entry gate in buildSetups. Kept out of `strategies` so they can't re-inflate
+  // the Trifecta trend leg or the setup-type boost.
+  const alignment = { smartTrail: false, emaStack: false, weeklyTrend: false };
 
   // EMA flatness gate — dead-ranging market, no edge (8-14% WR in backtests).
   // ATR-relative (2026-07-07): the old fixed 0.4%-of-price bar structurally
@@ -896,8 +900,9 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
   if (st.dir[n] !== null) {
     const aligned = (dir === 'long' && st.dir[n] === 1) || (dir === 'short' && st.dir[n] === -1);
     if (aligned) {
-      // A (SmartTrail) removed 2026-08-21: fired on 91-93% of signals, zero weight,
-      // and its only remaining effect was inflating the continuation type-boost.
+      // A (SmartTrail) removed as a vote 2026-08-21: fired on 91-93% of signals, zero
+      // weight, and its only remaining effect was inflating the continuation type-boost.
+      alignment.smartTrail = true;   // still read by the 15M entry gate
     }
   }
 
@@ -963,10 +968,11 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       const wkBull = emaW[n] > emaW[n - shift];
       const wkBear = emaW[n] < emaW[n - shift];
       if ((dir === 'long' && wkBull) || (dir === 'short' && wkBear)) {
-        // T (weekly trend) removed 2026-08-21: fired on 94-96% of signals, zero weight.
+        // T (weekly trend) removed as a vote 2026-08-21: fired on 94-96% of signals, zero weight.
         // NOTE: T was robust-positive in both OOS halves (+0.121/+0.131). It could not
         // discriminate at 94% fire, but if that edge is ever harvested it must be as a
         // PENALTY for absence, re-derived here — not by restoring this +1.
+        alignment.weeklyTrend = true;   // still read by the 15M entry gate
       }
     }
   }
@@ -1025,7 +1031,8 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
       ? ema8[n] > ema21[n] && ema21[n] > ema50[n]
       : ema50[n] > ema21[n] && ema21[n] > ema8[n];
     if (stacked) {
-      // B (EMA stack) removed 2026-08-21: fired on 89-92% of signals, zero weight.
+      // B (EMA stack) removed as a vote 2026-08-21: fired on 89-92% of signals, zero weight.
+      alignment.emaStack = true;   // still read by the 15M entry gate
     }
   }
 
@@ -1414,7 +1421,7 @@ export function runAllStrategies(bars, dir, utcHour, label, tf = '15') {
     }
   }
 
-  return { score, reasons, strategies: [...new Set(strats)], setupType, rsi: rsi[n], atrVal: atr[n], activeFVG };
+  return { score, reasons, strategies: [...new Set(strats)], setupType, rsi: rsi[n], atrVal: atr[n], activeFVG, alignment };
 }
 
 // ── Per-instrument SL/TP profiles ───────────────────────────────────────────
@@ -1554,9 +1561,13 @@ export function buildSetups({ inst, candidates, bars15, bars60, utcHour, now = n
     // Higher TFs confirmed the trend — now verify the 15M chart is also trending
     // in the SAME direction before entering. If the 15M is ranging or pointing
     // the other way, the trade is counter-trend on the entry TF — skip it.
-    // Require: SmartTrail (A) OR EMA stack (B) aligned on 15M.
+    // Require SmartTrail, the EMA stack or the weekly trend proxy aligned on 15M, or a
+    // 15M trendline (L). Fixed 2026-09-15: this read the vote codes A/B/T, which stopped
+    // being emitted 2026-08-21, so only L could pass — 90-210 setups/day were rejected
+    // here and the scanner emitted 0-4 signals/day. The facts now come from `alignment`.
     const check15 = runAllStrategies(bars15, dir, utcHour, inst.label, '15');
-    const is15mAligned = ['A', 'B', 'T', 'L'].some(s => check15.strategies.includes(s));
+    const aligned15 = check15.alignment || {};
+    const is15mAligned = aligned15.smartTrail || aligned15.emaStack || aligned15.weeklyTrend || check15.strategies.includes('L');
     if (!is15mAligned) {
       events.push({ note: `\n  ⏭ ${inst.label} ${dir.toUpperCase()} — 15M not aligned (score=${check15.score}), waiting\n` });
       continue;

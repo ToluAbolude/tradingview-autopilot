@@ -121,7 +121,11 @@ const positions = await bridge.getPositions();
 log(`${positions.length} open position(s)${LIVE ? '' : ' [DRY-RUN]'}`);
 
 for (const pos of positions) {
-  const symbol = await bridge.getSymbolNameById(pos.symbolId).catch(() => null);
+  // getSymbolNameById returns { id, name, ... }. Passing that object on to getTrendbars
+  // made every trail attempt die as 'symbol "[object Object]" not in account symbol list'
+  // — 660 times since the runner exit shipped 2026-08-17, and not one stop ever moved.
+  // Fixed 2026-09-18; confirm_eod_close already took `.name` this way.
+  const symbol = (await bridge.getSymbolNameById(pos.symbolId).catch(() => null))?.name || null;
   if (!symbol) continue;
   if (!pos.stopLoss) { log(`  ${symbol} #${pos.positionId}: no SL — confirm_naked_guard's problem, skipping`); continue; }
   if (pos.label && !TRAIL_OWNERS.has(pos.label)) { log(`  ${symbol} #${pos.positionId}: owned by ${pos.label}, which doesn't use the runner exit — skipping`); continue; }
