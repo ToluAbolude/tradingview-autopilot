@@ -105,18 +105,37 @@ if (argv.includes('--selftest')) {
 const median = a => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1] || 0; };
 const usd    = r => `${r < 0 ? '-' : '+'}$${Math.abs(r * RISK_USD).toFixed(0)}`;
 
-// ── Bars, cached so a re-run costs no broker calls ───────────────────────────
+// ── Bars: all fetched BEFORE any simulation, cached on disk, retried ──────────
+// The first run fetched each timeframe right before replaying it. A replay is minutes
+// of solid CPU, which starves the cTrader heartbeat: the server dropped the socket,
+// every D1/H4 fetch that followed timed out, and an aux fetch finally threw on a dead
+// connection and killed the run on its 8th instrument. So: fetch everything, then
+// simulate with no network at all.
 let bridge = null;
+const BARS = new Map();                                // `${sym} ${period}` -> bars
 async function loadBars(sym, period) {
+  const key = `${sym} ${period}`;
+  if (BARS.has(key)) return BARS.get(key);
   const fromMs = Date.now() - YEARS[period] * 365 * 864e5;
   const cache  = `/tmp/lab_${sym}_${period}.json`;
-  if (existsSync(cache) && Date.now() - statSync(cache).mtimeMs < 12 * 36e5) {
-    try { const c = JSON.parse(readFileSync(cache, 'utf8')); if (c.fromMs <= fromMs + 864e5 && c.bars?.length) return c.bars; } catch {}
+  if (existsSync(cache) && Date.now() - statSync(cache).mtimeMs < 48 * 36e5) {   // history doesn't change
+    try { const c = JSON.parse(readFileSync(cache, 'utf8'));
+      if (c.fromMs <= fromMs + 864e5 && c.bars?.length) { BARS.set(key, c.bars); return c.bars; } } catch {}
   }
   if (!bridge) { bridge = await import('./broker_ctrader.mjs'); await bridge.connect(); }
-  const bars = await bridge.getTrendbars(sym, { period, fromMs, windowDays: PAGE[period] });
-  try { writeFileSync(cache, JSON.stringify({ fromMs, bars })); } catch {}
-  return bars;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const bars = await bridge.getTrendbars(sym, { period, fromMs, windowDays: PAGE[period] });
+      try { writeFileSync(cache, JSON.stringify({ fromMs, bars })); } catch {}
+      BARS.set(key, bars);
+      return bars;
+    } catch (e) {
+      if (attempt >= 3) throw e;
+      console.log(`  ${key}: ${e.message} — reconnecting, retry ${attempt}/2`);
+      await new Promise(r => setTimeout(r, 5000 * attempt));
+      try { await bridge.reconnect(); } catch {}
+    }
+  }
 }
 
 // ── Entrants ─────────────────────────────────────────────────────────────────
@@ -196,13 +215,14 @@ function moduleSignals(e, bars, sym) {
   return { sigs: out, truncated };
 }
 
-async function cfsSignals(e, bars, atr, sym) {
+function cfsSignals(e, bars, atr, sym) {
   let ctx = null;
   if (e.mod.meta?.aux) {
     const auxSym = e.mod.meta.aux[sym];
     if (!auxSym) return null;                          // a pair strategy with no pair for this symbol
-    const aux = await loadBars(auxSym, e.period);
-    const m = new Map((aux || []).map(x => [x.t, x]));
+    const aux = BARS.get(`${auxSym} ${e.period}`);     // prefetched — never fetch mid-simulation
+    if (!aux) return null;
+    const m = new Map(aux.map(x => [x.t, x]));
     ctx = { auxSym, aux: bars.map(x => m.get(x.t) || null) };
   }
   try { return { sigs: e.mod.signals(bars, atr, e.cfg, ctx) || [], truncated: false }; } catch { return null; }
@@ -237,27 +257,44 @@ console.log(`Promotion bar (fixed in advance): >=${BAR.minOosN} OOS trades, OOS 
 for (const s of skipped) console.log(`  not testable: ${s}`);
 console.log('');
 
+// Fetch everything first (see loadBars). Missing data is reported, never fatal.
+const need = new Set();
+for (const sym of SYMS) for (const e of list) {
+  need.add(`${sym} ${e.period}`);
+  const aux = e.mod?.meta?.aux?.[sym];
+  if (aux) need.add(`${aux} ${e.period}`);
+}
+console.log(`Fetching ${need.size} histories (cached ones cost nothing)...`);
+for (const key of need) {
+  const [sym, period] = key.split(' ');
+  try { await loadBars(sym, period); } catch (err) { console.log(`  ${key}: bars failed after 3 attempts — ${err.message}`); }
+}
+console.log(`  ${BARS.size}/${need.size} histories loaded. Simulating — no network from here.\n`);
+
 const results = [], coverage = {};
+const PARTIAL = join(OUT_DIR, 'strategy_lab_partial.json');
 for (const sym of SYMS) {
   const t0 = Date.now();
   let nSig = 0;
   for (const period of periods) {
-    let bars;
-    try { bars = await loadBars(sym, period); } catch (err) { console.log(`  ${sym} ${period}: bars failed — ${err.message}`); continue; }
-    if (!bars || bars.length < 300) { console.log(`  ${sym} ${period}: only ${bars?.length ?? 0} bars — skipped`); continue; }
+    const bars = BARS.get(`${sym} ${period}`);
+    if (!bars || bars.length < 300) { console.log(`  ${sym} ${period}: ${bars ? `only ${bars.length} bars` : 'no bars'} — its strategies skipped`); continue; }
     const atr = atr14(bars);
     const splitTs = bars[0].t + IS_FRAC * (bars[bars.length - 1].t - bars[0].t);
     const cost = { spread: SPREADS[sym] ?? median(bars.map(b => b.c)) * 0.00008, slipFrac: SLIP };
     coverage[`${sym} ${period}`] = `${new Date(bars[0].t).toISOString().slice(0, 10)} | OOS from ${new Date(splitTs).toISOString().slice(0, 10)} | ${bars.length} bars`;
     for (const e of list.filter(x => x.period === period)) {
-      const got = e.kind === 'cfs' ? await cfsSignals(e, bars, atr, sym) : moduleSignals(e, bars, sym);
-      if (!got) continue;
-      if (got.truncated) { console.log(`  ${sym} ${e.name}: replay exceeded ${MAX_SEC}s — excluded (a partial run is in-sample only)`); continue; }
-      nSig += got.sigs.length;
-      for (const row of evaluate(bars, atr, got.sigs, cost, splitTs)) results.push({ sym, name: e.name, period, ...row });
+      try {                                            // one broken strategy must not end the run
+        const got = e.kind === 'cfs' ? cfsSignals(e, bars, atr, sym) : moduleSignals(e, bars, sym);
+        if (!got) continue;
+        if (got.truncated) { console.log(`  ${sym} ${e.name}: replay exceeded ${MAX_SEC}s — excluded (a partial run is in-sample only)`); continue; }
+        nSig += got.sigs.length;
+        for (const row of evaluate(bars, atr, got.sigs, cost, splitTs)) results.push({ sym, name: e.name, period, ...row });
+      } catch (err) { console.log(`  ${sym} ${e.name}: failed — ${err.message}`); }
     }
   }
   console.log(`  ${sym}: ${nSig} signals across ${list.length} entrants (${((Date.now() - t0) / 1000).toFixed(0)}s)`);
+  try { writeFileSync(PARTIAL, JSON.stringify({ ts: new Date().toISOString(), done: sym, results })); } catch {}   // a crash never loses finished instruments
 }
 
 console.log('\n=== DATA ===');
