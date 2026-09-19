@@ -1,7 +1,7 @@
 {
   "id": "confluence_trifecta",
-  "description": "Trend + level + signal confluence on EURUSD H1. 90-day backtest: PF 1.87, n=37.",
-  "enabled": true,
+  "description": "Trend + level + signal confluence on EURUSD H1. 90-day backtest: PF 1.87, n=37. Paused 2026-09-19: -$1,138 live over 13 trades, and -$1,228 out of sample in strategy_lab.",
+  "enabled": false,
   "mode": "live",
   "account": "2131377",
   "logic": { "module": "confluence_trifecta" },

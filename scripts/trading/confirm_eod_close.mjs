@@ -27,6 +27,7 @@ import os from 'os';
 import { autoTrendline as autoTrendlineTrend } from './auto_trendline.mjs';
 import { fibVetoState, pContinue, VETO_DEPTH } from './fib_veto.mjs';
 import { isCalendarWeekend, weekendCryptoOn } from './lib/clock.mjs';
+import { readManifests, gateOn } from './lib/strategies.mjs';
 
 const DATA_ROOT = os.platform() === 'linux'
   ? '/home/ubuntu/trading-data'
@@ -140,7 +141,15 @@ async function main() {
     const _t = new Date();
     const eodStartMs = Date.UTC(_t.getUTCFullYear(), _t.getUTCMonth(), _t.getUTCDate(), DAILY_EOD_UTC ?? 20);
     let closed = 0, carried = 0, failed = 0;
+    // A plug-in strategy whose backtest let trades run to their own stop and target opts
+    // out of this close (manifest gates.daily_eod: false) — the carry rules below are the
+    // scanner's own thesis, not that strategy's. The weekend/Friday flatten still applies.
+    const ownStopTarget = new Set([...readManifests().values()].filter(m => !gateOn(m, 'daily_eod')).map(m => m.id));
     for (const p of open) {
+      if (p.label && ownStopTarget.has(p.label)) {
+        carried++; log(`daily-eod CARRY: [${p.label}] pos ${p.positionId} runs to its own stop/target (gates.daily_eod off)`);
+        continue;
+      }
       let carry = false, why = '';
       try {
         const sym  = await b.getSymbolNameById(p.symbolId);

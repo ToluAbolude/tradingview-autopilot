@@ -445,7 +445,10 @@ export async function checkExposure({ symbol, direction, label = '', policy }) {
   return exposureVerdict({ positions, dir, label, policy: policy ?? exposurePolicy(_readParams(), process.env.CTRADER_ACCOUNT_ID) });
 }
 
-export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false, label = '' }) {
+// planGate / fibVeto: off only for a plug-in strategy whose manifest opts out of those
+// gates (lib/strategies GATES) — its backtest never saw them, so applying them would
+// trade an untested strategy. Every other caller leaves them on.
+export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false, label = '', planGate = true, fibVeto = true }) {
   const cls = _instrumentClass(symbol);
   const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
 
@@ -491,7 +494,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   // per-strategy experiment (2131377) is a separate forward test and is deliberately
   // untouched — same opt-out shape as DEGRADED_ENTRY_GUARD above.
   // Kill switches: PLAN_GATE=off, or PLAN_GATE_ACCOUNT to re-point it.
-  if (String(process.env.CTRADER_ACCOUNT_ID || '') === String(process.env.PLAN_GATE_ACCOUNT || '2118552')
+  if (planGate && String(process.env.CTRADER_ACCOUNT_ID || '') === String(process.env.PLAN_GATE_ACCOUNT || '2118552')
       && (process.env.PLAN_GATE ?? 'on') !== 'off') {
     const { checkPlan } = await import('./daily_plan_gate.mjs');
     const verdict = checkPlan({ label: symbol, dir, entry });
@@ -554,7 +557,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   // rally") entries are blocked until the leg resolves. Counter-trend entries
   // pass. Fail-open on data errors like the price check below; the H1 state is
   // cached 10 min per symbol. Kill switch: FIB_VETO=off.
-  if ((process.env.FIB_VETO || 'on') !== 'off') {
+  if (fibVeto && (process.env.FIB_VETO || 'on') !== 'off') {
     try {
       const st = await _fibVetoStateFor(symbol);
       const verdict = checkFibVeto(st, dir);
@@ -601,7 +604,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
  *   tpPrice, slPrice = absolute price targets matching the existing
  *                      execute_trade.placeOrder API.
  */
-export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null, label = '' }) {
+export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null, label = '', planGate = true, fibVeto = true }) {
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
   // Clamp to the per-class lot cap instead of letting assertOrderSafety REJECT the
@@ -616,7 +619,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   // For a LIMIT, safety checks use the limit price as the reference (its SL must be
   // valid vs the limit), and the frozen-chart deviation check is skipped (a limit
   // rests away from live by design).
-  await assertOrderSafety({ symbol, direction, units, entry: limitPrice != null ? limitPrice : entry, slPrice, isLimit: limitPrice != null, label });
+  await assertOrderSafety({ symbol, direction, units, entry: limitPrice != null ? limitPrice : entry, slPrice, isLimit: limitPrice != null, label, planGate, fibVeto });
   const meta = await _symbolMetaFor(symbol);
   const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
   // Quantize to broker step + enforce min volume

@@ -1,0 +1,16 @@
+{
+  "id": "marco_nas_long",
+  "description": "Marco Trades liquidity sweep -> trap -> reversal (Chart Fanatics), longs only, NAS100 H1, stop 1.5x, fixed 3R target. strategy_lab 2026-09-19: +$1,217 out of sample (65 trades) but only +$322 without its 3 best trades, so it forward-tests here before it goes near the scanner account.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2131377",
+  "logic": { "file": "logic.mjs" },
+  "instruments": ["NAS100"],
+  "timeframe": "60",
+  "history_days": 60,
+  "params": { "config": "all-hours long" },
+  "filters": [],
+  "gates": { "fib_veto": false, "daily_eod": false },
+  "target": { "r": 3, "own": false },
+  "risk": { "per_trade_pct": 0.1, "stop_mult": 1.5 }
+}

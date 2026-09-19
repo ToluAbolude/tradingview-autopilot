@@ -1,7 +1,7 @@
 {
   "id": "orb",
-  "description": "Opening range breakout on NZDCAD M15; the logic gates itself to the session-open windows. 90-day backtest: PF 1.81, n=103, +27.3R.",
-  "enabled": true,
+  "description": "Opening range breakout on NZDCAD M15; the logic gates itself to the session-open windows. 90-day backtest: PF 1.81, n=103, +27.3R. Paused 2026-09-19: -$892 live over 39 trades (11 wins), and -$3,121 out of sample in strategy_lab.",
+  "enabled": false,
   "mode": "live",
   "account": "2131377",
   "logic": { "module": "orb" },
