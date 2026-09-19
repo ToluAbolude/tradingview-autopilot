@@ -28,6 +28,8 @@
  *       node broker_tradovate.mjs --test-token    token extraction only
  */
 import CDP from 'chrome-remote-interface';
+import { placeProtectedMarketOrder } from './lib/tradovate_entry.mjs';
+import { requireEquity } from './lib/account_risk.mjs';
 
 const HOST = process.env.TVO_HOST || 'https://demo.tradovateapi.com/v1';
 const ACCT_PREFIX = process.env.TVO_ACCOUNT_PREFIX || 'FTDFY';
@@ -86,7 +88,7 @@ async function getToken() {
 // ── REST helpers (401 refresh once, p-ticket throttle retry once) ────────────
 async function api(path, body, _retried = false) {
   const token = await getToken();
-  const opts = { headers: { Authorization: `Bearer ${token}` } };
+  const opts = { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) };
   if (body !== undefined) {
     opts.method = 'POST';
     opts.headers['Content-Type'] = 'application/json';
@@ -209,13 +211,13 @@ export function sizeContracts({ symbol, entry, slPrice, riskUsd = +(process.env.
 }
 
 // ── Safety gate ───────────────────────────────────────────────────────────────
-function roundToTick(price, tick) { return Math.round(price / tick) * tick; }
 
 
 export function assertOrderSafety({ symbol, direction, units, entry, slPrice, tpPrice }) {
   const c = CONTRACTS[symbol];
   if (!c) throw new Error(`No contract mapping for ${symbol}`);
-  if (!slPrice || !tpPrice) throw new Error('NEVER-NAKED: SL and TP are both required');
+  if (!['long', 'short'].includes(direction)) throw new Error('Invalid direction');
+  if (![entry, slPrice, tpPrice].every(v => Number.isFinite(v) && v > 0)) throw new Error('Entry, SL and TP must be finite positive prices');
   if (!Number.isInteger(units) || units < 1) throw new Error(`units must be a whole contract count, got ${units}`);
   if (units > MAX_CONTRACTS) throw new Error(`units ${units} > cap ${MAX_CONTRACTS}`);
   const day = new Date().getUTCDay();
@@ -241,8 +243,6 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   const cid = rc.id;
   const slDist = Math.abs(entry - slPrice);
   const tpDist = Math.abs(entry - tpPrice);
-  const action = direction === 'long' ? 'Buy' : 'Sell';
-  const opp = direction === 'long' ? 'Sell' : 'Buy';
 
   // Anti-stack: never add to an existing position in this contract
   const existing = (await api('/position/list')).find(p => p.accountId === a.id && p.contractId === cid && p.netPos !== 0);
@@ -254,64 +254,20 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   // the account within reach of it. Default $300 ≈ two max-loss trades spare.
   const MIN_HEADROOM = +(process.env.TVO_MIN_HEADROOM || 300);
   const eq = await getEquity();
+  requireEquity(eq);
   const rs = await getRiskStatus();
   const floorEst = Math.min((rs.peakNetLiq ?? eq.equity) - (rs.trailingMaxDrawdown ?? 1000), rs.floorLocksAt ?? Infinity);
   const headroom = eq.equity - floorEst;
+  if (!Number.isFinite(headroom) || !Number.isFinite(MIN_HEADROOM) || MIN_HEADROOM < 0) {
+    throw new Error('Account risk headroom unavailable');
+  }
   if (headroom - riskUsd < MIN_HEADROOM) {
     throw new Error(`DD headroom too low: equity ${eq.equity} vs floor≈${floorEst} leaves $${headroom.toFixed(0)}; trade risks $${riskUsd.toFixed(0)}, need $${MIN_HEADROOM} spare`);
   }
 
-  console.log(`[tvo] entry ${action} ${units}x ${rc.name} (slDist=${slDist.toFixed(2)} tpDist=${tpDist.toFixed(2)} risk=$${riskUsd.toFixed(0)})`);
-  const res = await api('/order/placeorder', {
-    accountSpec: a.name, accountId: a.id, action, symbol: rc.name,
-    orderQty: units, orderType: 'Market', isAutomated: true,
+  return placeProtectedMarketOrder({
+    api, account: a, contract: rc, direction, units, slDist, tpDist, tick: c.tick, riskUsd,
   });
-  if (res.failureReason || res.failureText) {
-    throw new Error(`placeorder rejected: ${res.failureReason || ''} ${res.failureText || ''}`);
-  }
-
-  // Poll for the fill (fast — the naked window must stay short)
-  let fillPrice = null;
-  for (let i = 0; i < 20 && fillPrice == null; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    const pos = (await api('/position/list')).find(p => p.accountId === a.id && p.contractId === cid && p.netPos !== 0);
-    if (pos) fillPrice = pos.netPrice;
-  }
-  if (fillPrice == null) {
-    try { await api('/order/cancelorder', { orderId: res.orderId, isAutomated: true }); } catch {}
-    throw new Error('Market entry not filled within 10s — order cancelled');
-  }
-
-  // OCO bracket at futures fill ± distances (basis-free)
-  const sl = roundToTick(direction === 'long' ? fillPrice - slDist : fillPrice + slDist, c.tick);
-  const tp = roundToTick(direction === 'long' ? fillPrice + tpDist : fillPrice - tpDist, c.tick);
-  let oco;
-  try {
-    oco = await api('/order/placeoco', {
-      accountSpec: a.name, accountId: a.id, action: opp, symbol: rc.name,
-      orderQty: units, orderType: 'Limit', price: tp, isAutomated: true,
-      other: { action: opp, orderType: 'Stop', stopPrice: sl },
-    });
-    if (oco.failureReason || oco.failureText) throw new Error(`${oco.failureReason || ''} ${oco.failureText || ''}`);
-  } catch (e) {
-    console.error(`[tvo] EMERGENCY: filled @${fillPrice} but OCO bracket failed (${e.message}) — liquidating`);
-    await liquidateContract(cid);
-    throw new Error(`Bracket placement failed — position liquidated (never-naked): ${e.message}`);
-  }
-
-  // Verify both legs are actually working (up to ~10s)
-  for (let i = 0; i < 4; i++) {
-    await new Promise(r => setTimeout(r, 2500));
-    const working = (await getWorkingOrders()).filter(o => o.action === opp && o.contractId === cid);
-    if (working.length >= 2) {
-      console.log(`[tvo] VERIFIED: ${action} ${units}x ${rc.name} @${fillPrice}, SL ${sl} / TP ${tp} both working`);
-      return { ok: true, orderId: res.orderId, fillPrice, sl, tp, riskUsd };
-    }
-  }
-  console.error('[tvo] EMERGENCY: bracket legs not verified working — liquidating');
-  await liquidateContract(cid);
-  await cancelAllWorking();
-  throw new Error('Bracket verification failed — position liquidated (never-naked)');
 }
 
 async function liquidateContract(contractId) {

@@ -34,6 +34,7 @@ import { instrumentClass as _instrumentClass, MIN_SL_FRAC } from './lib/instrume
 import { isSundayReopen } from './lib/clock.mjs';
 import { exposurePolicy, exposureVerdict } from './lib/exposure.mjs';
 import { legVolumes, MAX_OVERRISK } from './lib/sizing.mjs';
+import { accountEquity, claimEntryCooldown, orderDirection, rejectOrder, validateMarketBars, validateOrderInputs } from './lib/broker_safety.mjs';
 const require = createRequire(import.meta.url);
 const protobuf = require('protobufjs');
 
@@ -361,6 +362,9 @@ async function _symbolMetaFor(name) {
     minVolume:  Number(full.minVolume  || 0),
     stepVolume: Number(full.stepVolume || 0),
   };
+  if (!Object.values(meta).every(v => Number.isSafeInteger(v) && v > 0)) {
+    rejectOrder(name, 'broker symbol metadata is missing or invalid');
+  }
   _symbolMeta.set(name, meta);
   return meta;
 }
@@ -395,6 +399,7 @@ async function _fibVetoStateFor(symbol) {
   const hit = _fibVetoCache.get(symbol);
   if (hit && Date.now() - hit.ts < 10 * 60 * 1000) return hit.state;
   const bars = await getTrendbars(symbol, { period: 'H1', fromMs: Date.now() - 40 * 24 * 3600 * 1000, windowDays: 20 });
+  validateMarketBars(symbol, bars, { maxAgeMs: 2 * 3600_000, minBars: 60 });
   const state = fibVetoState(bars);
   _fibVetoCache.set(symbol, { ts: Date.now(), state });
   return state;
@@ -428,19 +433,19 @@ function _readParams() {
 /**
  * Exposure check for a new `direction` position owned by `label` on `symbol`, against
  * the positions open right now (lib/exposure.mjs). Used by assertOrderSafety and by
- * runners that want to skip before building an order. Fails OPEN on a broker read
- * error, like the open-volume check it replaces.
+ * runners that want to skip before building an order. Unknown exposure rejects
+ * new risk; it must never erase an earlier exposure block.
  */
 export async function checkExposure({ symbol, direction, label = '', policy }) {
-  const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
+  let dir;
   let positions;
   try {
+    dir = orderDirection(direction);
     await connect();
     const meta = await _symbolMetaFor(symbol);
     positions = (await getPositions()).filter(p => p.symbolId === meta.id);
   } catch (e) {
-    console.error(`[cTrader] exposure check skipped for ${symbol}: ${e.message}`);
-    return { ok: true };
+    return { ok: false, reason: `exposure could not be verified: ${e.message}` };
   }
   return exposureVerdict({ positions, dir, label, policy: policy ?? exposurePolicy(_readParams(), process.env.CTRADER_ACCOUNT_ID) });
 }
@@ -450,7 +455,7 @@ export async function checkExposure({ symbol, direction, label = '', policy }) {
 // trade an untested strategy. Every other caller leaves them on.
 export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false, label = '', planGate = true, fibVeto = true }) {
   const cls = _instrumentClass(symbol);
-  const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
+  const dir = validateOrderInputs({ symbol, direction, units, entry, slPrice, label });
 
   // calcLots returns 0 when no tradable size fits the risk budget (lib/sizing.mjs).
   // Checked first: placing it anyway would send the broker's minimum volume instead.
@@ -530,32 +535,18 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
     const verdict = await checkExposure({ symbol, direction: dir, label, policy: exposure });
     if (!verdict.ok) throw new Error(`ORDER_SAFETY_REJECT ${symbol}: ${verdict.reason} — exposure policy`);
   }
-
-  // Twin guard (2026-07-20 GBPCAD double-fill, positions 32981536/7): two
-  // market orders sent in the same instant both pass the open-volume check —
-  // neither position exists yet when the second is validated. Cross-process
-  // cooldown file: one MARKET entry per symbol per 60s across all runners.
-  // Resting limits are exempt (the zone runner legitimately straddles a
-  // symbol with a long and a short limit in one cycle).
-  if (!allowStack && !isLimit) {
-    const lockDir = process.env.TRADING_DATA_DIR || '/home/ubuntu/trading-data';
-    // Keyed per symbol while only one position may exist; per strategy + symbol once the
-    // exposure policy lets several strategies share it (they must not block each other).
-    const twinKey = exposure.maxPositionsPerSymbol > 1 && label ? `${label}_${symbol}` : String(symbol);
-    const lock = path.join(lockDir, `.entry_cooldown_${twinKey.replace(/[^A-Za-z0-9_]/g, '')}`);
-    let recentMs = null;
-    try { recentMs = Date.now() - fs.statSync(lock).mtimeMs; } catch { /* no lock yet */ }
-    if (recentMs != null && recentMs < 60_000) {
-      throw new Error(`ORDER_SAFETY_REJECT ${symbol}: entry attempted ${Math.round(recentMs / 1000)}s ago — twin guard (60s/symbol)`);
-    }
-    try { fs.writeFileSync(lock, String(Date.now())); } catch { /* lock dir missing (non-VM run) — guard degrades to open-volume check only */ }
+  try {
+    const { equity } = await getEquity();
+    if (!Number.isFinite(equity) || equity <= 0) throw new Error('equity must be finite and positive');
+  } catch (e) {
+    rejectOrder(symbol, `account equity unavailable: ${e.message}`);
   }
 
   // Fib-depth veto (hard rule, 2026-07-02). fib_backtest (2y H1 × 7 symbols,
   // 2,943 legs): once an impulse leg has retraced ≥61.8%, it continues only
   // 38.6% of the time — continuation-direction ("buy the dip"/"sell the
   // rally") entries are blocked until the leg resolves. Counter-trend entries
-  // pass. Fail-open on data errors like the price check below; the H1 state is
+  // pass. Enabled checks fail closed on data errors; the H1 state is
   // cached 10 min per symbol. Kill switch: FIB_VETO=off.
   if (fibVeto && (process.env.FIB_VETO || 'on') !== 'off') {
     try {
@@ -566,18 +557,17 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
       }
     } catch (e) {
       if (/ORDER_SAFETY_REJECT/.test(e.message)) throw e;
-      console.error(`[cTrader] fib-veto check skipped for ${symbol}: ${e.message}`);
+      rejectOrder(symbol, `fib veto unavailable: ${e.message}`);
     }
   }
 
-  // Price sanity vs the broker's own M1 bars (frozen-chart guard). Fail-open on
-  // API errors so a trendbars outage can't halt trading — the other guards above
-  // still apply. SKIP for LIMIT orders: a limit rests AWAY from the live price by
+  // Price sanity vs the broker's own M1 bars (frozen-chart guard). Unavailable
+  // prices reject new entries. SKIP for LIMIT orders: a limit rests AWAY from the live price by
   // design (e.g. at an S&R zone), so a deviation check would wrongly reject it.
   if (!isLimit && Number.isFinite(entry) && entry > 0) {
     try {
       const bars = await getTrendbars(symbol, { period: 'M1', fromMs: Date.now() - 2 * 3600 * 1000 });
-      const last = bars[bars.length - 1];
+      const last = validateMarketBars(symbol, bars, { maxAgeMs: _SAFETY.maxBarAgeMs });
       if (last) {
         const ageMs = Date.now() - last.t;
         if (ageMs > _SAFETY.maxBarAgeMs) {
@@ -590,8 +580,22 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
       }
     } catch (e) {
       if (/ORDER_SAFETY_REJECT/.test(e.message)) throw e;
-      console.error(`[cTrader] safety price-check skipped for ${symbol}: ${e.message}`);
+      rejectOrder(symbol, `broker price check unavailable: ${e.message}`);
     }
+  }
+
+  // Reserve only after the read-only checks succeed. An exclusive mutex covers
+  // the persisted cooldown check/write, so simultaneous processes cannot both
+  // admit the same account/symbol (or strategy when sharing is permitted).
+  // Resting limits remain exempt: their runner deliberately places both sides.
+  if (!allowStack && !isLimit) {
+    const meta = await _symbolMetaFor(symbol);
+    claimEntryCooldown({
+      dir: process.env.TRADING_DATA_DIR || '/home/ubuntu/trading-data',
+      accountId: _accountId,
+      symbol: meta.id,
+      label: exposure.maxPositionsPerSymbol > 1 ? label : '',
+    });
   }
 }
 
@@ -599,12 +603,13 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
  * Place a market order.
  *   entry  = expected entry price (used to convert absolute slPrice/tpPrice
  *            into the relativeStopLoss / relativeTakeProfit that cTrader
- *            requires for MARKET orders). If omitted, falls back to a two-step
- *            place-then-amend flow.
+ *            requires for MARKET orders). Required: an omitted entry would
+ *            otherwise require opening without broker-side protection.
  *   tpPrice, slPrice = absolute price targets matching the existing
  *                      execute_trade.placeOrder API.
  */
 export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null, label = '', planGate = true, fibVeto = true }) {
+  validateOrderInputs({ symbol, direction, units, entry: limitPrice ?? entry, slPrice, tpPrices: [tpPrice], label });
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
   // Clamp to the per-class lot cap instead of letting assertOrderSafety REJECT the
@@ -659,49 +664,11 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
     ...owner,
   };
 
-  if (entry != null) {
-    // Convert absolute prices → relative distances (in 1/100000 of price units).
-    // For BUY: SL is below entry, TP is above. For SELL: reversed.
-    const slDist = Math.round(Math.abs(entry - slPrice) * 100_000);
-    const tpDist = Math.round(Math.abs(tpPrice - entry) * 100_000);
-    req.relativeStopLoss   = slDist;
-    req.relativeTakeProfit = tpDist;
-    return send('ProtoOANewOrderReq', req);
-  }
-
-  // Two-step fallback: open naked, then amend with absolute SL/TP AFTER the fill.
-  // A single amend fired immediately after the open response does NOT persist —
-  // the position is still settling and the SL/TP silently read back as 0 (this was
-  // the 0/5-bracketed bug: every confirm trade opened naked and got force-closed).
-  // Poll-and-amend: (re)send the absolute SL/TP and confirm via getPositions() that
-  // BOTH actually attached, retrying for a few seconds before giving up.
-  const orderRes = await send('ProtoOANewOrderReq', req);
-  const posId = Number(orderRes?.position?.positionId);
-  if (!posId) return orderRes;
-  let bracketed = false, refreshed = false;
-  for (let i = 0; i < 6 && !bracketed; i++) {
-    await new Promise(r => setTimeout(r, 1200));
-    try {
-      await send('ProtoOAAmendPositionSLTPReq', {
-        ctidTraderAccountId: _accountId, positionId: posId,
-        stopLoss: slPrice, takeProfit: tpPrice,
-      });
-    } catch (e) {
-      console.error(`[cTrader] placeOrder: amend SL/TP attempt ${i + 1} failed for ${posId}: ${e.message}`);
-    }
-    let p = null;
-    try { p = (await getPositions()).find(x => x.positionId === posId); } catch (_) {}
-    bracketed = !!(p && p.stopLoss && p.takeProfit);
-    // The amend resolves but the position keeps reading NAKED when the cTrader socket
-    // has gone stale — its reconcile/amend silently lag (see reconnect() docs). In the
-    // confirm runner placeOrder runs after ~20 round-trips (kill-switch + 7 getTrendbars),
-    // so the socket can be degraded by placement time; this was the 14:00 force-close.
-    // Refresh the socket ONCE on the first miss, then keep retrying on the fresh one.
-    if (!bracketed && !refreshed) { refreshed = true; try { await reconnect(); } catch (_) {} }
-  }
-  if (!bracketed) console.error(`[cTrader] placeOrder: SL/TP NOT attached after retries for position ${posId}`);
-  orderRes._bracketed = bracketed;
-  return orderRes;
+  // Convert validated absolute prices into broker-side relative brackets.
+  req.relativeStopLoss = Math.round(Math.abs(entry - slPrice) * 100_000);
+  req.relativeTakeProfit = Math.round(Math.abs(tpPrice - entry) * 100_000);
+  if (req.relativeStopLoss < 1 || req.relativeTakeProfit < 1) rejectOrder(symbol, 'SL/TP distance rounds to zero');
+  return send('ProtoOANewOrderReq', req);
 }
 
 /**
@@ -728,6 +695,8 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
  * Returns: { positionId, openRes, tpOrderIds: [N], failedTps: [...] }
  */
 export async function placeMultiTpPosition({ symbol, direction, totalUnits, legUnits, entry, slPrice, tpPrices, parentTp = null, label = '' }) {
+  validateOrderInputs({ symbol, direction, units: totalUnits, entry, slPrice, tpPrices, label });
+  if (parentTp != null) validateOrderInputs({ symbol, direction, units: totalUnits, entry, slPrice, tpPrices: [parentTp], label });
   await connect();
   if (!slPrice) throw new Error('slPrice required.');
   if (!Array.isArray(tpPrices) || tpPrices.length === 0) throw new Error('tpPrices must be a non-empty array.');
@@ -766,6 +735,7 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
   const slDist  = Math.round(Math.abs(entry  - slPrice)              * 100_000);
   const tpFinal = parentTp ?? tpPrices[tpPrices.length - 1];
   const tpDist  = Math.round(Math.abs(tpFinal - entry)               * 100_000);
+  if (slDist < 1 || tpDist < 1) rejectOrder(symbol, 'SL/TP distance rounds to zero');
   const openRes = await send('ProtoOANewOrderReq', {
     ctidTraderAccountId: _accountId,
     symbolId:    meta.id,
@@ -968,7 +938,13 @@ function _toNum(v) {
 export async function getPositions() {
   await connect();
   const res = await send('ProtoOAReconcileReq', { ctidTraderAccountId: _accountId });
-  return (res.position || []).map(p => ({
+  if (!res || String(res.ctidTraderAccountId) !== String(_accountId) || !Array.isArray(res.position)) {
+    throw new Error('Invalid position reconciliation response');
+  }
+  return res.position.map(p => {
+    if (![p.positionId, p.tradeData?.symbolId, p.tradeData?.volume].every(v => Number.isSafeInteger(Number(v)) && Number(v) > 0) ||
+        ![1, 2].includes(p.tradeData?.tradeSide)) throw new Error('Invalid broker position data');
+    return ({
     positionId:  _toNum(p.positionId),
     symbolId:    _toNum(p.tradeData?.symbolId),
     direction:   p.tradeData?.tradeSide === 1 ? 'long' : 'short',
@@ -980,7 +956,20 @@ export async function getPositions() {
     commission:  _toNum(p.commission),
     openTimestamp: _toNum(p.tradeData?.openTimestamp),   // unix ms — for anchoring the chart screenshot at the real entry candle
     label:       p.tradeData?.label || '',   // owning strategy id (orders carry it since 2026-09-15; '' = unlabeled)
-  }));
+    });
+  });
+}
+
+/** Open positions with the scanner's canonical names; never guess an unknown ID. */
+export async function getPositionsWithSymbols() {
+  await connect();
+  await _loadSymbolList();
+  const names = new Map([..._symbolIdMap].map(([name, id]) => [id, CTRADER_NAME_REV[name] || name]));
+  return (await getPositions()).map(position => {
+    const symbolName = names.get(position.symbolId);
+    if (!symbolName) throw new Error(`Unmapped broker symbol ID ${position.symbolId}`);
+    return { ...position, symbolName };
+  });
 }
 
 /** Public symbol-meta lookup (lotSize etc.) for consumers that must convert
@@ -1034,12 +1023,8 @@ export async function getNakedPositions() {
 export async function getEquity() {
   await connect();
   const res = await send('ProtoOATraderReq', { ctidTraderAccountId: _accountId });
-  const t = res.trader || {};
-  return {
-    balance:  Number(t.balance || 0) / 100,
-    equity:   Number(t.balance || 0) / 100,
-    currency: t.depositAssetId,
-  };
+  const pnl = await send('ProtoOAGetPositionUnrealizedPnLReq', { ctidTraderAccountId: _accountId });
+  return accountEquity(res?.trader, pnl, _accountId);
 }
 
 /** List every trading account the current access token grants (demo + live). */

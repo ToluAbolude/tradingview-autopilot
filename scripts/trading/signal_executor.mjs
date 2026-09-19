@@ -23,12 +23,13 @@
  * asianBlock/cooldown overrides don't apply on this path (defaults do).
  */
 import { attemptInlineTrade, resetCycleState } from './inline_trader.mjs';
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { acquireExecutorLock, readExecutionState, writeExecutionState, attemptSignalOnce } from './lib/execution_state.mjs';
 import { join } from 'path';
 import os from 'os';
 
 const IS_LINUX   = os.platform() === 'linux';
-const DATA_ROOT  = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
+const DATA_ROOT  = process.env.TRADING_DATA_DIR || (IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data');
 const SIGNALS_FILE = join(DATA_ROOT, 'live_signals.json');
 const STATE_FILE   = join(DATA_ROOT, 'signal_executor_state.json');
 const LOCK_FILE    = join(DATA_ROOT, 'signal_executor.lock');
@@ -36,16 +37,14 @@ const LEDGER_TTL_MS = 48 * 3600 * 1000;
 
 function log(msg) { process.stdout.write(`[${new Date().toISOString()}] [signal_executor] ${msg}\n`); }
 
-// Single instance — a slow broker call must not overlap the next cron tick
-if (existsSync(LOCK_FILE)) {
-  const pid = parseInt(readFileSync(LOCK_FILE, 'utf8').trim(), 10);
-  let alive = false;
-  try { process.kill(pid, 0); alive = true; } catch (_) {}
-  if (alive) { log(`another instance running (pid ${pid}) — exit`); process.exit(0); }
-  unlinkSync(LOCK_FILE); // stale lock
-}
-writeFileSync(LOCK_FILE, String(process.pid));
-process.on('exit', () => { try { unlinkSync(LOCK_FILE); } catch (_) {} });
+// Exclusive create is atomic across cron processes. Never reap a possibly live
+// lock by age/PID: reconcile ambiguous broker fills before recovering a crash.
+let releaseLock;
+try { releaseLock = acquireExecutorLock(LOCK_FILE); }
+catch (e) { log(e.message); process.exit(1); }
+process.on('exit', () => {
+  try { releaseLock(); } catch (e) { log(`lock release failed: ${e.message}`); }
+});
 
 if (!existsSync(SIGNALS_FILE)) { log('no live_signals.json yet — exit'); process.exit(0); }
 
@@ -54,8 +53,7 @@ try { data = JSON.parse(readFileSync(SIGNALS_FILE, 'utf8')); }
 catch (e) { log(`live_signals.json unreadable (${e.message}) — exit`); process.exit(1); }
 
 const now = Date.now();
-let ledger = {};
-try { if (existsSync(STATE_FILE)) ledger = JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch (_) {}
+const ledger = readExecutionState(STATE_FILE);
 for (const k of Object.keys(ledger)) if (now - ledger[k] > LEDGER_TTL_MS) delete ledger[k];
 
 const fresh = (data.active || [])
@@ -65,7 +63,7 @@ const fresh = (data.active || [])
 
 if (fresh.length === 0) {
   log(`nothing to do (active=${(data.active || []).length}, all expired or already attempted)`);
-  writeFileSync(STATE_FILE, JSON.stringify(ledger));
+  writeExecutionState(STATE_FILE, ledger);
   process.exit(0);
 }
 
@@ -73,14 +71,13 @@ log(`${fresh.length} fresh signal(s): ${fresh.map(s => `${s.label}-${s.tf}M-${s.
 resetCycleState();   // per-run concurrent/correlated-group tracking
 
 for (const sig of fresh) {
-  ledger[`${sig.id}@${sig.ts}`] = now;   // mark BEFORE attempting — attempts count
   try {
-    await attemptInlineTrade(sig);
+    await attemptSignalOnce(STATE_FILE, ledger, `${sig.id}@${sig.ts}`, now, () => attemptInlineTrade(sig));
   } catch (e) {
     log(`${sig.id}: executor error — ${e.message}`);
   }
 }
 
-writeFileSync(STATE_FILE, JSON.stringify(ledger));
+writeExecutionState(STATE_FILE, ledger);
 log('done');
 process.exit(0);

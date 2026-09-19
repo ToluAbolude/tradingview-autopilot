@@ -1,190 +1,129 @@
-# TradingView MCP Jackson
+# TradingView Autopilot
 
-Built on top of the original [tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp) by [@tradesdontlie](https://github.com/tradesdontlie). Full credit to them for the foundation. This fork adds a morning brief workflow, a rules config, and fixes the launch bug on TradingView Desktop v2.14+.
+A TradingView MCP server and CLI, with optional strategy research and automated broker execution. The chart bridge builds on [tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp) by [@tradesdontlie](https://github.com/tradesdontlie), with the morning-brief workflow from the Jackson fork.
 
-> [!WARNING]
-> **Not affiliated with TradingView Inc. or Anthropic.** This tool connects to your locally running TradingView Desktop app via Chrome DevTools Protocol. Review the [Disclaimer](#disclaimer) before use.
+The repository now includes cTrader and Tradovate adapters, strategy plug-ins, position management, journals, and cloud job scripts. Starting the MCP server does **not** start the trading runners.
 
-> [!IMPORTANT]
-> **Requires a valid TradingView subscription.** This tool does not bypass any TradingView paywall. It reads from and controls the TradingView Desktop app already running on your machine.
+## Capabilities and boundaries
 
-> [!NOTE]
-> **All data processing happens locally.** Nothing is sent anywhere. No TradingView data leaves your machine.
+| Component | Purpose |
+|---|---|
+| `src/core`, `src/tools`, `src/cli` | Shared chart/Pine logic exposed through MCP and the `tv` CLI |
+| Morning brief | Scan a watchlist and return chart data plus rules for an assistant to interpret |
+| `scripts/trading/strategies` | Strategy manifests with instruments, accounts, risk settings and logic modules |
+| `scripts/trading/lib` | Shared sizing, exposure, clock, validation and execution-state functions |
+| Broker adapters and runners | Submit and manage orders through cTrader Open API or Tradovate |
+| Research and backtests | Strategy evaluation, costs, walk-forward tests and robustness checks |
+| Cloud scripts and reports | Scheduling, health checks, Notion journals and optional email reports |
 
----
+TradingView chart automation uses undocumented application internals over Chrome DevTools Protocol (CDP). TradingView changes can break selectors or data access. Broker execution and cloud deployments require separate configuration; historical machine paths and account settings are still present in several scripts.
 
-## What's New in This Fork
+## Quick start: chart tools
 
-| Feature | What it does |
-|---------|-------------|
-| `morning_brief` | One command that scans your watchlist, reads all your indicators, and returns structured data for Claude to generate your session bias |
-| `session_save` / `session_get` | Saves your daily brief to `~/.tradingview-mcp/sessions/` so you can compare today vs yesterday |
-| `rules.json` | Write your trading rules once — bias criteria, risk rules, watchlist. The morning brief applies them automatically every day |
-| Launch bug fix | Fixed `tv_launch` compatibility with TradingView Desktop v2.14+ |
-| `tv brief` CLI | Run your morning brief from the terminal in one word |
+Use Node.js 20 or newer and npm. The offline CI matrix covers Node 20, 22 and 24 on Windows and Ubuntu. Chart tools need TradingView Desktop, a logged-in account and the appropriate data entitlements. No broker credentials are needed for offline tests or CLI help.
 
----
-
-## One-Shot Setup
-
-Paste this into Claude Code and it will handle everything:
-
-```
-Set up TradingView MCP Jackson for me. 
-Clone https://github.com/LewisWJackson/tradingview-autopilot.git to ~/tradingview-autopilot, run npm install, then add it to my MCP config at ~/.claude/.mcp.json (merge with any existing servers, don't overwrite them). 
-The config block is: { "mcpServers": { "tradingview": { "command": "node", "args": ["/Users/YOUR_USERNAME/tradingview-autopilot/src/server.js"] } } } — replace YOUR_USERNAME with my actual username.
-Then copy rules.example.json to rules.json and open it so I can fill in my trading rules.
-Finally restart and verify with tv_health_check.
+```sh
+git clone https://github.com/ToluAbolude/tradingview-autopilot.git
+cd tradingview-autopilot
+npm ci
+npm test
+node src/cli/index.js --help
 ```
 
-Or follow the manual steps below.
+Edit the existing [rules.json](rules.json) for your watchlist, timeframe, bias criteria and brief instructions. These natural-language rules are context for the morning brief; automated execution has separate parameters and strategy manifests. There is no `rules.example.json` file.
 
----
+Launch TradingView with CDP enabled on port **9222**:
 
-## Prerequisites
+- Windows: `scripts\launch_tv_debug.bat`
+- macOS: `bash scripts/launch_tv_debug_mac.sh`
+- Linux: `bash scripts/launch_tv_debug_linux.sh`
 
-- **TradingView Desktop app** (paid subscription required for real-time data)
-- **Node.js 18+**
-- **Claude Code** (for MCP tools) or any terminal (for CLI)
-- **macOS, Windows, or Linux**
+Keep the debugging port on localhost. The bridge can control the authenticated app, so do not expose the port publicly. Launch scripts may restart TradingView; save open work first.
 
----
-
-## Quick Start
-
-### 1. Clone and install
-
-```bash
-git clone https://github.com/LewisWJackson/tradingview-autopilot.git ~/tradingview-autopilot
-cd ~/tradingview-autopilot
-npm install
+```sh
+node src/cli/index.js status
+node src/cli/index.js brief
 ```
 
-### 2. Set up your rules
+The CLI brief returns structured chart data and configured rules. Your MCP assistant can interpret that output into a session brief. Saved briefs live in `~/.tradingview-mcp/sessions/`.
 
-```bash
-cp rules.example.json rules.json
-```
+Optionally run `npm link` to make `tv` available globally, then use `tv --help` for commands and options.
 
-Open `rules.json` and fill in:
-- Your **watchlist** (symbols to scan each morning)
-- Your **bias criteria** (what makes something bullish/bearish/neutral for you)
-- Your **risk rules** (the rules you want Claude to check before every session)
+### MCP configuration
 
-### 3. Launch TradingView with CDP
-
-TradingView must be running with the debug port enabled.
-
-**Mac:**
-```bash
-./scripts/launch_tv_debug_mac.sh
-```
-
-**Windows:**
-```bash
-scripts\launch_tv_debug.bat
-```
-
-**Linux:**
-```bash
-./scripts/launch_tv_debug_linux.sh
-```
-
-Or use the MCP tool after setup: `"Use tv_launch to start TradingView in debug mode"`
-
-### 4. Add to Claude Code
-
-Add to `~/.claude/.mcp.json` (merge with any existing servers):
+Add this server entry to your MCP client's configuration, retaining existing servers. The configuration location depends on the client.
 
 ```json
 {
   "mcpServers": {
     "tradingview": {
       "command": "node",
-      "args": ["/Users/YOUR_USERNAME/tradingview-autopilot/src/server.js"]
+      "args": ["/absolute/path/to/tradingview-autopilot/src/server.js"]
     }
   }
 }
 ```
 
-Replace `YOUR_USERNAME` with your actual username. On Mac: `echo $USER` to check.
+On Windows, use an absolute path such as `C:/projects/tradingview-autopilot/src/server.js`. Restart the client and call `tv_health_check`.
 
-### 5. Verify
+## Automated execution
 
-Restart Claude Code, then ask: *"Use tv_health_check to verify TradingView is connected"*
+Read [cTrader setup](docs/CTRADER_SETUP.md), the [service map](docs/SERVICE_MAP.md), and the [strategy manifest reference](scripts/trading/strategies/README.md) before configuring a runner. Some older operational notes describe previous deployments; verify paths and account IDs against the code you run.
 
-### 6. Run your first morning brief
+- cTrader uses `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`, `CTRADER_ACCESS_TOKEN`, `CTRADER_ACCOUNT_ID` and `CTRADER_ENV`. `BROKER_PROVIDER=ctrader` selects it in the scanner execution path. Supply credentials in the process environment; scripts do not universally load `.env` automatically.
+- Tradovate uses an authenticated browser session plus its `TVO_*` settings. ORB Tradovate routing can be enabled by `TVO_LIVE=on` **or** the deployment's `.tvo_live` flag, independently of the runner's `--live` argument. Check both before using a dry run.
+- `strategy_runner.mjs` defaults to dry-run; its `--live` mode also requires `CTRADER_ENV=demo` and a manifest with `mode: "live"`. Other runners have their own activation rules.
+- Keep credentials outside source control. Review accounts, symbol mappings, risk parameters, manifests, data directories and schedules before enabling orders. Committed settings describe an existing deployment, not a portable account template.
 
-Ask Claude: *"Run morning_brief and give me my session bias"*
+### Entry safeguards
 
-Or from the terminal:
-```bash
-npm link  # install tv CLI globally (one time)
-tv brief
-```
+The cTrader entry path rejects unavailable exposure, invalid equity, invalid order prices, and unavailable or stale market data for enabled checks. Equity uses balance plus the broker's net unrealized P&L in the deposit currency, respecting the separate money precision of each response. See [cTrader's P&L documentation](https://help.ctrader.com/open-api/profit-loss-calculation/).
 
----
+Execution runners no longer substitute a fixed account balance when equity reads fail. Daily-loss checks block new entries when required data cannot be read. Closing positions and cancelling orders remain separate from entry checks. The zone-limit runner continues cancellation when account risk is unavailable and retains failed cancellations for retry.
 
-## Morning Brief Workflow
+Tradovate wraps submission, fill polling, bracket placement and verification in one recovery boundary. Failures after a potentially accepted entry trigger cancellation and liquidation attempts for that contract, with explicit reporting when recovery cannot be confirmed. Bracket verification checks the two IDs returned by [placeOCO](https://partner.tradovate.com/api/rest-api-endpoints/orders/place-oco). A lost acknowledgement still requires reconciliation before retrying.
 
-This is the feature that turns this from a toolkit into a daily habit.
+Market-entry cooldowns use an atomic filesystem mutex and durable timestamp, scoped to broker account and symbol, and to strategy when the exposure policy permits sharing. The cooldown is 60 seconds; it is not a broker-side exactly-once guarantee. Resting limits are exempt because the zone runner can deliberately rest both directions.
 
-**Before every session:**
+The signal executor uses an exclusive process lock and persists each signal attempt **before** calling execution. A failed or ambiguous execution is still an attempt; it will not automatically replay the same signal emission.
 
-1. TradingView is open (launched with debug port)
-2. Run: `tv brief` in your terminal (or ask Claude: *"run morning_brief"*)
-3. Claude scans every symbol in your watchlist, reads your indicator values, applies your `rules.json` criteria, and prints:
+These locks require a **single host and shared local data directory**. They are not distributed locks for multiple VMs. Set `TRADING_DATA_DIR` consistently for the broker cooldown and signal executor; review other scripts for deployment-specific paths.
 
-```
-BTCUSD  | BIAS: Bearish  | KEY LEVEL: 94,200  | WATCH: RSI crossing 50 on 4H
-ETHUSD  | BIAS: Neutral  | KEY LEVEL: 3,180   | WATCH: Ribbon direction on daily
-SOLUSD  | BIAS: Bullish  | KEY LEVEL: 178.50  | WATCH: Hold above 20 EMA
+A crashed process may leave `signal_executor.lock` or `.entry_cooldown_*.json.lock`. Entries stop rather than stealing the lock. Before manually removing a stale lock, confirm the owner is stopped and reconcile broker positions, pending orders and the attempt ledger. Do not delete cooldown timestamps or the ledger simply to retry an uncertain fill.
 
-Overall: Cautious session. BTC leading bearish, SOL the exception — watch for divergence.
-```
+## Data flows and external services
 
-4. Save it: *"save this brief"* (uses `session_save`)
-5. Next morning, compare: *"get yesterday's session"* (uses `session_get`)
+This is **not an entirely local-only system**. Services receive data according to the commands and integrations enabled.
 
----
+| Path | External service / data |
+|---|---|
+| Chart tools | Local CDP controls TradingView; the logged-in app uses TradingView services |
+| `pine_check` / `tv pine check` | Sends supplied Pine source to TradingView's compile API |
+| MCP client | Receives tool output; its configured model provider may process that output |
+| Broker adapters | Account, market data and order requests go to cTrader or Tradovate |
+| Planning/review scripts | Selected workflows send market context to Anthropic's API |
+| Notion journal | Configured jobs upload trade records and chart screenshots to Notion |
+| Email reports | Configured jobs send reports through the email provider |
+| News and research jobs | May fetch calendars and other external source data |
 
-## What This Tool Does
+Sessions, state, logs and cached research can also remain on the host. Not every runtime file is ignored by Git; review changes before committing.
 
-- **Morning brief** — scan watchlist, read indicators, apply your rules, print session bias
-- **Pine Script development** — write, inject, compile, debug scripts with AI
-- **Chart navigation** — change symbols, timeframes, zoom to dates, add/remove indicators
-- **Visual analysis** — read indicator values, price levels, drawn levels from custom indicators
-- **Draw on charts** — trend lines, horizontal levels, rectangles, text
-- **Manage alerts** — create, list, delete price alerts
-- **Replay practice** — step through historical bars, practice entries and exits with P&L tracking
-- **Screenshots** — capture chart state
-- **Multi-pane layouts** — 2x2, 3x1 grids with different symbols per pane
-- **Stream data** — JSONL output from your live chart for monitoring scripts
-- **CLI access** — every tool is also a `tv` command, pipe-friendly JSON output
+## Tests and CI
 
----
+| Command | What it runs |
+|---|---|
+| `npm test` | Offline Pine/CLI tests, shared trading libraries and institutional research tests |
+| `npm run test:unit` / `npm run test:all` | Aliases for the complete offline suite |
+| `npm run test:cli` | Offline CLI tests |
+| `npm run test:verbose` | Offline suite with the spec reporter |
+| `npm run test:external` | Explicit network tests submitting sample Pine source to TradingView |
+| `npm run test:e2e` | Explicit live TradingView tests; requires CDP and can change app state |
 
-## How Claude Knows Which Tool to Use
+Default tests exercise production logic and simulated broker failures without credentials, real broker requests or orders. They cover exposure failures, net equity, invalid prices, competing entry attempts and durable signal records. GitHub Actions runs `npm ci` and `npm test` for the supported matrix. Passing tests does not establish broker compatibility in every deployment or strategy profitability.
 
-Claude reads `CLAUDE.md` automatically when working in this project. It contains the full decision tree.
+## MCP tool reference
 
-| You say... | Claude uses... |
-|------------|---------------|
-| "Run my morning brief" | `morning_brief` → apply rules → `session_save` |
-| "What was my bias yesterday?" | `session_get` |
-| "What's on my chart?" | `chart_get_state` → `data_get_study_values` → `quote_get` |
-| "Give me a full analysis" | `quote_get` → `data_get_study_values` → `data_get_pine_lines` → `data_get_pine_labels` → `capture_screenshot` |
-| "Switch to BTCUSD daily" | `chart_set_symbol` → `chart_set_timeframe` |
-| "Write a Pine Script for..." | `pine_set_source` → `pine_smart_compile` → `pine_get_errors` |
-| "Start replay at March 1st" | `replay_start` → `replay_step` → `replay_trade` |
-| "Set up a 4-chart grid" | `pane_set_layout` → `pane_set_symbol` |
-| "Draw a level at 94200" | `draw_shape` (horizontal_line) |
-
----
-
-## Tool Reference (81 MCP tools)
-
-### Morning Brief (new in this fork)
+### Morning brief
 
 | Tool | What it does |
 |------|-------------|
@@ -263,77 +202,40 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 
 ---
 
-## CLI Commands
+## CLI examples
 
-```bash
-tv brief                           # run morning brief
-tv session get                     # get today's saved brief
-tv session save --brief "..."      # save a brief
-
-tv status                          # check connection
-tv quote                           # current price
-tv symbol BTCUSD                   # change symbol
-tv ohlcv --summary                 # price summary
-tv screenshot -r chart             # capture chart
-tv pine compile                    # compile Pine Script
-tv pane layout 2x2                 # 4-chart grid
-tv stream quote | jq '.close'      # monitor price ticks
+```sh
+tv status
+tv quote
+tv symbol BTCUSD
+tv ohlcv --summary
+tv brief
+tv session get
+tv screenshot -r chart
+tv pine --help
 ```
-
-Full command list: `tv --help`
-
----
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| `cdp_connected: false` | TradingView isn't running with `--remote-debugging-port=9222`. Use the launch script. |
-| `ECONNREFUSED` | TradingView isn't running or port 9222 is blocked |
-| MCP server not showing in Claude Code | Check `~/.claude/.mcp.json` syntax, restart Claude Code |
-| `tv` command not found | Run `npm link` from the project directory |
-| `morning_brief` — "No rules.json found" | Run `cp rules.example.json rules.json` and fill it in |
-| `morning_brief` — watchlist empty | Add symbols to the `watchlist` array in `rules.json` |
-| Tools return stale data | TradingView still loading — wait a few seconds |
-| Pine Editor tools fail | Open Pine Editor panel first: `ui_open_panel pine-editor open` |
+| Symptom | Check |
+|---|---|
+| CDP connection refused | TradingView is running with port 9222 enabled on localhost |
+| MCP server missing | Client configuration contains the correct absolute server path |
+| `tv` not found | Run `npm link`, or call `node src/cli/index.js` directly |
+| Morning rules missing | Restore/customize tracked `rules.json`, or supply a rules path |
+| Order rejected after a broker read error | Restore the connection and inspect the rejection; entries stop when risk is unknown |
+| Executor/cooldown lock persists | Verify the owner is stopped and reconcile broker state before manual recovery |
+| Wrong paths or accounts on a new machine | Audit deployment scripts and configs; many were built around a specific VM |
 
----
+## Further documentation
 
-## Architecture
+- [Service map](docs/SERVICE_MAP.md): architecture and module boundaries.
+- [Strategy manifests](scripts/trading/strategies/README.md): strategy registration and validation.
+- [cTrader setup](docs/CTRADER_SETUP.md): authentication and deployment.
+- [Cloud setup](scripts/cloud/ORACLE_CLOUD_SETUP.md): existing VM deployment workflow.
+- [Research findings](research/institutional_algo/FINDINGS.md): out-of-sample results, including rejected candidates.
+- [Contributing](CONTRIBUTING.md): development and verification workflow.
 
-```
-Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
-```
+## License and attribution
 
-- **78 original tools** + **3 morning brief tools** = 81 MCP tools total
-- **Transport**: MCP over stdio + CLI (`tv` command)
-- **Connection**: Chrome DevTools Protocol on localhost:9222
-- **No external network calls** — everything runs locally
-- **Zero extra dependencies** beyond the original
-
----
-
-## Credits
-
-This fork is built on [tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp) by [@tradesdontlie](https://github.com/tradesdontlie). The original tool is the foundation — go star their repo.
-
----
-
-## Disclaimer
-
-This project is provided **for personal, educational, and research purposes only**.
-
-This tool uses the Chrome DevTools Protocol (CDP), a standard debugging interface built into all Chromium-based applications. It does not reverse engineer any proprietary TradingView protocol, connect to TradingView's servers, or bypass any access controls. The debug port must be explicitly enabled by the user via a standard Chromium command-line flag.
-
-By using this software you agree that:
-
-1. You are solely responsible for ensuring your use complies with [TradingView's Terms of Use](https://www.tradingview.com/policies/) and all applicable laws.
-2. This tool accesses undocumented internal TradingView APIs that may change at any time.
-3. This tool must not be used to redistribute, resell, or commercially exploit TradingView's market data.
-4. The authors are not responsible for any account bans, suspensions, or other consequences.
-
-**Use at your own risk.**
-
-## License
-
-MIT — see [LICENSE](LICENSE). Applies to source code only, not to TradingView's software, data, or trademarks.
+MIT; see [LICENSE](LICENSE) for the full license and additional notices. This project is not affiliated with TradingView, Anthropic, cTrader or Tradovate. Obtain account access, subscriptions and data entitlements through the relevant providers. The software includes automated order execution; backtests and safeguards do not guarantee future results or eliminate execution risk.

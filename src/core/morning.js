@@ -32,7 +32,7 @@ function loadRules(rulesPath) {
   }
 
   throw new Error(
-    "No rules.json found. Copy rules.example.json to rules.json and fill in your trading rules.\n" +
+    "No rules.json found. Restore the repository's rules.json and customize your trading rules.\n" +
       "Looked in:\n" +
       candidates
         .filter(Boolean)

@@ -41,6 +41,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import { join } from 'path';
 import os from 'os';
 import { calcLots } from './lib/sizing.mjs';
+import { requireEquity, dailyLossPercent } from './lib/account_risk.mjs';
 import { isCalendarWeekend } from './lib/clock.mjs';
 
 const IS_LINUX  = os.platform() === 'linux';
@@ -142,8 +143,7 @@ async function main() {
   const today = now.toISOString().slice(0, 10);
   const nowMs = now.getTime();
 
-  let equity = 10000;
-  try { const eq = await bridge.getEquity(); equity = eq.equity || eq.balance || equity; } catch (_) {}
+  const equity = requireEquity(await bridge.getEquity());
 
   // ── Per-day loss kill-switch ────────────────────────────────────────────────
   // The ORB roster can fire ~9 configs/day at riskPct each with no built-in cap.
@@ -157,7 +157,7 @@ async function main() {
     const MAX_DAILY_LOSS_PCT = params.orbMaxDailyLossPct ?? 10;
     try {
       const todayPnl = await bridge.getTodayRealizedPnl();
-      const ddPct    = (todayPnl / Math.max(1, equity)) * 100;
+      const ddPct    = dailyLossPercent(todayPnl, equity, MAX_DAILY_LOSS_PCT);
       if (ddPct <= -MAX_DAILY_LOSS_PCT) {
         log(`🛑 ORB KILL-SWITCH: today realised P&L $${todayPnl.toFixed(0)} = ${ddPct.toFixed(1)}% (limit -${MAX_DAILY_LOSS_PCT}%). No more ORB entries today.`);
         saveState(state);
@@ -166,9 +166,7 @@ async function main() {
       }
       log(`Kill-switch OK: today realised ${ddPct.toFixed(1)}% (limit -${MAX_DAILY_LOSS_PCT}%).`);
     } catch (e) {
-      // Fail-open (matches inline_trader) so a transient cTrader read hiccup
-      // doesn't silently disable ORB — but log loudly so a blind switch is visible.
-      log(`⚠ ORB kill-switch check FAILED (${e.message}) — proceeding WITHOUT it this tick`);
+      throw new Error(`Daily risk check unavailable; no ORB entries: ${e.message}`);
     }
   }
 

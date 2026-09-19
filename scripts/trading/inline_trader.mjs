@@ -26,6 +26,7 @@ import { verifyOrderLanded } from './broker_history.mjs';
 import { checkPlan, applyPlanLevels } from './daily_plan_gate.mjs';
 import { applyBlockExpiry } from './params_blocks.mjs';
 import { calcLots, splitLegs, backstopPrice } from './lib/sizing.mjs';
+import { requireEquity, dailyLossPercent, readEntryEquity } from './lib/account_risk.mjs';
 import { instrumentClass, isCrypto as isCryptoSymbol, MIN_SL_FRAC } from './lib/instruments.mjs';
 import { isFxWeekend, entryCutoff, currentSession, weekendCryptoOn, cryptoLateOn } from './lib/clock.mjs';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, openSync, writeFileSync } from 'fs';
@@ -37,7 +38,7 @@ import os from 'os';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const IS_LINUX  = os.platform() === 'linux';
-const DATA_ROOT = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
+const DATA_ROOT = process.env.TRADING_DATA_DIR || (IS_LINUX ? '/home/ubuntu/trading-data' : join(__dirname, '../../data'));
 const LOG_DIR   = join(DATA_ROOT, 'trade_log');
 const LOG_FILE  = join(LOG_DIR, 'trades.csv');
 const PARAMS_FILE = join(DATA_ROOT, 'trading_params.json');
@@ -100,12 +101,9 @@ async function getNews() {
 // and understating the daily-drawdown kill-switch denominator ~9×.
 async function getEquityTruth() {
   if (process.env.BROKER_PROVIDER === 'ctrader') {
-    try {
-      const eq = await (await import('./broker_ctrader.mjs')).getEquity();
-      if (eq && (eq.equity > 0 || eq.balance > 0)) return eq;
-    } catch (_) {}
+    return readEntryEquity((await import('./broker_ctrader.mjs')).getEquity);
   }
-  return getEquity().catch(() => ({}));
+  return readEntryEquity(getEquity);
 }
 
 // ── Param loader — reads trading_params.json each call (hot-reload) ────────────
@@ -171,8 +169,12 @@ function getDailyTotalCount() {
   return count;
 }
 
-// ── Open positions via BlackBull CDP panel ─────────────────────────────────────
+// Open symbols from the selected broker; CDP is only for the legacy UI path.
 async function getOpenSymbols() {
+  if (process.env.BROKER_PROVIDER === 'ctrader') {
+    const positions = await (await import('./broker_ctrader.mjs')).getPositionsWithSymbols();
+    return new Set(positions.map(p => p.symbolName));
+  }
   try {
     await evaluate(`(function(){
       var btns = document.querySelectorAll('button');
@@ -200,8 +202,7 @@ async function getOpenSymbols() {
     })()`);
     return new Set(JSON.parse(json || '[]'));
   } catch(e) {
-    console.log(`  [inline_trader] getOpenSymbols error: ${e.message} — using empty set`);
-    return new Set();
+    throw new Error(`ACCOUNT_RISK_REJECT: open positions unavailable: ${e.message}`);
   }
 }
 
@@ -451,16 +452,15 @@ export async function attemptInlineTrade(setup) {
   try {
     const todayPnl   = await getTodayRealizedPnl();
     const equityData = await getEquityTruth();
-    const equity     = equityData.equity || equityData.balance || 10000;
-    const drawdownPct = (todayPnl / equity) * 100;
-    const MAX_DAILY_DRAWDOWN_PCT = PARAMS.maxDailyDrawdownPct || 3;
+    const equity     = requireEquity(equityData);
+    const MAX_DAILY_DRAWDOWN_PCT = PARAMS.maxDailyDrawdownPct ?? 3;
+    const drawdownPct = dailyLossPercent(todayPnl, equity, MAX_DAILY_DRAWDOWN_PCT);
     if (drawdownPct <= -MAX_DAILY_DRAWDOWN_PCT) {
       log(`Daily drawdown halt: today realised P&L ${todayPnl.toFixed(0)} = ${drawdownPct.toFixed(1)}% (limit -${MAX_DAILY_DRAWDOWN_PCT}%). No more trades today.`); return;
     }
   } catch (e) {
-    // Fail-open on a transient cTrader read error so a hiccup doesn't block all
-    // trading — but log loudly so a persistently-blind halt is visible.
-    log(`⚠ drawdown-halt check failed (${e.message}) — proceeding without it this cycle`);
+    log(`Drawdown check unavailable (${e.message}). No entry this cycle.`);
+    return;
   }
 
   // ── 5e. Sibling-symbol daily-bias gates ────────────────────────────────────
@@ -599,7 +599,8 @@ export async function attemptInlineTrade(setup) {
       const verdict = await bridge.checkExposure({ symbol: setup.label, direction: setup.dir, label: strategyId });
       exposureBlock = verdict.ok ? null : `${setup.label}: ${verdict.reason}`;
     } catch (e) {
-      log(`cTrader exposure check failed (${e.message}) — using the DOM result.`);
+      log(`cTrader exposure check failed (${e.message}). No entry this cycle.`);
+      return;
     }
   }
   if (exposureBlock) { log(`${exposureBlock}. Skip.`); return; }
@@ -614,7 +615,7 @@ export async function attemptInlineTrade(setup) {
   log(`✅ All guards passed. Placing trade (score=${setup.score} dir=${setup.dir.toUpperCase()} Trifecta=${trif}/3 ${conf})`);
 
   const equityData = await getEquityTruth();
-  const equity     = equityData.equity || equityData.balance || 10000;
+  const equity     = requireEquity(equityData);
 
   const [r1, r2, r3] = PARAMS.riskPct || [6.0, 4.2, 3.0];
   // Risk scales with how many concurrent trades are already running this cycle

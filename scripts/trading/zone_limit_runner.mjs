@@ -32,7 +32,8 @@
  *
  * Usage (VM): node scripts/trading/zone_limit_runner.mjs   [--live]
  */
-import { getTrendbars, connect, placeOrder, cancelOrder, getPositions, getSymbolMeta, getEquity } from './broker_ctrader.mjs';
+import { getTrendbars, connect, placeOrder, cancelOrder, getPositions, getSymbolMeta, getEquity, getTodayRealizedPnl } from './broker_ctrader.mjs';
+import { requireEquity, dailyLossPercent } from './lib/account_risk.mjs';
 import { exposurePolicy, exposureVerdict } from './lib/exposure.mjs';
 import { loadPlan } from './daily_plan_gate.mjs';
 import { calcLots } from './lib/sizing.mjs';
@@ -149,8 +150,18 @@ async function main(){
   const today = new Date().toISOString().slice(0, 10);
   const utcHour = new Date().getUTCHours();
 
-  let equity = 10000; try { const e = await getEquity(); equity = e.equity || e.balance || equity; } catch {}
   const P = params();
+  let equity = null;
+  let riskBlocked = null;
+  try {
+    equity = requireEquity(await getEquity());
+    if (LIVE) {
+      const limit = P.maxDailyDrawdownPct ?? 3;
+      if (dailyLossPercent(await getTodayRealizedPnl(), equity, limit) <= -limit) {
+        riskBlocked = `daily loss limit ${limit}% reached`;
+      }
+    }
+  } catch (e) { riskBlocked = `account risk unavailable: ${e.message}`; }
   const riskPct = Array.isArray(P.riskPct) ? P.riskPct[0] : (P.riskPct ?? 1);
 
   const { stale, zones } = planZones(loadPlan());
@@ -160,17 +171,19 @@ async function main(){
 
   // Symbols we need market data for: everything planned plus everything resting.
   const syms = [...new Set([...zones.map(z => z.sym), ...Object.values(state.orders).map(o => o.sym)])];
-  // Open positions per symbol, judged by the exposure policy (lib/exposure.mjs). A read
-  // failure means "none", like the old open-volume check (fail open).
-  let allPositions = [];
-  try { allPositions = await getPositions(); } catch (e) { log(`  positions read failed (${e.message}) — treating as none`); }
+  // Unknown exposure blocks entries. Still run the cancellation pass so an outage
+  // cannot prevent risk-reducing cleanup of orders whose IDs we already know.
+  let allPositions = null;
+  try { allPositions = await getPositions(); } catch (e) { riskBlocked = `positions unavailable: ${e.message}`; }
   const exposure = exposurePolicy(P, process.env.CTRADER_ACCOUNT_ID);
   const onSymbol = {}, bars = {};
   for (const s of syms) {
-    try { const id = (await getSymbolMeta(s)).id; onSymbol[s] = allPositions.filter(p => p.symbolId === id); } catch { onSymbol[s] = []; }
+    try { const id = (await getSymbolMeta(s)).id; onSymbol[s] = allPositions?.filter(p => p.symbolId === id) ?? null; }
+    catch { onSymbol[s] = null; }
     try { bars[s] = await getTrendbars(s, { period: TF, fromMs: Date.now() - 60 * 86400000, windowDays: 20 }); } catch { bars[s] = null; }
   }
-  const blocked = (sym, dir) => !exposureVerdict({ positions: onSymbol[sym] || [], dir, label: STRATEGY_ID, policy: exposure }).ok;
+  const blocked = (sym, dir) => !Array.isArray(onSymbol[sym])
+    || !exposureVerdict({ positions: onSymbol[sym], dir, label: STRATEGY_ID, policy: exposure }).ok;
 
   // ── 1. CANCEL pass ──
   for (const [key, o] of Object.entries(state.orders)) {
@@ -189,14 +202,19 @@ async function main(){
       const why = dayRolled ? 'plan-rolled' : gone ? 'zone-left-plan' : invalid ? 'invalidation-breached'
                 : far ? 'price-ran-away' : hasPos ? 'position-open' : 'pre-EOD-cutoff';
       log(`  CANCEL ${o.sym} ${o.dir} LIMIT @${o.entry} (${why})`);
-      if (LIVE && o.orderId) { try { await cancelOrder(o.orderId); } catch (e) { log(`   cancel err ${e.message}`); } }
+      if (LIVE && o.orderId) {
+        try { await cancelOrder(o.orderId); }
+        catch (e) { log(`   cancel err ${e.message}; keeping order tracked for retry`); continue; }
+      }
       delete state.orders[key];
     }
   }
 
   // ── 2. PLACE pass ──
   let total = Object.keys(state.orders).length;
-  if (utcHour >= CFG.eodCutoffUTC) {
+  if (riskBlocked) {
+    log(`  no new orders: ${riskBlocked}`);
+  } else if (utcHour >= CFG.eodCutoffUTC) {
     log(`  past ${CFG.eodCutoffUTC}:00 UTC — not resting new orders into the EOD flatten`);
   } else if ((process.env.PLAN_GATE ?? 'on') !== 'off' && !inTradeWindow()) {
     // assertOrderSafety's plan gate rejects placements outside the trade windows, so

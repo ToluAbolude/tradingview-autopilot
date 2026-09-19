@@ -32,6 +32,7 @@ import { join } from 'path';
 import os from 'os';
 import { fetchHighImpactNews, filterForSymbol } from './news_checker.mjs';
 import { calcLots } from './lib/sizing.mjs';
+import { requireEquity, dailyLossPercent } from './lib/account_risk.mjs';
 import { isCrypto, instrumentClass } from './lib/instruments.mjs';
 import { isCalendarWeekend, weekendCryptoOn } from './lib/clock.mjs';
 import { signalErrors } from './lib/contracts.mjs';
@@ -132,15 +133,14 @@ async function main() {
   const state  = loadState();
   const nowMs  = now.getTime();
 
-  let equity = 10000;
-  try { const eq = await bridge.getEquity(); equity = eq.equity || eq.balance || equity; } catch (_) {}
+  const equity = requireEquity(await bridge.getEquity());
 
   // Daily kill switch on whole-account realised P&L (same source as the live system).
   if (LIVE) {
     const MAX_DAILY_LOSS_PCT = params.confirmMaxDailyLossPct ?? 6;
     try {
       const todayPnl = await bridge.getTodayRealizedPnl();
-      const ddPct    = (todayPnl / Math.max(1, equity)) * 100;
+      const ddPct    = dailyLossPercent(todayPnl, equity, MAX_DAILY_LOSS_PCT);
       if (ddPct <= -MAX_DAILY_LOSS_PCT) {
         log(`🛑 KILL-SWITCH: today realised ${ddPct.toFixed(1)}% (limit -${MAX_DAILY_LOSS_PCT}%). No more entries today.`);
         log('═══ STRATEGY RUNNER halted (kill-switch) ═══');
@@ -148,7 +148,7 @@ async function main() {
       }
       log(`Kill-switch OK: today realised ${ddPct.toFixed(1)}% (limit -${MAX_DAILY_LOSS_PCT}%).`);
     } catch (e) {
-      log(`⚠ kill-switch check FAILED (${e.message}) — proceeding WITHOUT it this tick`);
+      throw new Error(`Daily risk check unavailable; no entries: ${e.message}`);
     }
   }
 

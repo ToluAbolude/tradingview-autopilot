@@ -1,44 +1,32 @@
 # Contributing
 
-Thanks for your interest in contributing to tradingview-mcp.
-
-## Scope
-
-This tool is a **local bridge** between Claude Code and the TradingView Desktop app running on your machine. All contributions must stay within this scope.
-
-### What's in scope
-
-- Improving reliability of existing tools (better selectors, error handling, timeouts)
-- Adding CLI commands that mirror existing MCP tool capabilities
-- Bug fixes and test coverage
-- Documentation improvements
-- Pine Script development workflow enhancements
-- UI automation for the locally running Desktop app
-
-### What's out of scope
-
-Contributions **must not** add features that:
-
-- **Connect directly to TradingView's servers** — all data access must go through the locally running Desktop app via CDP
-- **Bypass authentication or subscription restrictions** — this tool requires a valid TradingView account and subscription
-- **Scrape, cache, or redistribute market data** — no data storage, no databases, no export-to-CSV of price data
-- **Enable automated trading or order execution** — this is a chart reading/development tool, not a trading bot framework
-- **Reverse-engineer or redistribute TradingView's proprietary code** — no bundled TradingView source, no charting library code
-- **Access other users' data** — private scripts, watchlists, or account information of others
-
-If you're unsure whether a feature fits, open an issue to discuss before submitting a PR.
+The repository includes a TradingView MCP/CLI bridge, strategy research, and automated execution adapters. Contributions may improve any of these components. Preserve attribution to the original tradingview-mcp project.
 
 ## Development
 
-```bash
-npm install
-npm test          # 29 offline tests (no TradingView needed)
-tv status         # verify CDP connection (TradingView must be running)
+Use Node.js 20 or newer:
+
+```sh
+npm ci
+npm test
 ```
 
-## Pull Requests
+`npm test`, `test:unit` and `test:all` run the complete offline suite. They do not require TradingView, broker credentials, or network access. The runner discovers top-level `tests/*.test.js` / `*.test.mjs` (excluding E2E), `scripts/trading/lib/*.test.mjs`, and `scripts/trading/institutional/*.test.mjs`.
 
-- Keep changes focused — one feature or fix per PR
-- Add tests for new functionality where possible
-- Ensure `npm test` passes (29/29)
-- Test against a live TradingView Desktop instance before submitting
+`npm run test:external` explicitly sends sample Pine source to TradingView's compile API. `npm run test:e2e` requires a logged-in TradingView app on CDP port 9222 and may change app state. Use a disposable chart for E2E. Neither command belongs in default offline CI.
+
+GitHub Actions runs the offline suite on Windows and Ubuntu with Node 20, 22 and 24.
+
+## Engineering expectations
+
+- Put shared trading logic in `scripts/trading/lib/`; strategy modules produce signals and leave execution to the common broker path.
+- Keep entry checks closed when required account, exposure, price or persistence state is unavailable. Keep risk-reducing exits independent of entry gates.
+- Add regression tests for meaningful failures such as broker errors, invalid equity, concurrent submissions or lost acknowledgments. Test production functions rather than copies.
+- Use fake transports or injected dependencies for broker tests. Never place real orders from tests or CI.
+- Preserve strategy ownership and the attempt ledger. A timeout does not establish that an order was rejected.
+- Never commit credentials, session tokens or private runtime data. Document new external data flows and configuration.
+- Keep the README consistent with the code. Distinguish dry runs from modes that can route orders through another integration.
+
+## Pull requests
+
+Explain the resulting behavior, why it is needed, and checks run. Call out operational changes such as stricter rejection, lock recovery, precision or configuration. Only claim live verification when it was actually performed in an appropriate account.
