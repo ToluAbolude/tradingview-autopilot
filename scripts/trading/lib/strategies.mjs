@@ -25,7 +25,14 @@ export const TIMEFRAMES = {
 export const FILTERS = ['prior_day_range', 'news_recent'];
 
 const KEYS = new Set(['id', 'description', 'enabled', 'mode', 'account', 'logic', 'instruments',
-  'timeframe', 'history_days', 'params', 'filters', 'target', 'risk']);
+  'timeframe', 'history_days', 'params', 'filters', 'target', 'risk', 'gates']);
+
+// System gates a strategy may opt out of, because its backtest never saw them:
+//   plan      — the scanner account's daily-plan rule (a planned zone, inside the trade windows)
+//   fib_veto  — assertOrderSafety's block on continuation entries past a 61.8% retrace
+//   daily_eod — confirm_eod_close's 20:00 UTC close of losing positions
+// Safety gates — stop floors, lot caps, exposure, the Friday weekend flatten — are never optional.
+export const GATES = ['plan', 'fib_veto', 'daily_eod'];
 const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
 
 /** Everything wrong with a manifest, or []. `folder` is the folder it was read from. */
@@ -53,8 +60,37 @@ export function manifestErrors(m, folder) {
   if (!isObj(m.risk) || !(Number.isFinite(m.risk.per_trade_pct) && m.risk.per_trade_pct > 0 && m.risk.per_trade_pct <= 2)) {
     e.push('risk.per_trade_pct must be above 0 and at most 2');
   }
+  if (isObj(m.risk) && m.risk.stop_mult !== undefined && !(Number.isFinite(m.risk.stop_mult) && m.risk.stop_mult >= 1 && m.risk.stop_mult <= 3)) {
+    e.push('risk.stop_mult must be a number from 1 to 3');
+  }
+  if (isObj(m.target) && m.target.own !== undefined && typeof m.target.own !== 'boolean') e.push('target.own must be true or false');
+  if (m.gates !== undefined) {
+    if (!isObj(m.gates)) e.push('gates must be an object');
+    else for (const [k, v] of Object.entries(m.gates)) {
+      if (!GATES.includes(k)) e.push(`gates.${k} is not a gate you can switch off (${GATES.join(', ')})`);
+      else if (typeof v !== 'boolean') e.push(`gates.${k} must be true or false`);
+    }
+  }
   return e;
 }
+
+/**
+ * The order's stop and target for a signal under its manifest. The stop sits
+ * risk.stop_mult x the signal's own stop distance from entry; the target is the
+ * signal's own (when it brings one on the profit side and target.own isn't false) or
+ * target.r x that risk. The same arithmetic as strategy_lab's variant(), so a manifest
+ * trades exactly the brackets its backtest chose.
+ */
+export function bracket(sig, m) {
+  const long = sig.dir === 'long';
+  const risk = Math.abs(sig.entry - sig.sl) * (m.risk?.stop_mult ?? 1);
+  const sl   = long ? sig.entry - risk : sig.entry + risk;
+  const own  = m.target?.own !== false && sig.tp != null && (long ? sig.tp > sig.entry : sig.tp < sig.entry);
+  return { sl, tp: own ? sig.tp : (long ? sig.entry + m.target.r * risk : sig.entry - m.target.r * risk), risk };
+}
+
+/** Is `gate` on for this manifest? Every gate is on unless the manifest opts out. */
+export const gateOn = (m, gate) => m?.gates?.[gate] !== false;
 
 /**
  * Read every strategies/<id>/manifest.json, validate it and import its logic.
@@ -86,4 +122,16 @@ export async function loadStrategies(dir = STRATEGIES_DIR) {
     if (problems.length) errors.push({ id: folder, errors: problems });
   }
   return { strategies, errors };
+}
+
+/** Every valid manifest by id, WITHOUT importing logic — for jobs that only need settings. */
+export function readManifests(dir = STRATEGIES_DIR) {
+  const out = new Map();
+  if (!existsSync(dir)) return out;
+  for (const d of readdirSync(dir, { withFileTypes: true })) {
+    const file = join(dir, d.name, 'manifest.json');
+    if (!d.isDirectory() || !existsSync(file)) continue;
+    try { const m = JSON.parse(readFileSync(file, 'utf8')); if (!manifestErrors(m, d.name).length) out.set(m.id, m); } catch {}
+  }
+  return out;
 }

@@ -33,7 +33,7 @@ import { fibVetoState, checkFibVeto } from './fib_veto.mjs';
 import { instrumentClass as _instrumentClass, MIN_SL_FRAC } from './lib/instruments.mjs';
 import { isSundayReopen } from './lib/clock.mjs';
 import { exposurePolicy, exposureVerdict } from './lib/exposure.mjs';
-import { legVolumes } from './lib/sizing.mjs';
+import { legVolumes, MAX_OVERRISK } from './lib/sizing.mjs';
 const require = createRequire(import.meta.url);
 const protobuf = require('protobufjs');
 
@@ -445,9 +445,18 @@ export async function checkExposure({ symbol, direction, label = '', policy }) {
   return exposureVerdict({ positions, dir, label, policy: policy ?? exposurePolicy(_readParams(), process.env.CTRADER_ACCOUNT_ID) });
 }
 
-export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false, label = '' }) {
+// planGate / fibVeto: off only for a plug-in strategy whose manifest opts out of those
+// gates (lib/strategies GATES) — its backtest never saw them, so applying them would
+// trade an untested strategy. Every other caller leaves them on.
+export async function assertOrderSafety({ symbol, direction, units, entry, slPrice, allowStack = false, isLimit = false, label = '', planGate = true, fibVeto = true }) {
   const cls = _instrumentClass(symbol);
   const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
+
+  // calcLots returns 0 when no tradable size fits the risk budget (lib/sizing.mjs).
+  // Checked first: placing it anyway would send the broker's minimum volume instead.
+  if (Number.isFinite(units) && units <= 0) {
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: no safe size (${units} lots) — the smallest tradable size would risk more than ${MAX_OVERRISK}x the budget`);
+  }
 
   if (!Number.isFinite(slPrice) || slPrice <= 0) {
     throw new Error(`ORDER_SAFETY_REJECT ${symbol}: missing/invalid slPrice (${slPrice})`);
@@ -485,7 +494,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   // per-strategy experiment (2131377) is a separate forward test and is deliberately
   // untouched — same opt-out shape as DEGRADED_ENTRY_GUARD above.
   // Kill switches: PLAN_GATE=off, or PLAN_GATE_ACCOUNT to re-point it.
-  if (String(process.env.CTRADER_ACCOUNT_ID || '') === String(process.env.PLAN_GATE_ACCOUNT || '2118552')
+  if (planGate && String(process.env.CTRADER_ACCOUNT_ID || '') === String(process.env.PLAN_GATE_ACCOUNT || '2118552')
       && (process.env.PLAN_GATE ?? 'on') !== 'off') {
     const { checkPlan } = await import('./daily_plan_gate.mjs');
     const verdict = checkPlan({ label: symbol, dir, entry });
@@ -548,7 +557,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   // rally") entries are blocked until the leg resolves. Counter-trend entries
   // pass. Fail-open on data errors like the price check below; the H1 state is
   // cached 10 min per symbol. Kill switch: FIB_VETO=off.
-  if ((process.env.FIB_VETO || 'on') !== 'off') {
+  if (fibVeto && (process.env.FIB_VETO || 'on') !== 'off') {
     try {
       const st = await _fibVetoStateFor(symbol);
       const verdict = checkFibVeto(st, dir);
@@ -595,7 +604,7 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
  *   tpPrice, slPrice = absolute price targets matching the existing
  *                      execute_trade.placeOrder API.
  */
-export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null, label = '' }) {
+export async function placeOrder({ symbol, direction, units, entry, tpPrice, slPrice, limitPrice = null, label = '', planGate = true, fibVeto = true }) {
   await connect();
   if (!tpPrice || !slPrice) throw new Error('tpPrice + slPrice required.');
   // Clamp to the per-class lot cap instead of letting assertOrderSafety REJECT the
@@ -610,7 +619,7 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   // For a LIMIT, safety checks use the limit price as the reference (its SL must be
   // valid vs the limit), and the frozen-chart deviation check is skipped (a limit
   // rests away from live by design).
-  await assertOrderSafety({ symbol, direction, units, entry: limitPrice != null ? limitPrice : entry, slPrice, isLimit: limitPrice != null, label });
+  await assertOrderSafety({ symbol, direction, units, entry: limitPrice != null ? limitPrice : entry, slPrice, isLimit: limitPrice != null, label, planGate, fibVeto });
   const meta = await _symbolMetaFor(symbol);
   const tradeSide = (direction === 'long' || direction === 'buy') ? 1 : 2;
   // Quantize to broker step + enforce min volume
@@ -618,6 +627,11 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
   const rawVol = Math.round(units * meta.lotSize);
   const volume = Math.max(minV, Math.floor(rawVol / step) * step);
+  // The broker's minimum volume can inflate a small risk-sized order many times over —
+  // a floor calcLots can't see, because only the broker knows its minimum.
+  if (volume > MAX_OVERRISK * units * meta.lotSize) {
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: broker minimum volume ${volume} is ${(volume / (units * meta.lotSize)).toFixed(1)}x the risk-sized ${units} lots`);
+  }
   const owner = label ? { label: String(label).slice(0, 100) } : {};   // which strategy opened it (cTrader max 100)
 
   // ── LIMIT entry: rest a pending order AT the level (S&R zone), bracket relative
@@ -729,6 +743,9 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
   const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
   const _quantize = (v) => Math.max(minV, Math.floor(v / step) * step);
   const totalVol   = _quantize(Math.round(totalUnits * meta.lotSize));
+  if (totalVol > MAX_OVERRISK * totalUnits * meta.lotSize) {        // broker minimum inflated it
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: broker minimum volume ${totalVol} is ${(totalVol / (totalUnits * meta.lotSize)).toFixed(1)}x the risk-sized ${totalUnits} lots`);
+  }
 
   // Per-leg volume. Honors a caller's legUnits (oil's uneven int split, e.g.
   // 5 → [1,2,2]) and, crucially, leaves a DELIBERATE partial partial — see

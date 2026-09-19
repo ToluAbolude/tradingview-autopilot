@@ -668,6 +668,9 @@ export async function attemptInlineTrade(setup) {
   } catch (e) { log(`attempted_orders.json write failed: ${e.message}`); }
 
   const totalLots = calcLots(setup.label, riskPct, equity, setup.entry, setup.sl);
+  // 0 = no tradable size fits the risk budget (lib/sizing.mjs). The splitLegs fallback
+  // below would otherwise turn it into a minimum-lot trade.
+  if (!(totalLots > 0)) { log(`✗ no safe size for ${setup.label} at ${riskPct}% risk — skipped`); return; }
   // Split into 3 legs; for oil this may be uneven (e.g. 5 → [1,2,2]).
   // If 3 legs at minLeg won't fit (shouldn't happen — calcLots enforces ≥ 3 for oil
   // and ≥ 0.03 elsewhere), fall back to a single leg of totalLots.

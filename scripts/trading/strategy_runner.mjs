@@ -35,7 +35,7 @@ import { calcLots } from './lib/sizing.mjs';
 import { isCrypto, instrumentClass } from './lib/instruments.mjs';
 import { isCalendarWeekend, weekendCryptoOn } from './lib/clock.mjs';
 import { signalErrors } from './lib/contracts.mjs';
-import { loadStrategies, TIMEFRAMES } from './lib/strategies.mjs';
+import { loadStrategies, TIMEFRAMES, bracket, gateOn } from './lib/strategies.mjs';
 
 const IS_LINUX  = os.platform() === 'linux';
 const DATA_ROOT = IS_LINUX ? '/home/ubuntu/trading-data' : 'C:/Users/Tda-d/tradingview-mcp-jackson/data';
@@ -202,19 +202,18 @@ async function main() {
 
     const invalid = signalErrors({ strategyId: m.id, symbol, tf, dir: sig.dir, ts: sig.ts, entry: sig.entry, sl: sig.sl });
     if (invalid.length) { log(`  ${tag}: invalid signal — ${invalid.join('; ')} — skip`); return; }
-    const risk = Math.abs(sig.entry - sig.sl);
-    // A strategy may supply its own TP (e.g. jadecap targets opposite session
-    // liquidity, not a fixed R multiple); it must be on the profit side.
-    const ownTp = sig.tp != null && (sig.dir === 'long' ? sig.tp > sig.entry : sig.tp < sig.entry);
-    const tp    = ownTp ? sig.tp : (sig.dir === 'long' ? sig.entry + m.target.r * risk : sig.entry - m.target.r * risk);
+    // Stop = risk.stop_mult x the signal's own; target = the strategy's own when it is on
+    // the profit side (jadecap targets opposite session liquidity) unless target.own is
+    // false, else target.r x risk. One function, shared with the tests (lib/strategies).
+    const { sl, tp, risk } = bracket(sig, m);
     const riskPct = m.risk.per_trade_pct;
-    const lots  = calcLots(symbol, riskPct, equity, sig.entry, sig.sl);
+    const lots  = calcLots(symbol, riskPct, equity, sig.entry, sl);
     const placing = LIVE && m.mode === 'live';
 
     const record = {
       ts: now.toISOString(), mode: placing ? 'live-demo' : LIVE ? 'paper' : 'dry-run',
       strategy: m.id, symbol, tf, dir: sig.dir,
-      entry: +sig.entry.toFixed(5), sl: +sig.sl.toFixed(5), tp: +tp.toFixed(5),
+      entry: +sig.entry.toFixed(5), sl: +sl.toFixed(5), tp: +tp.toFixed(5),
       riskR: +(Math.abs(tp - sig.entry) / risk).toFixed(2), lots, riskPct, equity: +equity.toFixed(2),
       reason: sig.reason || null, barT: lastClosed.t,
     };
@@ -224,7 +223,8 @@ async function main() {
         // Pass `entry` => ATOMIC path: SL/TP attach on the order itself (relative
         // distance from fill). placeOrder still runs assertOrderSafety.
         const sentAt = Date.now();
-        const res = await bridge.placeOrder({ symbol, direction: sig.dir, units: lots, entry: sig.entry, tpPrice: tp, slPrice: sig.sl, label: m.id });
+        const res = await bridge.placeOrder({ symbol, direction: sig.dir, units: lots, entry: sig.entry, tpPrice: tp, slPrice: sl, label: m.id,
+          planGate: gateOn(m, 'plan'), fibVeto: gateOn(m, 'fib_veto') });
         record.positionId = Number(res?.position?.positionId || res?.positionId) || null;
         // ORDER_ACCEPTED can arrive without the position object (observed 2026-07-03,
         // stage_s2/US30) — recover the id so bracket-verify + attribution still run.

@@ -1,0 +1,16 @@
+{
+  "id": "confluence_xau",
+  "description": "Trend + level + signal confluence on gold H1, stop 1.5x the strategy's own, fixed 4R target. strategy_lab 2026-09-19: tuned on the first 60% of 3 years of H1, then +$4,098 on the unseen last 40% (77 trades, 31% win rate, +$2,904 without its 3 best trades) at $100 risk. Starts at half the lab's 0.95% size, and opts out of the gates its backtest never saw.",
+  "enabled": true,
+  "mode": "live",
+  "account": "2118552",
+  "logic": { "module": "confluence_trifecta" },
+  "instruments": ["XAUUSD"],
+  "timeframe": "60",
+  "history_days": 20,
+  "params": {},
+  "filters": [],
+  "gates": { "plan": false, "fib_veto": false, "daily_eod": false },
+  "target": { "r": 4, "own": false },
+  "risk": { "per_trade_pct": 0.5, "stop_mult": 1.5 }
+}
