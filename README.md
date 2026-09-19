@@ -2,7 +2,7 @@
 
 A TradingView MCP server and CLI, with optional strategy research and automated broker execution. The chart bridge builds on [tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp) by [@tradesdontlie](https://github.com/tradesdontlie), with the morning-brief workflow from the Jackson fork.
 
-The repository now includes cTrader and Tradovate adapters, strategy plug-ins, position management, journals, and cloud job scripts. Starting the MCP server does **not** start the trading runners.
+The repository now includes a cTrader adapter, strategy plug-ins, position management, journals, and cloud job scripts. Starting the MCP server does **not** start the trading runners.
 
 ## Capabilities and boundaries
 
@@ -12,7 +12,7 @@ The repository now includes cTrader and Tradovate adapters, strategy plug-ins, p
 | Morning brief | Scan a watchlist and return chart data plus rules for an assistant to interpret |
 | `scripts/trading/strategies` | Strategy manifests with instruments, accounts, risk settings and logic modules |
 | `scripts/trading/lib` | Shared sizing, exposure, clock, validation and execution-state functions |
-| Broker adapters and runners | Submit and manage orders through cTrader Open API or Tradovate |
+| Broker adapters and runners | Submit and manage orders through cTrader Open API |
 | Research and backtests | Strategy evaluation, costs, walk-forward tests and robustness checks |
 | Cloud scripts and reports | Scheduling, health checks, Notion journals and optional email reports |
 
@@ -71,7 +71,6 @@ On Windows, use an absolute path such as `C:/projects/tradingview-autopilot/src/
 Read [cTrader setup](docs/CTRADER_SETUP.md), the [service map](docs/SERVICE_MAP.md), and the [strategy manifest reference](scripts/trading/strategies/README.md) before configuring a runner. Some older operational notes describe previous deployments; verify paths and account IDs against the code you run.
 
 - cTrader uses `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`, `CTRADER_ACCESS_TOKEN`, `CTRADER_ACCOUNT_ID` and `CTRADER_ENV`. `BROKER_PROVIDER=ctrader` selects it in the scanner execution path. Supply credentials in the process environment; scripts do not universally load `.env` automatically.
-- Tradovate uses an authenticated browser session plus its `TVO_*` settings. ORB Tradovate routing can be enabled by `TVO_LIVE=on` **or** the deployment's `.tvo_live` flag, independently of the runner's `--live` argument. Check both before using a dry run.
 - `strategy_runner.mjs` defaults to dry-run; its `--live` mode also requires `CTRADER_ENV=demo` and a manifest with `mode: "live"`. Other runners have their own activation rules.
 - Keep credentials outside source control. Review accounts, symbol mappings, risk parameters, manifests, data directories and schedules before enabling orders. Committed settings describe an existing deployment, not a portable account template.
 
@@ -80,8 +79,6 @@ Read [cTrader setup](docs/CTRADER_SETUP.md), the [service map](docs/SERVICE_MAP.
 The cTrader entry path rejects unavailable exposure, invalid equity, invalid order prices, and unavailable or stale market data for enabled checks. Equity uses balance plus the broker's net unrealized P&L in the deposit currency, respecting the separate money precision of each response. See [cTrader's P&L documentation](https://help.ctrader.com/open-api/profit-loss-calculation/).
 
 Execution runners no longer substitute a fixed account balance when equity reads fail. Daily-loss checks block new entries when required data cannot be read. Closing positions and cancelling orders remain separate from entry checks. The zone-limit runner continues cancellation when account risk is unavailable and retains failed cancellations for retry.
-
-Tradovate wraps submission, fill polling, bracket placement and verification in one recovery boundary. Failures after a potentially accepted entry trigger cancellation and liquidation attempts for that contract, with explicit reporting when recovery cannot be confirmed. Bracket verification checks the two IDs returned by [placeOCO](https://partner.tradovate.com/api/rest-api-endpoints/orders/place-oco). A lost acknowledgement still requires reconciliation before retrying.
 
 Market-entry cooldowns use an atomic filesystem mutex and durable timestamp, scoped to broker account and symbol, and to strategy when the exposure policy permits sharing. The cooldown is 60 seconds; it is not a broker-side exactly-once guarantee. Resting limits are exempt because the zone runner can deliberately rest both directions.
 
@@ -100,7 +97,7 @@ This is **not an entirely local-only system**. Services receive data according t
 | Chart tools | Local CDP controls TradingView; the logged-in app uses TradingView services |
 | `pine_check` / `tv pine check` | Sends supplied Pine source to TradingView's compile API |
 | MCP client | Receives tool output; its configured model provider may process that output |
-| Broker adapters | Account, market data and order requests go to cTrader or Tradovate |
+| Broker adapters | Account, market data and order requests go to cTrader |
 | Planning/review scripts | Selected workflows send market context to Anthropic's API |
 | Notion journal | Configured jobs upload trade records and chart screenshots to Notion |
 | Email reports | Configured jobs send reports through the email provider |
@@ -229,6 +226,7 @@ tv pine --help
 
 ## Further documentation
 
+- [Solution architecture](docs/SOLUTION_ARCHITECTURE.md): deployed components, diagrams, data flows, safety boundaries, operations and proposed evolution.
 - [Service map](docs/SERVICE_MAP.md): architecture and module boundaries.
 - [Strategy manifests](scripts/trading/strategies/README.md): strategy registration and validation.
 - [cTrader setup](docs/CTRADER_SETUP.md): authentication and deployment.
@@ -238,4 +236,4 @@ tv pine --help
 
 ## License and attribution
 
-MIT; see [LICENSE](LICENSE) for the full license and additional notices. This project is not affiliated with TradingView, Anthropic, cTrader or Tradovate. Obtain account access, subscriptions and data entitlements through the relevant providers. The software includes automated order execution; backtests and safeguards do not guarantee future results or eliminate execution risk.
+MIT; see [LICENSE](LICENSE) for the full license and additional notices. This project is not affiliated with TradingView, Anthropic or cTrader. Obtain account access, subscriptions and data entitlements through the relevant providers. The software includes automated order execution; backtests and safeguards do not guarantee future results or eliminate execution risk.

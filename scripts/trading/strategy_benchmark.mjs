@@ -17,7 +17,7 @@
  *   ORB-SESSIONS     — orb_runner dry-run forward-test, outcomes replayed from real
  *                      cTrader M5 bars (TP/SL first-touch, conservative both-touch =
  *                      loss, 21:00 UTC intraday cutoff exit).
- *   ZONE-LIMITS / TVO-TRADEIFY / KURISKO-2020 — status rows (dry-run / armed /
+ *   ZONE-LIMITS / KURISKO-2020 — status rows (dry-run / armed /
  *                      not scheduled): registered so the suite is complete, graded
  *                      only once they produce fills.
  *
@@ -72,7 +72,6 @@ const BASELINE = {
   'EXP/stage_s2':            { note: 'IS +15.6R / OOS +37.9R (3R-capped), ~1-2 trades/yr — validates execution not stats' },
   'ORB-SESSIONS':        { note: 'per-config: XAUUSD@2R PF1.59 · US30@2R PF1.29 · NAS100@1R WR56% · SPX500@2R PF1.35 (orb_oos survivors)' },
   'ZONE-LIMITS':         { pf: 1.18, note: '+703R reversal_sr_backtest, robust OOS — dry-run, no fills yet' },
-  'TVO-TRADEIFY':        { note: 'routes ORB signals to Tradeify 25k futures; armed 2026-07-10, no fills yet' },
   'KURISKO-2020':        { pf: 1.35, note: 'PF1.35 @0.08R cost on conditioned slice — built, NOT scheduled' },
 };
 
@@ -242,7 +241,7 @@ function phaseReport() {
       if (id.startsWith('EXP/') && !cj.entrants[id]) add(id, null);
   }
   if (sj) add('ORB-SESSIONS', sj.orb, { paper: true });
-  add('ZONE-LIMITS', null); add('TVO-TRADEIFY', null); add('KURISKO-2020', null);
+  add('ZONE-LIMITS', null); add('KURISKO-2020', null);
 
   const runTs = new Date().toISOString();
   const fR = n => n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(2) + 'R';

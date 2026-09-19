@@ -43,7 +43,6 @@ A collection of sub-signals that can only execute together counts as **one** ent
 | **EXP/jadecap_fvg** | JadeCap session-raid → FVG retrace, BTCUSD H1 | cTrader 2131377 | LIVE (demo) |
 | **EXP/stage_s2** | Stage-2 daily breakout (3R cap), US30 + ETHUSD D1 | cTrader 2131377 | LIVE (demo) |
 | **ORB-SESSIONS** | `orb_runner` session ORB: XAUUSD/US30/NAS100 @ Asia, SPX500 @ London — dry-run; outcomes replayed against real M5 bars | paper (cTrader data) | FORWARD-TEST |
-| **TVO-TRADEIFY** | Same ORB signals routed to Tradeify Lightning 25k futures (`broker_tradovate.mjs`, `.tvo_live` kill switch) | Tradovate **55798247** | ARMED 2026-07-10, no fills yet |
 | **ZONE-LIMITS** | `zone_limit_runner` — resting limits at active S/R zones | dry-run | FORWARD-TEST, no fills yet |
 | **KURISKO-2020** | Kurisko 20/20 bull/bear flag (conditioned slice) | — | BUILT, not scheduled |
 
@@ -58,9 +57,8 @@ R = realised net / risk-$ sized at placement. Ledger truth: positions reconciled
 | **TP-hit %** | trades reaching ≥90% of target R | The operator's primary success metric ("TP-hit rate, not trade count"). No external norm; tracked for trend. |
 | **ExpR** (expectancy) | mean R per closed trade | > 0 required; **≥ +0.2R/trade** sustained is a solid intraday edge; the system's own validated subset (edge_replay) ran **+0.4R**. |
 | **PF** (profit factor) | gross win R / gross loss R | < 1.0 losing · 1.0–1.25 noise/marginal · 1.25–1.5 workable · **1.5–1.75 good** · **> 1.75 strong**. The FundedNext 17k-account study (see RESEARCH notes): consistently-paid funded traders clustered at **PF > 1.75, ≤ 15 trades/wk, 1–3 symbols**. |
-| **MaxDD** | peak-to-trough on the cumulative R (or $) curve | Prop-firm hard limits: **Tradeify 25k = $1,000 EOD-trailing (4%)**, FTMO 10%. Professional norm: drawdown smaller than annual gain (recovery factor > 1, ideally > 2). |
+| **MaxDD** | peak-to-trough on the cumulative R (or $) curve | Compare with the configured account drawdown limit. Professional norm: drawdown smaller than annual gain (recovery factor > 1, ideally > 2). |
 | **n** (sample) | closed trades since epoch | **n ≥ 25–30 before grading** (this repo's weekly-review rule matches the common statistical minimum); n ≥ 100 for a stable PF estimate. Anything under ~10 is anecdote. |
-| **Consistency** | largest day / total profit | Tradeify enforces **20%** — relevant to TVO-TRADEIFY payouts. |
 | Sharpe / Sortino | risk-adjusted daily returns | > 1 acceptable, > 2 good. **Not yet computed** — the valid-data window (since 2026-06-29) is too short for a meaningful daily series; add once ~60 trading days exist. |
 
 Grades (same thresholds as the Friday weekly review): **PASS** = n≥25 & ExpR>0 & PF≥1.5 ·
@@ -84,7 +82,6 @@ Grades (same thresholds as the Friday weekly review): **PASS** = n≥25 & ExpR>0
 | EXP/jadecap_fvg (BTCUSD) | IDLE | 0 | — | — | — | — | — | — | Signals emitted but fib-veto/safety-gated so far |
 | ORB-SESSIONS *(paper)* | CUT | 15 (0) | 33% | 33% | -0.13R | -2.00R | 0.80 | mixed | Aggregate below standard, but see per-config split below |
 | ZONE-LIMITS | IDLE | 0 | — | — | — | — | — | 1.18 | Dry-run: 96 limit placements logged, no fills measurable yet |
-| TVO-TRADEIFY | IDLE | 0 | — | — | — | — | — | — | Armed 2026-07-10; graded once fills exist (then also vs Tradeify's 4% trail + 20% consistency) |
 | KURISKO-2020 | IDLE | 0 | — | — | — | — | — | 1.35 | Built + validated, not scheduled |
 
 **ORB per config (paper):** XAUUSD@Asia 5tr **+4.00R PF 3.00** · NAS100@Asia 4tr +0.00R PF 1.00 ·
@@ -141,5 +138,3 @@ two share grading thresholds, so a WATCH→PASS flip shows up in both).
   joining the ledger to `trades.csv` entry/SL/lots would let it be graded in R like the rest.
 - **ZONE-LIMITS fill simulation** — replay whether resting limits would have filled and at
   what R, so the dry-run gets a paper grade like ORB.
-- **TVO-TRADEIFY**: once fills exist, grade additionally against Tradeify's own standards
-  ($1,000 EOD-trail, 20% consistency, flat by 4:59pm ET).

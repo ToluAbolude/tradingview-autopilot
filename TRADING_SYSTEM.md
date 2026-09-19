@@ -214,8 +214,7 @@ _(Removed 2026-07-03: the 06:00 `morning_review_cron.sh` email — it had been s
 
 The system is a **read/decide/execute** pipeline: TradingView is a *chart-reading
 surface only* (via CDP), all trade decisions are made by Node decision-makers, and
-order execution is exclusively through broker Open APIs (cTrader primary, Tradovate
-for the prop account). A reliability layer keeps the headless browser and broker
+order execution uses the cTrader Open API. A reliability layer keeps the headless browser and broker
 tokens alive, and a reporting layer pushes journals/reports out. Data flows top-down
 through the layers below; reliability and reporting are cross-cutting.
 
@@ -245,7 +244,6 @@ flowchart TB
 
     subgraph EXEC["Execution layer"]
       BROKER["broker_ctrader.mjs<br/>assertOrderSafety · brackets · guards"]
-      TVO["broker_tradovate.mjs<br/>(Tradeify prop, when .tvo_live)"]
     end
 
     subgraph RELY["Reliability layer (cron)"]
@@ -264,7 +262,6 @@ flowchart TB
     CDP -->|"chart data, Pine graphics"| SCAN & CONFIRM & SELECT
     SELECT --> SCAN
     SCAN & CONFIRM & ORB --> BROKER
-    ORB --> TVO
     VALID -. "grades books offline" .-> CONFIRM
     WD -.-> CHROME
     SNAP -.-> CHROME
@@ -273,7 +270,6 @@ flowchart TB
 
   subgraph EXT["External services"]
     CTAPI[["cTrader Open API<br/>demo.ctraderapi.com:5035"]]
-    TVOAPI[["Tradovate REST<br/>demo.tradovateapi.com"]]
     NOTIONDB[["Notion trade journal"]]
     SMTP[["Gmail SMTP (msmtp)"]]
     HC[["healthchecks.io"]]
@@ -282,7 +278,6 @@ flowchart TB
   CC -->|"CDP over SSH tunnel"| CDP
   DEPLOY -->|"scp / ssh"| VM
   BROKER <-->|"TLS Protobuf"| CTAPI
-  TVO <--> TVOAPI
   NOTION --> NOTIONDB
   EOD --> SMTP
   WEEKLY --> SMTP
@@ -290,7 +285,7 @@ flowchart TB
 
   classDef ext fill:#1f2937,stroke:#9ca3af,color:#fff;
   classDef reliability fill:#4c1d95,stroke:#a78bfa,color:#fff;
-  class CTAPI,TVOAPI,NOTIONDB,SMTP,HC ext;
+  class CTAPI,NOTIONDB,SMTP,HC ext;
   class WD,SNAP,HB,TOK reliability;
 ```
 

@@ -29,19 +29,18 @@ const argv = process.argv.slice(2);
 const arg = (k, d) => { const a = argv.find(x => x.startsWith(`--${k}=`)); return a ? +a.split('=')[1] : d; };
 
 // ── Presets ──────────────────────────────────────────────────────────────────
-// Tradovate/futures-style 25k eval: dollar rules, TRAILING drawdown, no daily
+// Generic futures-style 25k eval: dollar rules, TRAILING drawdown, no daily
 // loss, effectively 1 phase. Numbers are typical for a $25k futures eval
-// (Apex/Tradeify-class: ~$1,500 target, ~$1,500 trailing) — CONFIRM your firm's.
+// (~$1,500 target, ~$1,500 trailing); override for the scenario being researched.
 const PRESET = (argv.find(x => x.startsWith('--preset=')) || '').split('=')[1] || '';
-const isL25 = PRESET === 'tradeify25kL';   // CONFIRMED rules 2026-07-10: Tradeify Lightning 25k
-const isFut25 = PRESET === 'tradovate25k' || PRESET === 'fut25' || isL25;
+const isFut25 = PRESET === 'fut25';
 
 // ── Firm rules (FTMO-style % defaults, or futures $ preset) ──────────────────
 const ACCOUNT   = arg('account', isFut25 ? 25000 : 100000);
-const FEE       = arg('fee', isL25 ? 300 : isFut25 ? 150 : 500);
+const FEE       = arg('fee', isFut25 ? 150 : 500);
 const STEPS     = arg('steps', isFut25 ? 1 : 2);
 const TARGET_USD = arg('targetUSD', isFut25 ? 1500 : 0);
-const MAXDD_USD  = arg('maxddUSD', isL25 ? 1000 : isFut25 ? 1500 : 0);
+const MAXDD_USD  = arg('maxddUSD', isFut25 ? 1500 : 0);
 const TARGET1   = TARGET_USD ? TARGET_USD / ACCOUNT * 100 : arg('target', 10);
 const TARGET2   = arg('target2', STEPS === 2 ? 5 : 0);
 const DAILY     = arg('daily', isFut25 ? 0 : 5);        // 0 = no daily loss limit
@@ -50,14 +49,13 @@ const TRAILING  = isFut25 || argv.includes('--trailing'); // futures DD trails t
 // EOD trailing: the DD floor is (best END-OF-DAY balance − maxDD$); it only
 // ratchets up at day close, but a breach still triggers INTRADAY if equity
 // touches the current floor. Gentler than intraday-high-water trailing.
-const EOD_TRAIL = isL25 || argv.includes('--eodtrail');
+const EOD_TRAIL = argv.includes('--eodtrail');
 // Consistency rule: best single day's profit must be ≤ CONSIST × total profit
 // at the moment you claim the target/payout — forces small, steady days.
-const CONSIST   = arg('consist', isL25 ? 0.20 : 0);
+const CONSIST   = arg('consist', 0);
 // Trail lock: the DD floor stops rising once it reaches start + TRAILCAP$.
-// Tradeify Lightning 25k: broker autoLiq shows trailingMaxDrawdownLimit=25100
-// → floor caps at start+$100 (confirmed via API 2026-07-10).
-const TRAILCAP  = arg('trailcap', isL25 ? 100 : Infinity);
+// Set --trailcap to model a capped trailing floor.
+const TRAILCAP  = arg('trailcap', Infinity);
 const TPD       = arg('tpd', 3);
 const MAXDAYS   = arg('maxdays', isFut25 ? 0 : 60);     // futures evals: no time cap
 const SIMS      = arg('sims', 30000);

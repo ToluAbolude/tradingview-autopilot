@@ -7,14 +7,11 @@
  * ORB edge, with a 2R target and SL at the opposite OR boundary.
  *
  * Roster (2026-07-02 rebuild): ONLY the configs that survived orb_oos.mjs — i.e.
- * positive in BOTH time-halves AND robust to removing their top-3 trades. Tuned
- * for a Tradovate 25k futures prop account (index/gold futures → MGC/MYM/MNQ/MES):
+ * positive in BOTH time-halves AND robust to removing their top-3 trades:
  *   ASIA   00:00 UTC → XAUUSD@2R (PF1.59), US30@2R (PF1.29), NAS100@1R (WR56%)
  *   LONDON 07:00 UTC → SPX500@2R (PF1.35 with trend)
- * DROPPED: NAS100-NY@2R (died out-of-sample), and the old FX/WTI roster (not the
- * futures instruments a Tradovate account trades). Risk = params.orbRiskPct
- * (default 0.5% — prop-appropriate; the prop sim needs small size to survive the
- * trailing drawdown). DRY-RUN logs are the forward-test to mirror on Tradovate.
+ * The active pairings are defined below. Risk = params.orbRiskPct (default 0.5%).
+ * DRY-RUN logs support forward testing before enabling cTrader execution.
  *
  * Cadence: run every 5 min via cron. Each tick, for any pairing whose breakout
  * window is currently open, it builds the opening range from cTrader M5 bars,
@@ -26,14 +23,6 @@
  *                         places NO orders. Run this for ~a week to confirm the
  *                         live edge before risking money.
  *   --live              — places real cTrader bracket orders (market entry + SL + TP).
- *
- * Tradovate routing (independent of --live): when the kill switch is ON
- * (env TVO_LIVE=on, or flag file /home/ubuntu/.tvo_live on the VM), every
- * breakout signal is ALSO routed to the Tradeify prop account via
- * broker_tradovate.mjs — whole-contract micro sizing from a $ risk budget
- * (params.tvoRiskUsd / env TVO_RISK_USD, default $100), distance-based
- * brackets (CFD→futures basis safe). Signals whose 1-contract risk exceeds
- * the bridge cap are skipped by the bridge's safety gate. Default OFF.
  *
  * Requires cTrader env (BROKER_PROVIDER=ctrader + CTRADER_* creds).
  */
@@ -54,7 +43,6 @@ const STATE_FILE  = join(DATA_ROOT, 'orb_state.json');
 const SIGNALS_LOG = join(DATA_ROOT, 'orb_signals.jsonl');
 
 const LIVE = process.argv.includes('--live');   // default: dry-run
-const TVO_LIVE = process.env.TVO_LIVE === 'on' || existsSync('/home/ubuntu/.tvo_live');   // Tradeify prop routing kill switch
 
 // ── Strategy config (from the 90d backtest) ──────────────────────────────────
 const OR_DURATION_MIN  = 30;
@@ -133,7 +121,7 @@ async function main() {
   const now = new Date();
   if (isCalendarWeekend(now)) { log('Weekend — ORB idle.'); return; }
 
-  log(`═══ ORB RUNNER (${LIVE ? 'LIVE' : 'DRY-RUN'}${TVO_LIVE ? ' + TVO-LIVE' : ''}) ═══`);
+  log(`═══ ORB RUNNER (${LIVE ? 'LIVE' : 'DRY-RUN'}) ═══`);
 
   const bridge = await import('./broker_ctrader.mjs');
   await bridge.connect();
@@ -228,20 +216,6 @@ async function main() {
         }
       } else {
         log(`  📝 DRY-RUN ${pairing.session} ${symbol} ${r.dir} ${lots}lots entry~${signal.entry} SL ${signal.sl} TP ${signal.tp} (risk ${riskPct}% = $${(equity*riskPct/100).toFixed(0)})`);
-      }
-
-      // ── Tradeify prop routing (independent kill switch, default OFF) ────────
-      if (TVO_LIVE) {
-        try {
-          const tvo = await import('./broker_tradovate.mjs');
-          const sz = tvo.sizeContracts({ symbol, entry: r.entry, slPrice: r.sl, riskUsd: params.tvoRiskUsd ?? +(process.env.TVO_RISK_USD || 100) });
-          const res = await tvo.placeOrder({ symbol, direction: r.dir, units: sz.units, entry: r.entry, tpPrice: tp, slPrice: r.sl });
-          signal.tvo = { placed: true, units: sz.units, riskUsd: res.riskUsd, fill: res.fillPrice, sl: res.sl, tp: res.tp };
-          log(`  ✅ TVO ${pairing.session} ${symbol} ${r.dir} ${sz.units}x fill ${res.fillPrice} SL ${res.sl} TP ${res.tp} (risk $${res.riskUsd.toFixed(0)})`);
-        } catch (e) {
-          signal.tvo = { placed: false, error: e.message };
-          log(`  ✗ TVO ${symbol}: ${e.message}`);
-        }
       }
 
       appendFileSync(SIGNALS_LOG, JSON.stringify(signal) + '\n');

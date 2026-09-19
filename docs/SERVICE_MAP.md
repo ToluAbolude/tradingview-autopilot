@@ -21,7 +21,6 @@ A strategy is plugged in as a JavaScript module, as JSON rules, or as a Pine scr
 | Both cTrader accounts are **hedging** (2118552 scanner, 2131377 experiment) | `ProtoOATraderReq` returns `accountType = HEDGED`, explicitly set | The broker allows several positions per symbol. Only the system's own one-position-per-symbol rule prevents it. The "NETTING account" comment at inline_trader step 12 is wrong. |
 | Orders carried no strategy tag until 2026-09-15 | No `label` on any `ProtoOANewOrderReq`; the proto supports it and returns it on positions | Fixed on `feat/strategy-plugins`: every order now carries its strategy id as `label`, `getPositions()` returns it, and `trail_runner` only trails its own strategy's positions. Positions opened before the change stay unlabeled. |
 | The 15M alignment gate still requires removed votes | `buildSetups` in `setup_finder.mjs`: `['A', 'B', 'T', 'L']`; A, B and T have not been emitted since 2026-08-21 | 90–210 setups/day rejected as "15M not aligned" against 0–4 emitted signals (VM log, Sep 4–15). **Still open**: this branch preserves behaviour exactly. |
-| The Tradovate prop account nets positions per contract | `broker_tradovate` reports `netPos` | Keep one strategy per contract there unless virtual positions are built. |
 
 ## How the parts connect
 
@@ -70,7 +69,7 @@ Market data ─► Context (bias, plan) ─► Strategy ─► Signal store
 |---|---|---|---|---|
 | 11 | Entry policy | Ordered veto filters, each returning ok or a reason | 23 checks in `inline_trader.attemptInlineTrade`; `daily_plan_gate.checkPlan`; `fib_veto.mjs`; manifest filters `prior_day_range` / `news_recent` (strategy_runner) | Strategy-specific checks (score, Trifecta, MTF depth) belong inside the confluence strategy. `applyPlanLevels` changes the trade from inside a filter — make that an explicit output. |
 | 12 | Trade construction | Signal → bracket: stop, targets, R:R, exit legs | Seven recipes: `buildSetups` H1 geometry, `applyPlanLevels`, inline_trader stop-floor widening and `RUNNER_EXIT` legs, `zone_limit_runner.decideOrder` (zone midpoint, ≥2R, tested), strategy_runner `target.r` (or the signal's own TP), ORB opposite boundary | Output `TradeIntent`; the recipe is chosen per manifest |
-| 13 | Position sizing | Lots from risk %, equity, stop distance and contract size | **`lib/sizing.mjs`**: `calcLots`, `splitLegs`, used by inline_trader, strategy_runner, zone_limit_runner, orb_runner, kurisko_flag_runner (six hand copies removed) | Still separate: `trade_notion_sync` risk maths, `broker_tradovate.sizeContracts` (futures) |
+| 13 | Position sizing | Lots from risk %, equity, stop distance and contract size | **`lib/sizing.mjs`**: `calcLots`, `splitLegs`, used by inline_trader, strategy_runner, zone_limit_runner, orb_runner, kurisko_flag_runner (six hand copies removed) | Still separate: `trade_notion_sync` risk maths |
 | 14 | Account risk | Limits shared by every strategy on one account | **`lib/exposure.mjs`** (positions per symbol, per strategy, opposite directions; `trading_params.exposure`, default = the old one-per-symbol rule), enforced in the safety gate, inline_trader step 12 and zone_limit_runner; daily loss kill switches in inline_trader, strategy_runner and ORB; zone_limit `maxTotal` | Per-strategy daily loss budget |
 | 15 | Safety gate | Rules no strategy can override: stop present and on the right side, minimum stop distance, lot caps, stale price, Sunday reopen, chart layer down | `broker_ctrader.assertOrderSafety` | It also holds the plan gate and fib veto (policy inside the broker adapter). Move them into the policy chain only once every runner uses the same pipeline. |
 
@@ -79,14 +78,14 @@ Market data ─► Context (bias, plan) ─► Strategy ─► Signal store
 | # | Service | Job | Code today | Next |
 |---|---|---|---|---|
 | 16 | Order management | Submit, modify, cancel; bracket attach and verify; multi-TP legs; resting limits; retry; recovering a lost position ID | `broker_ctrader.placeOrder` / `placeMultiTpPosition` / `cancelOrphanLimits`; inline_trader retry block; strategy_runner bracket-verify loop; zone_limit_runner resting-order state | `OrderRequest {clientOrderId, strategyId, …}` → `OrderResult {orderId, positionId, bracketed}` |
-| 17 | Broker adapters | One interface per broker | `broker_ctrader.mjs` (1,269 lines: socket, protobuf, safety, orders, history, bars), `broker_tradovate.mjs`, legacy TradingView-DOM `execute_trade.mjs`; chosen by `BROKER_PROVIDER` | Split transport from orders, history and bars |
+| 17 | Broker adapters | One interface per broker | `broker_ctrader.mjs` (1,269 lines: socket, protobuf, safety, orders, history, bars), legacy TradingView-DOM `execute_trade.mjs`; chosen by `BROKER_PROVIDER` | Split transport from orders, history and bars |
 | 18 | Accounts & credentials | Which account a job trades; secrets; token rotation | env files + wrappers (`run_scanner_job.sh` → 2118552, `run_confirm_job.sh` → 2131377); `ctrader_refresh.mjs`; `PLAN_GATE_ACCOUNT` defaulting to 2118552 | Account config: broker, credentials, risk budget, strategies |
 
 ### Layer 6 — After the trade
 
 | # | Service | Job | Code today | Next |
 |---|---|---|---|---|
-| 19 | Position management | Breakeven, trailing, partials, EOD carry-or-close, weekend flatten | `trail_runner.mjs` (trails only `TRAIL_OWNERS`, default `scanner_confluence`, plus unlabeled positions), `confirm_eod_close.mjs` (both accounts; logs each position's owner), `tvo_eod_flatten.sh`, `position_monitor.mjs` | Exit settings in the manifest instead of per-job env and account policy |
+| 19 | Position management | Breakeven, trailing, partials, EOD carry-or-close, weekend flatten | `trail_runner.mjs` (trails only `TRAIL_OWNERS`, default `scanner_confluence`, plus unlabeled positions), `confirm_eod_close.mjs` (both accounts; logs each position's owner), `position_monitor.mjs` | Exit settings in the manifest instead of per-job env and account policy |
 | 20 | Integrity guard | No position without both stop and target | `confirm_naked_guard.mjs`, both accounts every 5 min | Stays account-wide on purpose, so it runs even when management logic breaks |
 | 21 | Ledger & attribution | Broker deal → position → strategy, signal and plan zone → realised R | Positions carry the owning strategy id as `label`; `confirm_signals.jsonl` (experiment); `trades.csv` (scanner, known unreliable); `orb_signals.jsonl`; reconcile/pnl scripts | Reports read ownership from the label instead of side logs |
 
@@ -103,7 +102,7 @@ Market data ─► Context (bias, plan) ─► Strategy ─► Signal store
 - **Backtesting:** replays any strategy module over history with costs and out-of-sample splits. About 20 separate scripts exist today; `institutional/` (metrics, robustness checks, tests) is the template. It must run the same strategy modules as live, or backtest-vs-live comparisons can't be trusted.
 - **Chart host:** `tv_browser` (Chromium/Xvfb/CDP), x11vnc, the MCP server in `src/`. Chart reads and journal screenshots only — never orders.
 - **Scheduler:** the VM crontab plus `keepalive_scanner.sh`. The job wrappers are what bind a job to an account.
-- **Health & alerting:** `cdp_watchdog.sh`, `heartbeat.sh`, `snap_hold_guard.sh`, `tvo_session_check.sh`, email.
+- **Health & alerting:** `cdp_watchdog.sh`, `heartbeat.sh`, `snap_hold_guard.sh`, email.
 
 ## Accounts are compositions of services
 
@@ -194,7 +193,6 @@ The accounts are hedging, so this is a system rule, not a broker limit. Replace 
 - **Per strategy:** at most one open position per symbol by default. This keeps what the current rule was really for — the 2026-06-06 loop that fired one signal 11 times.
 - **Per account:** a cap on total risk per symbol across strategies, so three strategies agreeing don't triple exposure unless that is chosen; and opposite directions on one symbol blocked by default (two spreads for no net position), allowed per account when strategies should be free to disagree.
 - **Duplicate-order guard:** keyed by strategy + symbol instead of symbol alone.
-- **Tradovate:** one strategy per contract (net positions).
 
 ### Runtime shape
 

@@ -23,7 +23,7 @@ const TF_PERIOD = { '1': 'M1', '5': 'M5', '15': 'M15', '30': 'M30', '60': 'H1' }
 
 const OR_MIN = 30, BREAKOUT_H = 4, HOLD_UTC = 20;
 
-// The configs orb_backtest.mjs surfaced as edges (Tradovate-tradable).
+// The configs orb_backtest.mjs surfaced as edges (session ORB candidates).
 const CONFIGS = [
   { sym: 'XAUUSD', open: '00:00', R: 2, label: 'Gold  Asia  @2R' },
   { sym: 'NAS100', open: '13:30', R: 2, label: 'NAS100 NY   @2R' },
