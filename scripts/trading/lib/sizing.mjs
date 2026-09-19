@@ -16,11 +16,49 @@ export const LOT_CAPS = { FX: 3, METAL: 2, OIL: 5, INDEX: 10, CRYPTO: 3 };
 // Crypto never risks more than this % of equity, whatever riskPct asks for.
 export const CRYPTO_MAX_RISK_PCT = 1;
 
+// A trade may never risk more than this multiple of its budget. Floors are what break
+// it: oil's 3-lot minimum, the 0.01 minimum lot on a high-priced contract, a broker's
+// minimum volume. Measured 2026-09-19: BRENT 12-35x, XPTUSD 16-22x its budget.
+export const MAX_OVERRISK = 2;
+
 const MIN_LOT = 0.01, LOT_STEP = 0.01;
 const floorLots = (lots, cap) => Math.min(Math.max(Math.floor(lots / LOT_STEP) * LOT_STEP, MIN_LOT), cap);
 
-/** Lots such that a stop-out at `sl` loses about riskPct% of equity (cTrader contract sizes). */
+/**
+ * Dollars one lot makes or loses per 1.0 move in price — the contract sizes rawLots
+ * uses. null = no contract size we trust (metals other than gold and silver).
+ */
+export function contractValue(symbol) {
+  const s = String(symbol).toUpperCase();
+  switch (instrumentClass(s)) {
+    case 'INDEX':  return 1;                        // $1 per point per lot
+    case 'CRYPTO': return 1;                        // 1 lot = 1 coin
+    case 'OIL':    return 1000;                     // $10 per 0.01
+    case 'METAL':  return /XAU|GOLD/.test(s) ? 100 : /XAG|SILVER/.test(s) ? 5000 : null;
+  }
+  return /JPY/.test(s) ? 650 : 100_000;             // $6.50 per 0.01 / $10 per 0.0001
+}
+
+/**
+ * Lots such that a stop-out at `sl` loses about riskPct% of equity, or 0 when no
+ * tradable size can: a floor would risk more than MAX_OVERRISK x the budget, or the
+ * contract size is unknown. 0 means SKIP THE TRADE — assertOrderSafety rejects it.
+ * Under-sizing (a cap binding) still trades: it risks less, never more.
+ */
 export function calcLots(symbol, riskPct, equity, entry, sl) {
+  const lots   = rawLots(symbol, riskPct, equity, entry, sl);
+  const slDist = Math.abs(entry - sl);
+  if (slDist === 0) return lots;                    // invalid stop; assertOrderSafety rejects it
+  const cv = contractValue(symbol);
+  if (cv == null) return 0;
+  let budget = equity * (riskPct / 100);
+  if (instrumentClass(symbol) === 'CRYPTO') budget = Math.min(budget, equity * CRYPTO_MAX_RISK_PCT / 100);
+  // 1e-9 tolerance: float noise (1.1 - 1.09 = 0.010000000000000009) must not flip a trade
+  // sitting exactly at the limit.
+  return lots * cv * slDist > MAX_OVERRISK * budget * (1 + 1e-9) ? 0 : lots;
+}
+
+function rawLots(symbol, riskPct, equity, entry, sl) {
   const riskAmt = equity * (riskPct / 100);
   const slDist  = Math.abs(entry - sl);
   if (slDist === 0) return MIN_LOT;
@@ -42,7 +80,7 @@ export function calcLots(symbol, riskPct, equity, entry, sl) {
     case 'METAL':
       if (/XAU|GOLD/.test(sym))   return floorLots(riskAmt / (100 * slDist), LOT_CAPS.METAL);    // 1 lot = 100 oz
       if (/XAG|SILVER/.test(sym)) return floorLots(riskAmt / (5000 * slDist), LOT_CAPS.METAL);   // 1 lot = 5000 oz
-      // ponytail: no contract size known for other metals — sized as FX, exactly as before.
+      // Other metals have no contract size here; calcLots refuses them (contractValue null).
       break;
   }
   if (/JPY/.test(sym)) return floorLots(riskAmt / (6.50 * (slDist / 0.01)), LOT_CAPS.FX);
