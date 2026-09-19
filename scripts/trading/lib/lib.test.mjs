@@ -46,12 +46,24 @@ test('sizing risks the right amount per asset class', () => {
   near(calcLots('NAS100', 1, 10000, 24000, 23970), 3.33);     // $100 / 30 pts
   near(calcLots('USDJPY', 1, 10000, 147.0, 146.6), 0.38);     // $100 / (6.5 × 40 pips)
   assert.equal(calcLots('NAS100', 5, 10000, 24000, 23995), 10); // index cap
-  assert.equal(calcLots('WTI', 0.1, 10000, 70, 69), 3);         // oil: whole lots, min 3
+  assert.equal(calcLots('WTI', 5, 100000, 70, 69), 5);          // oil: whole lots, at budget
+  assert.equal(calcLots('WTI', 0.1, 10000, 70, 69), 0);         // $10 budget, 3-lot floor = $3,000 → refuse
   assert.equal(calcLots('EURUSD', 1, 10000, 1.1, 1.1), 0.01);   // zero stop distance
 });
 
 test('crypto risk is capped at 1% of equity', () => {
   assert.equal(calcLots('BTCUSD', 5, 10000, 60000, 59550), calcLots('BTCUSD', 1, 10000, 60000, 59550));
+});
+
+test('sizing refuses trades a floor would over-risk, and only those', () => {
+  // A minimum-lot floor that forces more than 2x the budget: skip, don't trade it.
+  assert.equal(calcLots('XAUUSD', 0.01, 10000, 4300, 4292), 0);   // $1 budget, 0.01 lot = $8
+  // Exactly 2x is allowed: $5 budget, 100-pip stop, 0.01 lot = $10.
+  assert.equal(calcLots('EURUSD', 0.05, 10000, 1.1, 1.09), 0.01);
+  // No contract size we trust: refuse rather than size platinum as forex (was 16-22x).
+  assert.equal(calcLots('XPTUSD', 1, 10000, 1585, 1583), 0);
+  // Under-sizing still trades — a cap binding risks less, never more.
+  assert.equal(calcLots('ADAUSD', 1, 10000, 0.18, 0.1782), 3);
 });
 
 test('splitLegs spreads remainders onto the tail legs', () => {

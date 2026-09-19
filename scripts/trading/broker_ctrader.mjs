@@ -33,7 +33,7 @@ import { fibVetoState, checkFibVeto } from './fib_veto.mjs';
 import { instrumentClass as _instrumentClass, MIN_SL_FRAC } from './lib/instruments.mjs';
 import { isSundayReopen } from './lib/clock.mjs';
 import { exposurePolicy, exposureVerdict } from './lib/exposure.mjs';
-import { legVolumes } from './lib/sizing.mjs';
+import { legVolumes, MAX_OVERRISK } from './lib/sizing.mjs';
 const require = createRequire(import.meta.url);
 const protobuf = require('protobufjs');
 
@@ -449,6 +449,12 @@ export async function assertOrderSafety({ symbol, direction, units, entry, slPri
   const cls = _instrumentClass(symbol);
   const dir = (direction === 'long' || direction === 'buy') ? 'long' : 'short';
 
+  // calcLots returns 0 when no tradable size fits the risk budget (lib/sizing.mjs).
+  // Checked first: placing it anyway would send the broker's minimum volume instead.
+  if (Number.isFinite(units) && units <= 0) {
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: no safe size (${units} lots) — the smallest tradable size would risk more than ${MAX_OVERRISK}x the budget`);
+  }
+
   if (!Number.isFinite(slPrice) || slPrice <= 0) {
     throw new Error(`ORDER_SAFETY_REJECT ${symbol}: missing/invalid slPrice (${slPrice})`);
   }
@@ -618,6 +624,11 @@ export async function placeOrder({ symbol, direction, units, entry, tpPrice, slP
   const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
   const rawVol = Math.round(units * meta.lotSize);
   const volume = Math.max(minV, Math.floor(rawVol / step) * step);
+  // The broker's minimum volume can inflate a small risk-sized order many times over —
+  // a floor calcLots can't see, because only the broker knows its minimum.
+  if (volume > MAX_OVERRISK * units * meta.lotSize) {
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: broker minimum volume ${volume} is ${(volume / (units * meta.lotSize)).toFixed(1)}x the risk-sized ${units} lots`);
+  }
   const owner = label ? { label: String(label).slice(0, 100) } : {};   // which strategy opened it (cTrader max 100)
 
   // ── LIMIT entry: rest a pending order AT the level (S&R zone), bracket relative
@@ -729,6 +740,9 @@ export async function placeMultiTpPosition({ symbol, direction, totalUnits, legU
   const minV = meta.minVolume  > 0 ? meta.minVolume  : step;
   const _quantize = (v) => Math.max(minV, Math.floor(v / step) * step);
   const totalVol   = _quantize(Math.round(totalUnits * meta.lotSize));
+  if (totalVol > MAX_OVERRISK * totalUnits * meta.lotSize) {        // broker minimum inflated it
+    throw new Error(`ORDER_SAFETY_REJECT ${symbol}: broker minimum volume ${totalVol} is ${(totalVol / (totalUnits * meta.lotSize)).toFixed(1)}x the risk-sized ${totalUnits} lots`);
+  }
 
   // Per-leg volume. Honors a caller's legUnits (oil's uneven int split, e.g.
   // 5 → [1,2,2]) and, crucially, leaves a DELIBERATE partial partial — see
