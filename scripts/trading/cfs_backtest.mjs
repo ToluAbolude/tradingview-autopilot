@@ -20,6 +20,7 @@
  *   node scripts/trading/cfs_backtest.mjs --strat=marco_liquidity --tf=H4 --years=5 --oos
  */
 import { writeFileSync } from 'fs';
+import { pathToFileURL } from 'url';
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const a = argv.find(x => x.startsWith(`--${k}=`)); return a ? a.split('=')[1] : d; };
@@ -29,7 +30,7 @@ const TF    = arg('tf', 'H1');
 const YEARS = parseFloat(arg('years', '3'));
 const OUT   = arg('out', `/home/ubuntu/trading-data/cfs_${STRAT}_${TF}.json`);
 
-const SPREADS = { XPTUSD: 0.80, XAUUSD: 0.30, XAGUSD: 0.03, XPDUSD: 1.50, WTI: 0.03,
+export const SPREADS = { XPTUSD: 0.80, XAUUSD: 0.30, XAGUSD: 0.03, XPDUSD: 1.50, WTI: 0.03,
                   NAS100: 1.5, USTEC: 1.5, US30: 3.0, US500: 0.5, SPX500: 0.5, GER40: 1.0,
                   JP225: 7.0, UK100: 1.0, AUS200: 1.5, BTCUSD: 15, ETHUSD: 1.2 };
 const SLIP_FRAC = parseFloat(arg('slip', '0.02'));
@@ -61,7 +62,7 @@ export function atr14(bars) {
 //                                            touch before fill, or on expiry)
 //   beTrigger                              — optional: once a bar CLOSES past this
 //                                            price, stop moves to entry (breakeven)
-function simulate(bars, atr, sigs, cost) {
+export function simulate(bars, atr, sigs, cost) {
   const n = bars.length;
   const acc = { n: 0, w: 0, l: 0, grossWin: 0, grossLoss: 0, netR: 0, grossR: 0, costR: 0 };
   const trades = [];
@@ -119,7 +120,7 @@ function recordTrade(acc, trades, t, dir, grossR, costR, dur) {
   if (net > 0) { acc.w++; acc.grossWin += net; } else { acc.l++; acc.grossLoss += Math.abs(net); }
   trades.push({ t, dir, grossR, costR, netR: net, dur });
 }
-function statsFrom(trades) {
+export function statsFrom(trades) {
   const acc = { n: 0, w: 0, l: 0, grossWin: 0, grossLoss: 0, netR: 0, grossR: 0, costR: 0 };
   for (const t of trades) {
     acc.n++; acc.grossR += t.grossR; acc.costR += t.costR; acc.netR += t.netR;
@@ -234,4 +235,7 @@ async function main() {
   console.log('\nNote: R-multiples, SL-first, cost-adjusted. net−top3 = fragility (net R with 3 best trades removed).');
   process.exit(0);
 }
-main().catch(e => { console.error(e); process.exit(1); });
+// Run only as a script, so strategy_lab.mjs can import the simulator without starting a run.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
